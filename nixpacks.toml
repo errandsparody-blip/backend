@@ -1,0 +1,14 @@
+# Pin Node + pnpm so Railway's autodetect doesn't drift between deploys.
+# Nixpacks reads .nvmrc, but pinning here is the explicit form Railway prefers.
+
+[phases.setup]
+nixPkgs = ["nodejs_20", "openssl"]
+
+[phases.install]
+cmds = ["corepack enable", "pnpm install --frozen-lockfile"]
+
+[phases.build]
+cmds = ["pnpm prisma generate", "pnpm build"]
+
+[start]
+cmd = "pnpm prisma migrate deploy && node dist/main.js"

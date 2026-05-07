@@ -28,6 +28,16 @@
   "prisma": {
     "seed": "ts-node prisma/seed.ts"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@nestjs/core",
+      "@prisma/client",
+      "@prisma/engines",
+      "@sentry/profiling-node",
+      "argon2",
+      "prisma"
+    ]
+  },
   "dependencies": {
     "@nestjs/common": "^10.4.4",
     "@nestjs/config": "^3.2.3",
