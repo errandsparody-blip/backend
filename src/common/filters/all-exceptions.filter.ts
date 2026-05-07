@@ -103,6 +103,19 @@ export class AllExceptionsFilter implements ExceptionFilter {
       ...(code ? { code } : {}),
     };
 
+    // Defence in depth: if some upstream middleware (Sentry, helmet, a stream
+    // pipe) has already started the response, do NOT try to write the error
+    // body. Calling res.setHeader after headersSent is true throws
+    // ERR_HTTP_HEADERS_SENT, which Node treats as uncaught and kills the
+    // process. Better to log and bail than crash the container.
+    if (res.headersSent) {
+      this.logger.warn(
+        { correlationId, status, code },
+        "Exception thrown after response started; skipping body write",
+      );
+      return;
+    }
+
     res.status(status).type("application/problem+json").send(body);
   }
 }
