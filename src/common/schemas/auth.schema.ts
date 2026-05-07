@@ -80,7 +80,19 @@ export const resetPasswordSchema = z.object({
 });
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 
+// Email verification — 6-digit code typed into the form, not a click-through
+// link. Code is delivered via email; the form posts (email, code) back here.
+export const verifyEmailCodeSchema = z
+  .string()
+  .regex(/^\d{6}$/, "Enter the 6-digit code from your email.");
+
 export const verifyEmailSchema = z.object({
-  token: z.string().min(20),
+  email: emailSchema,
+  code: verifyEmailCodeSchema,
 });
 export type VerifyEmailInput = z.infer<typeof verifyEmailSchema>;
+
+export const resendVerifyEmailSchema = z.object({
+  email: emailSchema,
+});
+export type ResendVerifyEmailInput = z.infer<typeof resendVerifyEmailSchema>;

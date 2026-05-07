@@ -9,11 +9,9 @@
 import {
   Body,
   Controller,
-  Get,
   HttpCode,
   HttpStatus,
   Post,
-  Query,
   Req,
   Res,
   UseGuards,
@@ -31,6 +29,7 @@ import {
   forgotPasswordSchema,
   loginSchema,
   recoveryMfaSchema,
+  resendVerifyEmailSchema,
   resetPasswordSchema,
   signupSchema,
   verifyEmailSchema,
@@ -39,6 +38,7 @@ import {
   type ForgotPasswordInput,
   type LoginInput,
   type RecoveryMfaInput,
+  type ResendVerifyEmailInput,
   type ResetPasswordInput,
   type SignupInput,
   type VerifyEmailInput,
@@ -79,11 +79,41 @@ export class AuthController {
     return { ok: true, userId };
   }
 
+  /**
+   * Verify email with the 6-digit code emailed at signup.
+   *
+   *   POST /v1/auth/verify-email   { email, code }
+   *     200 { ok: true }                   verified, status flips to ACTIVE
+   *     400 { code: "verify_invalid" }     wrong code, expired, or no pending account
+   *
+   * Throttled at 10/min/IP — combined with a 6-digit (10^6) keyspace and the
+   * 15-minute window, brute force is impractical without taking the throttle.
+   */
   @Public()
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
-  @Get("verify-email")
-  async verifyEmail(@Query(new ZodValidationPipe(verifyEmailSchema)) q: VerifyEmailInput) {
-    await this.auth.verifyEmail(q.token);
+  @Post("verify-email")
+  @HttpCode(HttpStatus.OK)
+  async verifyEmail(
+    @Body(new ZodValidationPipe(verifyEmailSchema)) body: VerifyEmailInput,
+  ): Promise<{ ok: true }> {
+    await this.auth.verifyEmail(body.email, body.code);
+    return { ok: true };
+  }
+
+  /**
+   * Issue a fresh verification code to an account stuck in PENDING. Always
+   * returns 200; never confirms whether the email is registered or pending.
+   * Throttled at 3/hour/IP — generous enough for a real user who didn't get
+   * the first email, tight enough to prevent spamming an inbox.
+   */
+  @Public()
+  @Throttle({ default: { limit: 3, ttl: 60 * 60_000 } })
+  @Post("resend-verify-email")
+  @HttpCode(HttpStatus.OK)
+  async resendVerifyEmail(
+    @Body(new ZodValidationPipe(resendVerifyEmailSchema)) body: ResendVerifyEmailInput,
+  ): Promise<{ ok: true }> {
+    await this.auth.resendVerifyEmail(body.email);
     return { ok: true };
   }
 

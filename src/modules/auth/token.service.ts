@@ -11,7 +11,7 @@
  * httpOnly + Secure + SameSite=Strict cookie.
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomInt } from "node:crypto";
 
 import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
@@ -198,11 +198,30 @@ export class TokenService {
   }
 
   /**
-   * Issue a short-lived single-purpose token (e.g., for email verify, password
-   * reset). Returns plaintext + sha256 hash for storage on the user row.
+   * Issue a short-lived single-purpose token (e.g., for password reset link).
+   * Returns plaintext + sha256 hash for storage on the user row.
    */
   generateSingleUseToken(byteLength = 32): { plaintext: string; hash: string } {
     const plaintext = this.generateOpaqueToken(byteLength);
+    return { plaintext, hash: this.crypto.sha256(plaintext) };
+  }
+
+  /**
+   * Issue a short-lived numeric verification code. Used for email verification
+   * (and any other "type the code from your inbox" flow). Returns plaintext +
+   * sha256 hash for storage; we never persist the plaintext.
+   *
+   * Uses crypto.randomInt for a uniform distribution across the [0, 10^digits)
+   * range. The plaintext is left-padded with zeros so a code starting with 0
+   * is rendered with all six digits — vital because users will type it in.
+   */
+  generateNumericCode(digits = 6): { plaintext: string; hash: string } {
+    if (digits < 4 || digits > 10) {
+      throw new Error("Numeric code length must be between 4 and 10 digits.");
+    }
+    const max = 10 ** digits; // exclusive
+    const n = randomInt(0, max);
+    const plaintext = n.toString().padStart(digits, "0");
     return { plaintext, hash: this.crypto.sha256(plaintext) };
   }
 

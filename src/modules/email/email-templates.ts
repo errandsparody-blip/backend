@@ -94,19 +94,30 @@ function shell(args: { eyebrow: string; title: string; bodyHtml: string; cta?: {
 // Auth
 // ---------------------------------------------------------------------------
 
-export function emailVerifyTemplate(args: { email: string; verifyUrl: string }): RenderedEmail {
+export function emailVerifyTemplate(args: { email: string; code: string }): RenderedEmail {
+  // Render the 6-digit code as a large, monospaced, easy-to-copy block. We
+  // render it as plain text inside a styled div so it survives every email
+  // client — Gmail, Outlook, native iOS Mail. No clickable link to mangle.
+  const codeBlock = `
+    <div style="margin:8px 0 16px 0;padding:20px 24px;background:#F1EFE9;border:1px solid #E2DFD7;border-radius:6px;text-align:center;">
+      <div style="font-family:'JetBrains Mono',Menlo,Consolas,monospace;font-size:32px;font-weight:600;letter-spacing:8px;color:#0A0A0A;">${escape(args.code)}</div>
+    </div>`;
+
   return {
-    subject: "Verify your USA Errands email",
+    subject: `${args.code} is your USA Errands verification code`,
     html: shell({
       eyebrow: "[01] Verify your email",
-      title: "One last step",
-      bodyHtml: `<p style="margin:0 0 12px 0;">We just need to confirm <strong>${escape(args.email)}</strong> is yours. Click below within 24 hours to verify.</p>
+      title: "Your verification code",
+      bodyHtml: `<p style="margin:0 0 12px 0;">Enter this code on the verification screen to confirm <strong>${escape(args.email)}</strong>.</p>
+        ${codeBlock}
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">The code expires in 15 minutes and only works once.</p>
         <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">If you didn't sign up, ignore this email — your address won't be added.</p>`,
-      cta: { label: "Verify email", href: args.verifyUrl },
     }),
     text:
-      `Verify your USA Errands email\n\nWe need to confirm ${args.email} is yours. ` +
-      `Open this link within 24 hours:\n${args.verifyUrl}\n\n` +
+      `Your USA Errands verification code\n\n` +
+      `Enter this code on the verification screen to confirm ${args.email}:\n\n` +
+      `    ${args.code}\n\n` +
+      `The code expires in 15 minutes and only works once.\n\n` +
       `If you didn't sign up, ignore this email.`,
   };
 }

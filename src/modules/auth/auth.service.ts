@@ -8,6 +8,8 @@
  * in Implementation Plan §17.1.
  */
 
+import { timingSafeEqual } from "node:crypto";
+
 import * as argon2 from "argon2";
 import {
   BadRequestException,
@@ -110,7 +112,11 @@ export class AuthService {
     await this.hibp.assertNotPwned(input.password);
     const passwordHash = await argon2.hash(input.password, ARGON2_OPTIONS);
 
-    const { plaintext: emailToken, hash: emailTokenHash } = this.tokens.generateSingleUseToken();
+    // 6-digit numeric code, hashed for storage. Plaintext goes in the email
+    // body; the user types it back into the verify form. Expires in 15 minutes
+    // — short enough to limit a leaked code's usefulness, long enough that an
+    // email queued or briefly delayed still arrives in time.
+    const { plaintext: emailCode, hash: emailTokenHash } = this.tokens.generateNumericCode(6);
 
     // Create the vendor + wallet + user atomically. If any fails, none persist.
     const { userId } = await this.prisma.$transaction(async (tx) => {
@@ -133,7 +139,7 @@ export class AuthService {
           vendorId: vendor.id,
           status: UserStatus.PENDING_EMAIL_VERIFICATION,
           emailVerifyTokenHash: emailTokenHash,
-          emailVerifyExpiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24), // 24 h
+          emailVerifyExpiresAt: new Date(Date.now() + 1000 * 60 * 15), // 15 min
         },
         select: { id: true },
       });
@@ -143,12 +149,12 @@ export class AuthService {
 
     const user = { id: userId };
 
-    // Send the verify email — best effort. The token is the only way for the
+    // Send the verify email — best effort. The code is the only way for the
     // user to activate the account so we don't want to fail the signup, but
     // we DO surface delivery failure on the audit trail (EmailService logs it).
     const tpl = emailVerifyTemplate({
       email: input.email,
-      verifyUrl: `${this.cfg.WEB_PUBLIC_URL}/verify-email?token=${encodeURIComponent(emailToken)}`,
+      code: emailCode,
     });
     await this.email.send({
       to: input.email,
@@ -172,17 +178,46 @@ export class AuthService {
     return { userId: user.id };
   }
 
-  async verifyEmail(token: string): Promise<void> {
-    const tokenHash = this.crypto.sha256(token);
-    const user = await this.prisma.user.findFirst({
-      where: { emailVerifyTokenHash: tokenHash, emailVerifyExpiresAt: { gt: new Date() } },
-    });
-    if (!user) {
+  /**
+   * Verify a user's email by 6-digit code. Looks up the user by email,
+   * compares the stored sha256 hash to the hash of the submitted code, and on
+   * match flips status → ACTIVE.
+   *
+   * Security:
+   *   - Constant-time comparison via timingSafeEqual on the SHA-256 hashes.
+   *   - Return identical `verify_invalid` for "no such user", "wrong code",
+   *     "expired", or "already verified" so attackers can't enumerate via
+   *     this endpoint. The throttler caps brute-force at 10/min/IP.
+   *   - Code is single-use: cleared on success, regardless of subsequent
+   *     attempts to replay it.
+   */
+  async verifyEmail(email: string, code: string): Promise<void> {
+    const codeHash = this.crypto.sha256(code);
+    const user = await this.prisma.user.findUnique({ where: { email } });
+
+    // Always do the constant-time comparison even when the user doesn't exist
+    // or has no pending verification, against a dummy hash, so timing doesn't
+    // leak existence.
+    const storedHash = user?.emailVerifyTokenHash ?? "x".repeat(64);
+    const submittedBuf = Buffer.from(codeHash, "hex");
+    const storedBuf = Buffer.from(storedHash, "hex");
+    const sameLen = submittedBuf.length === storedBuf.length;
+    const matches = sameLen && timingSafeEqual(submittedBuf, storedBuf);
+
+    const expired = !user?.emailVerifyExpiresAt || user.emailVerifyExpiresAt <= new Date();
+    const valid =
+      !!user &&
+      user.status === UserStatus.PENDING_EMAIL_VERIFICATION &&
+      !expired &&
+      matches;
+
+    if (!valid || !user) {
       throw new BadRequestException({
-        message: "Verification link is invalid or has expired.",
+        message: "That code is invalid or has expired.",
         code: "verify_invalid",
       });
     }
+
     await this.prisma.user.update({
       where: { id: user.id },
       data: {
@@ -196,6 +231,49 @@ export class AuthService {
       actorId: user.id,
       actorRole: user.role,
       action: "auth.email_verified",
+      resourceType: "user",
+      resourceId: user.id,
+    });
+  }
+
+  /**
+   * Issue a fresh verification code to a user whose email is still pending.
+   * Always returns void — never confirms account existence to the caller.
+   *
+   * If the email matches a still-pending account, we generate a new code,
+   * overwrite the stored hash + expiry, and send a fresh email. If the email
+   * matches an already-verified account, an inactive account, or no account
+   * at all, we silently no-op. The throttler caps abuse at 3 / hour / IP.
+   */
+  async resendVerifyEmail(email: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user || user.status !== UserStatus.PENDING_EMAIL_VERIFICATION) {
+      return; // silent no-op — never enumerate
+    }
+
+    const { plaintext: code, hash: codeHash } = this.tokens.generateNumericCode(6);
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerifyTokenHash: codeHash,
+        emailVerifyExpiresAt: new Date(Date.now() + 1000 * 60 * 15),
+      },
+    });
+
+    const tpl = emailVerifyTemplate({ email, code });
+    await this.email.send({
+      to: email,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+      type: "auth.email_verify",
+      userId: user.id,
+    });
+
+    await this.audit.log({
+      actorId: user.id,
+      actorRole: user.role,
+      action: "auth.email_verify_resent",
       resourceType: "user",
       resourceId: user.id,
     });
