@@ -29,7 +29,6 @@
 import { Test, type TestingModule } from "@nestjs/testing";
 import type { INestApplication } from "@nestjs/common";
 import { ValidationPipe, VersioningType } from "@nestjs/common";
-import * as argon2 from "argon2";
 import cookieParser from "cookie-parser";
 import { authenticator } from "otplib";
 import { randomUUID } from "node:crypto";

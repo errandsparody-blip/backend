@@ -196,7 +196,9 @@ describe("TokenService", () => {
   it("detects refresh-token reuse and revokes every active session for the user", async () => {
     const user = seedUser();
     const a = await svc.issueRefreshToken(user, {});
-    const b = await svc.issueRefreshToken(user, {});
+    // Issue a second session so we can prove the theft-detection revokes ALL
+    // sessions in the user's family, not just the one whose token was reused.
+    await svc.issueRefreshToken(user, {});
     expect(prisma.sessions).toHaveLength(2);
 
     // Rotate the first session — the original token is now in rotatedHashes.

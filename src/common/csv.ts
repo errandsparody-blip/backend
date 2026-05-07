@@ -55,7 +55,7 @@ export async function streamCsv(
 
 export function csvHeaders(filename: string): Record<string, string> {
   // Ensure the filename is safe for the Content-Disposition header.
-  const safe = filename.replace(/[^A-Za-z0-9._\-]/g, "_");
+  const safe = filename.replace(/[^A-Za-z0-9._-]/g, "_");
   return {
     "Content-Type": "text/csv; charset=utf-8",
     "Content-Disposition": `attachment; filename="${safe}"`,

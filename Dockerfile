@@ -73,15 +73,19 @@ COPY package.json pnpm-lock.yaml ./
 COPY .npmrc* ./
 RUN pnpm install --frozen-lockfile --prod
 
-# Bring the generated Prisma client + Prisma CLI bin from the builder so we
-# can run `prisma migrate deploy` at container start.
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
-
 # The compiled application + the Prisma schema/migrations directory.
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/prisma ./prisma
+
+# Generate the Prisma client in the runner stage. Doing this here (instead of
+# COPY --from=builder /app/node_modules/.prisma) avoids a pnpm-specific issue:
+# pnpm symlinks .prisma into its content-addressable store at a hashed path,
+# and Docker COPY can't follow a symlink that points outside the source
+# directory it's resolving. Running `prisma generate` in the prod-installed
+# node_modules is fast (~5s) and produces a real, copyable directory.
+
+# Generate the Prisma client now that prisma/ + node_modules are in place.
+RUN pnpm prisma generate
 
 # Drop privileges before exec.
 RUN chown -R app:app /app

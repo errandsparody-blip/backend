@@ -122,12 +122,6 @@ export class TrackingController {
     // tracking number (which the carrier publishes anyway). First name only.
     const firstName = order.recipientName.split(/\s+/)[0] ?? "Recipient";
 
-    // Pluck the most recent in_transit event's location, if any.
-    const lastInTransit = order.events
-      .filter((e) => e.type === "carrier.in_transit" || e.type === "carrier.out_for_delivery")
-      .pop();
-    const lastMeta = lastInTransit?.metadata as { location?: { city?: string; state?: string } } | undefined;
-
     return {
       trackingNumber: order.trackingNumber!,
       carrier: order.carrier,
