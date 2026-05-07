@@ -45,7 +45,22 @@ const ConfigSchema = z.object({
   // Server
   API_PORT: z.coerce.number().int().positive().default(4000),
   API_PUBLIC_URL: z.string().url(),
+  /// Canonical web origin — used in email templates and as the *primary*
+  /// CORS allow-list entry. Must be a single URL.
   WEB_PUBLIC_URL: z.string().url(),
+  /// Optional comma-separated list of additional origins to allow via CORS.
+  /// Useful for serving both apex + www, preview deployments, or staging
+  /// reviewers. Each value must be a full origin (https://example.com), no
+  /// trailing slash. Empty / unset = only WEB_PUBLIC_URL is allowed.
+  WEB_ALLOWED_ORIGINS: z
+    .string()
+    .optional()
+    .transform((s) =>
+      (s ?? "")
+        .split(",")
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0),
+    ),
 
   // Database / Redis
   DATABASE_URL: z.string().min(1),

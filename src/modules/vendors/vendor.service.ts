@@ -21,6 +21,14 @@ export interface VendorProfile {
   agreementVersion: string | null;
   status: VendorStatus;
   createdAt: Date;
+
+  // Public social presence — surfaced so the vendor can see what they've set
+  // and the admin reviewer can verify it. All optional.
+  instagramHandle: string | null;
+  tiktokHandle: string | null;
+  xHandle: string | null;
+  websiteUrl: string | null;
+  socialVerifiedAt: Date | null;
 }
 
 @Injectable()
@@ -42,27 +50,72 @@ export class VendorService {
       agreementVersion: vendor.agreementVersion,
       status: vendor.status,
       createdAt: vendor.createdAt,
+      instagramHandle: vendor.instagramHandle,
+      tiktokHandle: vendor.tiktokHandle,
+      xHandle: vendor.xHandle,
+      websiteUrl: vendor.websiteUrl,
+      socialVerifiedAt: vendor.socialVerifiedAt,
     };
   }
 
+  /**
+   * Update the vendor's editable profile fields.
+   *
+   * Social-handle changes RESET the social verification stamp — once a vendor
+   * edits any handle, the admin's previous "I checked, they look real" call
+   * is no longer valid against the new profile. The reviewer queue picks the
+   * vendor back up automatically.
+   */
   async updateProfile(
     vendorId: string,
     actorId: string,
-    patch: { businessName?: string },
+    patch: {
+      businessName?: string;
+      instagramHandle?: string | null;
+      tiktokHandle?: string | null;
+      xHandle?: string | null;
+      websiteUrl?: string | null;
+    },
   ): Promise<VendorProfile> {
     const before = await this.prisma.vendor.findUnique({ where: { id: vendorId } });
     if (!before) throw new NotFoundException();
+
+    const handleChanged =
+      (patch.instagramHandle !== undefined && patch.instagramHandle !== before.instagramHandle) ||
+      (patch.tiktokHandle !== undefined && patch.tiktokHandle !== before.tiktokHandle) ||
+      (patch.xHandle !== undefined && patch.xHandle !== before.xHandle) ||
+      (patch.websiteUrl !== undefined && patch.websiteUrl !== before.websiteUrl);
+
     const updated = await this.prisma.vendor.update({
       where: { id: vendorId },
-      data: { ...patch },
+      data: {
+        ...patch,
+        // Re-verification required after any social edit.
+        ...(handleChanged
+          ? { socialVerifiedAt: null, socialVerifiedBy: null }
+          : {}),
+      },
     });
     await this.audit.log({
       actorId,
       action: "vendor.profile_updated",
       resourceType: "vendor",
       resourceId: vendorId,
-      beforeState: { businessName: before.businessName },
-      afterState: { businessName: updated.businessName },
+      beforeState: {
+        businessName: before.businessName,
+        instagramHandle: before.instagramHandle,
+        tiktokHandle: before.tiktokHandle,
+        xHandle: before.xHandle,
+        websiteUrl: before.websiteUrl,
+      },
+      afterState: {
+        businessName: updated.businessName,
+        instagramHandle: updated.instagramHandle,
+        tiktokHandle: updated.tiktokHandle,
+        xHandle: updated.xHandle,
+        websiteUrl: updated.websiteUrl,
+        socialReverificationRequired: handleChanged,
+      },
     });
     return this.getProfile(vendorId);
   }

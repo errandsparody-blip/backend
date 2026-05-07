@@ -176,6 +176,56 @@ export function kycApprovedTemplate(args: { businessName: string }): RenderedEma
   };
 }
 
+export function kycResubmissionTemplate(args: {
+  businessName: string;
+  reason: string;
+}): RenderedEmail {
+  return {
+    subject: "Action needed: KYC resubmission requested",
+    html: shell({
+      eyebrow: "[02] KYC resubmission",
+      title: `Quick fixes needed for ${args.businessName}`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">Our review team needs a few details corrected before we can finish verifying your account.</p>
+        <div style="margin:8px 0 16px 0;padding:14px 18px;background:#F1EFE9;border-left:3px solid #C99428;color:#0A0A0A;font-size:14px;line-height:1.55;">
+          ${escape(args.reason)}
+        </div>
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">Update your settings, then we'll re-review automatically — no need to email us back.</p>`,
+      cta: { label: "Update settings", href: `${cfg.WEB_PUBLIC_URL}/settings` },
+    }),
+    text:
+      `Action needed: KYC resubmission requested\n\n` +
+      `${args.businessName} — our review team needs a few details corrected before we can finish verifying your account:\n\n` +
+      `${args.reason}\n\n` +
+      `Update your settings here: ${cfg.WEB_PUBLIC_URL}/settings\n` +
+      `We'll re-review once you've made the changes.`,
+  };
+}
+
+export function kycRejectedTemplate(args: {
+  businessName: string;
+  reason: string;
+}): RenderedEmail {
+  return {
+    subject: "KYC review outcome",
+    html: shell({
+      eyebrow: "[02] KYC declined",
+      title: "We weren't able to verify your account",
+      bodyHtml: `<p style="margin:0 0 12px 0;">Hi ${escape(args.businessName)} — we've finished reviewing the information you provided and can't proceed with onboarding right now.</p>
+        <div style="margin:8px 0 16px 0;padding:14px 18px;background:#F1EFE9;border-left:3px solid #C0392B;color:#0A0A0A;font-size:14px;line-height:1.55;">
+          ${escape(args.reason)}
+        </div>
+        <p style="margin:0 0 12px 0;">If you believe this was a mistake or you have additional documentation that addresses the concern, reply to this email and we'll take another look.</p>
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">No further action is needed; your account is now closed and no charges have been made.</p>`,
+    }),
+    text:
+      `KYC review outcome\n\n` +
+      `Hi ${args.businessName} — we've finished reviewing the information you provided and can't proceed with onboarding right now.\n\n` +
+      `${args.reason}\n\n` +
+      `If you believe this was a mistake or have additional documentation that addresses the concern, reply to this email and we'll take another look.\n\n` +
+      `No further action is needed; your account is now closed and no charges have been made.`,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Wallet
 // ---------------------------------------------------------------------------

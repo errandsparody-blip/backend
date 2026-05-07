@@ -35,11 +35,19 @@ async function bootstrap(): Promise<void> {
   // FIRST thing in the Express stack, ahead of helmet. That way preflights
   // (OPTIONS) are answered cleanly with allow-origin/allow-credentials before
   // any other middleware can interfere with the response.
+  //
+  // The allow-list is the canonical WEB_PUBLIC_URL plus any extras from
+  // WEB_ALLOWED_ORIGINS — useful for apex + www, staging mirrors, or Vercel
+  // preview deployments. Duplicates are de-duped via Set.
+  const allowedOrigins = Array.from(
+    new Set([cfg.WEB_PUBLIC_URL, ...cfg.WEB_ALLOWED_ORIGINS]),
+  );
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
     rawBody: true,
     cors: {
-      origin: [cfg.WEB_PUBLIC_URL],
+      origin: allowedOrigins,
       credentials: true,
       methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
       allowedHeaders: ["Authorization", "Content-Type", "X-Correlation-Id", "Idempotency-Key"],

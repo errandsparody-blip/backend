@@ -1,7 +1,79 @@
 import { z } from "zod";
 
+// ---------------------------------------------------------------------------
+// Social handles
+//
+// Each platform has its own character set + length limits. We accept input
+// with or without the leading "@", lowercase + trim it server-side, then
+// validate against the platform's published rules. Empty string → null
+// (lets a vendor remove a handle they previously set).
+// ---------------------------------------------------------------------------
+
+const stripAt = (s: string) =>
+  s.trim().replace(/^@/, "").toLowerCase();
+
+const instagramHandleSchema = z
+  .string()
+  .transform(stripAt)
+  .pipe(
+    z
+      .string()
+      .min(1, "Instagram handle cannot be empty.")
+      .max(30, "Instagram handles are at most 30 characters.")
+      .regex(
+        /^[a-z0-9._]+$/,
+        "Instagram handles use letters, numbers, periods, and underscores only.",
+      ),
+  );
+
+const tiktokHandleSchema = z
+  .string()
+  .transform(stripAt)
+  .pipe(
+    z
+      .string()
+      .min(2, "TikTok handle is at least 2 characters.")
+      .max(24, "TikTok handles are at most 24 characters.")
+      .regex(
+        /^[a-z0-9._]+$/,
+        "TikTok handles use letters, numbers, periods, and underscores only.",
+      ),
+  );
+
+const xHandleSchema = z
+  .string()
+  .transform(stripAt)
+  .pipe(
+    z
+      .string()
+      .min(1, "X handle cannot be empty.")
+      .max(15, "X handles are at most 15 characters.")
+      .regex(
+        /^[a-z0-9_]+$/,
+        "X handles use letters, numbers, and underscores only — no periods.",
+      ),
+  );
+
+const websiteUrlSchema = z
+  .string()
+  .trim()
+  .url("Enter a full URL including https://")
+  .max(500);
+
+// Empty string strips the value (sets it back to null on the vendor row).
+// Undefined leaves it unchanged.
+const optionalSocial = <T extends z.ZodTypeAny>(schema: T) =>
+  z
+    .union([z.literal(""), schema])
+    .optional()
+    .transform((v) => (v === "" ? null : v));
+
 export const updateVendorSchema = z.object({
   businessName: z.string().min(2).max(120).optional(),
+  instagramHandle: optionalSocial(instagramHandleSchema),
+  tiktokHandle: optionalSocial(tiktokHandleSchema),
+  xHandle: optionalSocial(xHandleSchema),
+  websiteUrl: optionalSocial(websiteUrlSchema),
 });
 export type UpdateVendorInput = z.infer<typeof updateVendorSchema>;
 
