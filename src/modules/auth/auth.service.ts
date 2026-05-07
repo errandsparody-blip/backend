@@ -718,13 +718,28 @@ export class AuthService {
     };
   }
 
-  /** Cookie helper used by the controller to write/clear the refresh cookie. */
+  /**
+   * Cookie helper used by the controller to write/clear the refresh cookie.
+   *
+   * SameSite policy:
+   *   - When COOKIE_SECURE=true (any prod-like environment), the API is
+   *     hosted cross-origin from the web app (e.g., Vercel ↔ Railway, where
+   *     the parent domains differ). Browsers will only send the cookie on
+   *     credentialed cross-site requests when SameSite=None and Secure=true.
+   *   - In local dev (COOKIE_SECURE=false) we use SameSite=Lax — both client
+   *     and server are on localhost, so cross-site doesn't apply, and Lax
+   *     gives a tiny bit more CSRF protection than None.
+   *
+   * Either way the cookie is httpOnly, scoped to the /v1/auth path, and bound
+   * to COOKIE_DOMAIN — JS on the page can't read it, and it's never sent on
+   * unrelated requests.
+   */
   cookieOptions() {
     const cfg = loadConfig();
     return {
       httpOnly: true,
       secure: cfg.COOKIE_SECURE,
-      sameSite: "strict" as const,
+      sameSite: (cfg.COOKIE_SECURE ? "none" : "lax") as "none" | "lax",
       domain: cfg.COOKIE_DOMAIN,
       path: "/v1/auth",
       maxAge: cfg.JWT_REFRESH_TTL_SECONDS * 1000,
