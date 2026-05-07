@@ -1,0 +1,910 @@
+// =============================================================================
+// USA Errands — Prisma schema
+// P0 (Foundations): users, sessions, recovery codes, audit log, configuration.
+// P1 (Inventory):   vendors, products, skus, psns, psn_lines, packaging,
+//                   inventory_movements, idempotency_keys.
+// P2+ append: wallets/ledger, orders, returns, reassessment.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================================
+// Enums
+// =============================================================================
+
+enum Role {
+  VENDOR
+  VENDOR_SUB_USER
+  WAREHOUSE_OPERATOR
+  FINANCE_ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  PENDING_EMAIL_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum KycStatus {
+  PENDING                  // not yet started
+  IN_PROGRESS              // submitted, third-party verifying
+  REQUIRES_RESUBMISSION    // failed, vendor must redo
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum VendorStatus {
+  PENDING_KYC
+  ACTIVE
+  SUSPENDED
+  CLOSED
+}
+
+enum StorageTier {
+  SMALL
+  MEDIUM
+  LARGE
+  X_LARGE
+  PALLET
+}
+
+enum SkuStatus {
+  ACTIVE
+  RESERVED
+  DAMAGED
+  QUARANTINED
+  OUT_OF_STOCK
+}
+
+enum PsnStatus {
+  DRAFT
+  SUBMITTED
+  AWAITING_RECEIPT
+  PARTIALLY_RECEIVED
+  RECEIVED
+  DISCREPANCY
+  CANCELLED
+}
+
+enum PackagingExceptionResolution {
+  PENDING
+  REPACKAGE
+  RETURN_TO_SENDER
+  HOLD
+}
+
+// =============================================================================
+// User — the authentication subject. A vendor account is an organisation; a
+// User belongs to it (or is an admin with no vendor).
+// =============================================================================
+model User {
+  id                  String      @id @default(uuid()) @db.Uuid
+  email               String      @unique
+  passwordHash        String      @map("password_hash")
+  emailVerified       Boolean     @default(false) @map("email_verified")
+  emailVerifyTokenHash String?    @map("email_verify_token_hash")
+  emailVerifyExpiresAt DateTime?  @map("email_verify_expires_at")
+
+  role                Role        @default(VENDOR)
+  // null for admin users; required for VENDOR + VENDOR_SUB_USER (enforced in service)
+  vendorId            String?     @map("vendor_id") @db.Uuid
+  vendor              Vendor?     @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // MFA / TOTP
+  mfaEnrolled         Boolean     @default(false) @map("mfa_enrolled")
+  mfaSecretEncrypted  String?     @map("mfa_secret_encrypted")
+  mfaEnrolledAt       DateTime?   @map("mfa_enrolled_at")
+
+  // Lockout / login attempts
+  failedLoginCount    Int         @default(0) @map("failed_login_count")
+  lockedUntil         DateTime?   @map("locked_until")
+
+  status              UserStatus  @default(PENDING_EMAIL_VERIFICATION)
+
+  // Password reset
+  passwordResetTokenHash String?  @map("password_reset_token_hash")
+  passwordResetExpiresAt DateTime? @map("password_reset_expires_at")
+
+  createdAt           DateTime    @default(now()) @map("created_at")
+  updatedAt           DateTime    @updatedAt @map("updated_at")
+
+  sessions            Session[]
+  recoveryCodes       RecoveryCode[]
+  auditEntries        AuditLogEntry[] @relation("AuditActor")
+
+  @@index([role])
+  @@index([vendorId])
+  @@index([status])
+  @@map("users")
+}
+
+// =============================================================================
+// Vendor — the organisation. Every vendor-scoped row carries vendor_id.
+// =============================================================================
+model Vendor {
+  id            String        @id @default(uuid()) @db.Uuid
+  businessName  String        @map("business_name")
+  country       String        @db.Char(2) // ISO 3166-1 alpha-2
+
+  kycStatus     KycStatus     @default(PENDING) @map("kyc_status")
+  kycProviderId String?       @map("kyc_provider_id")  // e.g., Stripe Identity verification id
+  kycSubmittedAt DateTime?    @map("kyc_submitted_at")
+  kycApprovedAt DateTime?     @map("kyc_approved_at")
+
+  agreementAcceptedAt   DateTime? @map("agreement_accepted_at")
+  agreementVersion      String?   @map("agreement_version")
+
+  status        VendorStatus  @default(PENDING_KYC)
+
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  users         User[]
+  products      Product[]
+  skus          Sku[]
+  psns          Psn[]
+  inventoryMovements InventoryMovement[]
+  wallet        Wallet?
+  ledgerEntries LedgerEntry[]
+  orders        Order[]
+
+  @@index([status])
+  @@index([kycStatus])
+  @@map("vendors")
+}
+
+// =============================================================================
+// Session — refresh-token-anchored. Rotated on every use; reuse triggers theft
+// detection (Implementation Plan §4.1).
+// =============================================================================
+model Session {
+  id                String    @id @default(uuid()) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  refreshTokenHash  String    @map("refresh_token_hash")
+  rotatedHashes     String[]  @default([]) @map("rotated_hashes")
+
+  userAgent         String?   @map("user_agent")
+  ip                String?
+  expiresAt         DateTime  @map("expires_at")
+  revokedAt         DateTime? @map("revoked_at")
+  revokedReason     String?   @map("revoked_reason")
+
+  createdAt         DateTime  @default(now()) @map("created_at")
+  lastUsedAt        DateTime  @default(now()) @map("last_used_at")
+
+  @@index([userId])
+  @@index([refreshTokenHash])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+// =============================================================================
+// RecoveryCode — single-use MFA backup codes. Hashed at rest.
+// =============================================================================
+model RecoveryCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  codeHash  String    @map("code_hash")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("recovery_codes")
+}
+
+// =============================================================================
+// Product — pre-created by the vendor before they ship inventory in. SKUs
+// derive from products at receiving time.
+// =============================================================================
+model Product {
+  id              String   @id @default(uuid()) @db.Uuid
+  vendorId        String   @map("vendor_id") @db.Uuid
+  vendor          Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // Vendor-supplied product code, e.g., "TSH-BLK-M". Unique per vendor.
+  // Used in SKU format UER-<VendorID>-<ProductCode>-<Variant>-<Sequence>.
+  code            String
+
+  name            String
+  variant         String   @default("STD")
+  hsCode          String?  @map("hs_code")          // Harmonized System tariff code
+  countryOfOrigin String   @map("country_of_origin") @db.Char(2)
+  declaredValueCents Int   @map("declared_value_cents")
+
+  // Dimensions (inches) and weight (oz). Used for shipping rate calc + tier sizing.
+  weightOz        Float    @map("weight_oz")
+  lengthIn        Float    @map("length_in")
+  widthIn         Float    @map("width_in")
+  heightIn        Float    @map("height_in")
+
+  status          String   @default("ACTIVE")  // ACTIVE | ARCHIVED
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  skus            Sku[]
+  psnLines        PsnLine[]
+
+  @@unique([vendorId, code])
+  @@index([vendorId, status])
+  @@map("products")
+}
+
+// =============================================================================
+// SKU — a trackable unit (or batch) of inventory. Generated at receiving.
+// Format: UER-<VendorID short>-<ProductCode>-<Variant>-<Sequence>
+// =============================================================================
+model Sku {
+  // Human-readable identifier serves as PK. Immutable once created.
+  id                String      @id
+
+  vendorId          String      @map("vendor_id") @db.Uuid
+  vendor            Vendor      @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  productId         String      @map("product_id") @db.Uuid
+  product           Product     @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  variant           String
+
+  // Quantities in this SKU bucket. CHECK constraints enforce non-negativity.
+  quantityAvailable Int         @default(0) @map("quantity_available")
+  quantityReserved  Int         @default(0) @map("quantity_reserved")
+
+  storageTier       StorageTier @default(SMALL) @map("storage_tier")
+  warehouseLocation String?     @map("warehouse_location")
+
+  status            SkuStatus   @default(ACTIVE)
+
+  createdAt         DateTime    @default(now()) @map("created_at")
+  updatedAt         DateTime    @updatedAt @map("updated_at")
+
+  movements         InventoryMovement[]
+  psnLines          PsnLine[]
+  orderLines        OrderLine[]
+
+  @@index([vendorId, status])
+  @@index([productId])
+  @@map("skus")
+}
+
+// =============================================================================
+// PSN (Pre-Shipment Notice) — vendor's manifest declared before shipping in.
+// Implementation Plan §6.2.1.
+// =============================================================================
+model Psn {
+  id                  String     @id @default(uuid()) @db.Uuid
+  vendorId            String     @map("vendor_id") @db.Uuid
+  vendor              Vendor     @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  status              PsnStatus  @default(DRAFT)
+
+  expectedArrivalDate DateTime?  @map("expected_arrival_date")
+  carrier             String?
+  masterTracking      String?    @map("master_tracking")
+
+  // Declared box counts per tier. JSON of: { SMALL: 3, MEDIUM: 1, ... }
+  declaredBoxCounts   Json       @default("{}") @map("declared_box_counts")
+
+  notes               String?
+
+  // Onboarding fee snapshot at the time of submission (cents).
+  onboardingFeeCents  Int?       @map("onboarding_fee_cents")
+  onboardingFeePaidAt DateTime?  @map("onboarding_fee_paid_at")
+
+  submittedAt         DateTime?  @map("submitted_at")
+  receivedAt          DateTime?  @map("received_at")
+
+  createdAt           DateTime   @default(now()) @map("created_at")
+  updatedAt           DateTime   @updatedAt @map("updated_at")
+
+  lines               PsnLine[]
+  exceptions          PackagingException[]
+
+  @@index([vendorId, status])
+  @@index([status, createdAt])
+  @@map("psns")
+}
+
+model PsnLine {
+  id            String   @id @default(uuid()) @db.Uuid
+  psnId         String   @map("psn_id") @db.Uuid
+  psn           Psn      @relation(fields: [psnId], references: [id], onDelete: Cascade)
+
+  productId     String   @map("product_id") @db.Uuid
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  // Once SKUs are generated at receiving, the line points to the SKU bucket.
+  skuId         String?  @map("sku_id")
+  sku           Sku?     @relation(fields: [skuId], references: [id], onDelete: SetNull)
+
+  declaredQty   Int      @map("declared_qty")
+  receivedQty   Int      @default(0) @map("received_qty")
+  acceptedQty   Int      @default(0) @map("accepted_qty")
+  damagedQty    Int      @default(0) @map("damaged_qty")
+
+  notes         String?
+
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@index([psnId])
+  @@map("psn_lines")
+}
+
+model PackagingException {
+  id          String                       @id @default(uuid()) @db.Uuid
+  psnId       String                       @map("psn_id") @db.Uuid
+  psn         Psn                          @relation(fields: [psnId], references: [id], onDelete: Cascade)
+
+  resolution  PackagingExceptionResolution @default(PENDING)
+  feeCents    Int                          @default(0) @map("fee_cents")
+  notes       String?
+
+  createdAt   DateTime                     @default(now()) @map("created_at")
+  resolvedAt  DateTime?                    @map("resolved_at")
+
+  @@index([psnId])
+  @@map("packaging_exceptions")
+}
+
+// =============================================================================
+// InventoryMovement — append-only log of every quantity change. Forms the
+// audit trail for stock counts and feeds reconciliation.
+// =============================================================================
+model InventoryMovement {
+  id          String   @id @default(uuid()) @db.Uuid
+  vendorId    String   @map("vendor_id") @db.Uuid
+  vendor      Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  skuId       String   @map("sku_id")
+  sku         Sku      @relation(fields: [skuId], references: [id], onDelete: Cascade)
+
+  // RECEIVE | RESERVE | RELEASE | SHIP | RETURN | ADJUST | DAMAGE | TRANSFER
+  type        String
+
+  // Signed delta (positive = in, negative = out). Multiple deltas may accompany
+  // a single event (e.g., ship: -1 from available + -1 from reserved). Each is
+  // its own row.
+  deltaAvailable Int   @default(0) @map("delta_available")
+  deltaReserved  Int   @default(0) @map("delta_reserved")
+
+  // Free-text note, e.g., "Cycle count correction", "Damage: water damage".
+  reason      String?
+
+  // Reference to the originating event (PSN id, order id, return id, etc.).
+  referenceType String? @map("reference_type")
+  referenceId   String? @map("reference_id")
+
+  actorId     String?  @map("actor_id") @db.Uuid
+
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([vendorId, createdAt])
+  @@index([skuId, createdAt])
+  @@map("inventory_movements")
+}
+
+// =============================================================================
+// IdempotencyKey — guards every state-changing endpoint. Same key + same body
+// returns the original response. Implementation Plan §11.1.
+// =============================================================================
+model IdempotencyKey {
+  key             String   @id
+  endpoint        String
+  requestHash     String   @map("request_hash")
+  responseStatus  Int      @map("response_status")
+  responseBody    Json     @map("response_body")
+  // Optional vendor scope so the same key collisionable across vendors is fine.
+  vendorId        String?  @map("vendor_id") @db.Uuid
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  expiresAt       DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@index([vendorId, endpoint])
+  @@map("idempotency_keys")
+}
+
+// =============================================================================
+// AuditLogEntry — append-only at DB privilege level (migration 0002).
+// =============================================================================
+model AuditLogEntry {
+  id            String   @id @default(uuid()) @db.Uuid
+
+  actorId       String?  @map("actor_id") @db.Uuid
+  actor         User?    @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  actorRole     Role?    @map("actor_role")
+  onBehalfOfVendorId String? @map("on_behalf_of_vendor_id") @db.Uuid
+
+  sourceIp      String?  @map("source_ip")
+  userAgent     String?  @map("user_agent")
+  correlationId String?  @map("correlation_id")
+
+  action        String
+  resourceType  String   @map("resource_type")
+  resourceId    String?  @map("resource_id")
+
+  beforeState   Json?    @map("before_state")
+  afterState    Json?    @map("after_state")
+
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([actorId, createdAt])
+  @@index([resourceType, resourceId])
+  @@index([action, createdAt])
+  @@index([createdAt])
+  @@map("audit_log_entries")
+}
+
+// =============================================================================
+// Wallet — one per vendor. Materialized view of the ledger; reconciled
+// nightly. Implementation Plan §6.4.
+// =============================================================================
+enum WalletStatus {
+  ACTIVE
+  STORAGE_OVERDUE
+  SUSPENDED
+  CLOSED
+}
+
+model Wallet {
+  id                       String       @id @default(uuid()) @db.Uuid
+  vendorId                 String       @unique @map("vendor_id") @db.Uuid
+  vendor                   Vendor       @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // Materialized balance. Reconciled by daily job; always equals the sum of
+  // ledger_entries.amount_cents for this vendor. CHECK enforces non-negative.
+  balanceCents             Int          @default(0) @map("balance_cents")
+  // Configurable per vendor; default $50.00 (5000 cents).
+  lowBalanceThresholdCents Int          @default(5000) @map("low_balance_threshold_cents")
+
+  status                   WalletStatus @default(ACTIVE)
+
+  createdAt                DateTime     @default(now()) @map("created_at")
+  updatedAt                DateTime     @updatedAt @map("updated_at")
+
+  @@map("wallets")
+}
+
+// =============================================================================
+// LedgerEntry — append-only at the DB privilege level. Implementation Plan §6.4.2.
+// One row per money event; balance_after_cents is captured per row so the
+// historical balance trail never needs reconstruction.
+// =============================================================================
+enum LedgerEntryType {
+  DEPOSIT
+  ONBOARDING
+  STORAGE
+  FULFILLMENT
+  SHIPPING
+  RETURN
+  MANUAL_CREDIT
+  MANUAL_DEBIT
+  REVERSAL
+}
+
+model LedgerEntry {
+  id                String          @id @default(uuid()) @db.Uuid
+  vendorId          String          @map("vendor_id") @db.Uuid
+  vendor            Vendor          @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  type              LedgerEntryType
+  // Signed cents: positive for deposits/credits, negative for charges/debits.
+  amountCents       Int             @map("amount_cents")
+  // Materialized balance immediately AFTER this entry was applied.
+  balanceAfterCents Int             @map("balance_after_cents")
+
+  description       String
+
+  // Origin: "psn", "stripe", "order", "return", etc.
+  referenceType     String?         @map("reference_type")
+  referenceId       String?         @map("reference_id")
+
+  // Idempotency key used for the originating request, if any.
+  idempotencyKey    String?         @map("idempotency_key")
+
+  // Who initiated. Null for system events (cron-driven storage fees).
+  createdBy         String?         @map("created_by") @db.Uuid
+
+  createdAt         DateTime        @default(now()) @map("created_at")
+
+  @@index([vendorId, createdAt])
+  @@index([type, createdAt])
+  @@index([referenceType, referenceId])
+  @@map("ledger_entries")
+}
+
+// =============================================================================
+// Notification — in-app messages. Email parity is delegated to the email queue
+// when notifications are emitted (P2.12).
+// =============================================================================
+enum NotificationSeverity {
+  INFO
+  SUCCESS
+  WARNING
+  ERROR
+}
+
+model Notification {
+  id          String                @id @default(uuid()) @db.Uuid
+  // Recipient. For vendor notifications, vendor_id is set; for admin-targeted
+  // notifications a user_id may be set instead. Exactly one of the two.
+  vendorId    String?               @map("vendor_id") @db.Uuid
+  userId      String?               @map("user_id") @db.Uuid
+
+  // Stable type code so the UI can route + group: e.g., "wallet.low_balance".
+  type        String
+  severity    NotificationSeverity  @default(INFO)
+  title       String
+  body        String
+  // Optional deep link, e.g., "/wallet/fund".
+  href        String?
+
+  readAt      DateTime?             @map("read_at")
+  createdAt   DateTime              @default(now()) @map("created_at")
+
+  @@index([vendorId, readAt, createdAt])
+  @@index([userId, readAt, createdAt])
+  @@index([type, createdAt])
+  @@map("notifications")
+}
+
+// =============================================================================
+// WebhookEvent — idempotent inbound webhook log. Replay-safe by event id.
+// =============================================================================
+model WebhookEvent {
+  id           String   @id @default(uuid()) @db.Uuid
+  // Provider name: "stripe", "easypost", "kyc"
+  provider     String
+  // Provider-issued unique event identifier (e.g., Stripe evt_xxx). Unique scoped to provider.
+  eventId      String   @map("event_id")
+  // Raw normalized payload, retained for support / debugging.
+  payload      Json
+  processedAt  DateTime? @map("processed_at")
+  error        String?
+
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@unique([provider, eventId])
+  @@index([provider, processedAt])
+  @@map("webhook_events")
+}
+
+// =============================================================================
+// Order — fulfillment workflow. Implementation Plan §6.6.
+// Created from a quote; transitions through a strict state machine. Money is
+// debited from the wallet at submit time and (a) refunded on cancel-before-pick,
+// (b) reassessed (delta debited or refunded) after the box is actually weighed,
+// (c) refunded on RETURNED → RESTOCKED.
+// =============================================================================
+enum OrderStatus {
+  DRAFT
+  SUBMITTED
+  ALLOCATED          // stock reserved, label not yet generated
+  LABEL_PURCHASED    // shipping label bought from carrier
+  PICKING
+  PACKED
+  SHIPPED
+  IN_TRANSIT
+  DELIVERED
+  EXCEPTION          // carrier exception (lost, damaged, refused)
+  CANCELLED
+  RETURNED
+}
+
+enum OrderCancelReason {
+  VENDOR_REQUEST
+  OUT_OF_STOCK
+  ADDRESS_INVALID
+  CARRIER_REFUSED
+  FRAUD_HOLD
+  OTHER
+}
+
+model Order {
+  id                       String          @id @default(uuid()) @db.Uuid
+  vendorId                 String          @map("vendor_id") @db.Uuid
+  vendor                   Vendor          @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // Vendor's external order id (their Shopify/WooCommerce/etc. number). Indexed
+  // for lookup; uniqueness scoped to vendor so two vendors can share an id.
+  externalReference        String?         @map("external_reference")
+
+  status                   OrderStatus     @default(DRAFT)
+
+  // ---- Recipient (PII). v1 stored plain; lives behind tenant scoping + audit.
+  // Future: encrypt name/phone/email at rest via CryptoService field encryption.
+  recipientName            String          @map("recipient_name")
+  recipientPhone           String?         @map("recipient_phone")
+  recipientEmail           String?         @map("recipient_email")
+  shipAddressLine1         String          @map("ship_address_line1")
+  shipAddressLine2         String?         @map("ship_address_line2")
+  shipCity                 String          @map("ship_city")
+  shipState                String          @map("ship_state")           // 2-letter US state, validated app-side
+  shipPostalCode           String          @map("ship_postal_code")
+  shipCountry              String          @default("US") @map("ship_country") @db.Char(2)
+
+  // Smarty validation cache. ACCEPTED | NEEDS_VERIFICATION | REJECTED.
+  addressValidationStatus  String          @default("PENDING") @map("address_validation_status")
+  addressValidationDetail  Json?           @map("address_validation_detail")
+
+  // ---- Carrier / label
+  carrier                  String?         // "usps", "ups", "fedex"
+  carrierService           String?         @map("carrier_service")     // "USPS Priority", "UPS Ground", etc.
+  trackingNumber           String?         @map("tracking_number")
+  labelUrl                 String?         @map("label_url")            // signed URL to PDF
+  rateProviderRef          String?         @map("rate_provider_ref")    // EasyPost shipment id
+  ratePurchasedRef         String?         @map("rate_purchased_ref")   // EasyPost rate id
+
+  // ---- Money (cents). Captured at submit time so future fee schedule changes
+  // do not retro-apply. Reassessment writes a separate ledger entry.
+  itemsDeclaredValueCents  Int             @default(0) @map("items_declared_value_cents")
+  shippingCostCents        Int             @default(0) @map("shipping_cost_cents")     // what carrier charged us
+  shippingFeeCents         Int             @default(0) @map("shipping_fee_cents")      // what we charge vendor (cost + markup)
+  fulfillmentFeeCents      Int             @default(0) @map("fulfillment_fee_cents")   // pick/pack
+  insuranceFeeCents        Int             @default(0) @map("insurance_fee_cents")
+  totalChargedCents        Int             @default(0) @map("total_charged_cents")     // sum debited from wallet
+
+  // Reassessment delta (positive = vendor charged more after weigh; negative = refund).
+  reassessmentDeltaCents   Int             @default(0) @map("reassessment_delta_cents")
+  reassessedAt             DateTime?       @map("reassessed_at")
+
+  // ---- Cancellation
+  cancelReason             OrderCancelReason? @map("cancel_reason")
+  cancelNote               String?         @map("cancel_note")
+
+  // ---- Timeline timestamps
+  submittedAt              DateTime?       @map("submitted_at")
+  allocatedAt              DateTime?       @map("allocated_at")
+  labelPurchasedAt         DateTime?       @map("label_purchased_at")
+  pickingStartedAt         DateTime?       @map("picking_started_at")
+  packedAt                 DateTime?       @map("packed_at")
+  shippedAt                DateTime?       @map("shipped_at")
+  deliveredAt              DateTime?       @map("delivered_at")
+  cancelledAt              DateTime?       @map("cancelled_at")
+
+  createdBy                String?         @map("created_by") @db.Uuid
+  createdAt                DateTime        @default(now()) @map("created_at")
+  updatedAt                DateTime        @updatedAt @map("updated_at")
+
+  lines                    OrderLine[]
+  events                   OrderEvent[]
+  returns                  Return[]
+
+  @@unique([vendorId, externalReference], name: "vendor_external_ref_unique")
+  @@index([vendorId, status, createdAt])
+  @@index([status, createdAt])
+  @@index([trackingNumber])
+  @@index([carrier, status])
+  @@map("orders")
+}
+
+// =============================================================================
+// OrderLine — line item snapshot. SKU + qty + price captured at submit so the
+// historical record is immutable even if pricing changes later.
+// =============================================================================
+model OrderLine {
+  id                  String   @id @default(uuid()) @db.Uuid
+  orderId             String   @map("order_id") @db.Uuid
+  order               Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // Vendor scope echoed for tenant-guard cross-checks at the row level.
+  vendorId            String   @map("vendor_id") @db.Uuid
+
+  productId           String   @map("product_id") @db.Uuid
+  skuId               String   @map("sku_id")
+  sku                 Sku      @relation(fields: [skuId], references: [id], onDelete: Restrict)
+
+  // Snapshot of product info at order time.
+  productCode         String   @map("product_code")
+  productName         String   @map("product_name")
+  variant             String
+
+  quantity            Int
+  declaredValueCents  Int      @map("declared_value_cents")  // unit declared value × qty
+
+  // Allocation status: PENDING | RESERVED | PICKED | SHIPPED | RETURNED | CANCELLED.
+  allocationStatus    String   @default("PENDING") @map("allocation_status")
+
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@index([orderId])
+  @@index([skuId])
+  @@index([vendorId])
+  @@map("order_lines")
+}
+
+// =============================================================================
+// OrderEvent — append-only timeline (carrier tracking events + internal
+// transitions). Powers the order detail timeline and the audit trail.
+// =============================================================================
+model OrderEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  orderId     String   @map("order_id") @db.Uuid
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // Stable code: "order.submitted", "order.allocated", "carrier.in_transit",
+  // "carrier.delivered", "carrier.exception", "order.cancelled", etc.
+  type        String
+  description String
+
+  // Optional carrier-supplied metadata (location, status code, signed-by).
+  metadata    Json?
+
+  // Origin of the event: SYSTEM | VENDOR | ADMIN | CARRIER | CRON
+  source      String   @default("SYSTEM")
+  actorId     String?  @map("actor_id") @db.Uuid
+
+  occurredAt  DateTime @default(now()) @map("occurred_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([orderId, occurredAt])
+  @@index([type, occurredAt])
+  @@map("order_events")
+}
+
+// =============================================================================
+// Return — RMA-style return. One return spans 1..N order lines.
+// Implementation Plan §6.7.
+// =============================================================================
+enum ReturnStatus {
+  REQUESTED
+  AUTHORIZED
+  IN_TRANSIT
+  RECEIVED
+  INSPECTED
+  RESTOCKED
+  DISPOSED
+  REJECTED
+  CANCELLED
+}
+
+enum ReturnReason {
+  NOT_AS_DESCRIBED
+  DEFECTIVE
+  WRONG_ITEM
+  CHANGED_MIND
+  ARRIVED_DAMAGED
+  NEVER_DELIVERED
+  OTHER
+}
+
+model Return {
+  id                String        @id @default(uuid()) @db.Uuid
+  vendorId          String        @map("vendor_id") @db.Uuid
+
+  orderId           String        @map("order_id") @db.Uuid
+  order             Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  rmaCode           String        @unique @map("rma_code")  // "RMA-<short>", customer-facing
+  status            ReturnStatus  @default(REQUESTED)
+  reason            ReturnReason
+
+  // Inbound tracking back to warehouse.
+  inboundTracking   String?       @map("inbound_tracking")
+  inboundCarrier    String?       @map("inbound_carrier")
+  inboundLabelUrl   String?       @map("inbound_label_url")
+
+  // Refund decision (cents). Computed at INSPECTED/RESTOCKED.
+  refundAmountCents Int           @default(0) @map("refund_amount_cents")
+  restockFeeCents   Int           @default(0) @map("restock_fee_cents")
+
+  inspectorNotes    String?       @map("inspector_notes")
+
+  requestedAt       DateTime      @default(now()) @map("requested_at")
+  authorizedAt      DateTime?     @map("authorized_at")
+  receivedAt        DateTime?     @map("received_at")
+  inspectedAt       DateTime?     @map("inspected_at")
+  resolvedAt        DateTime?     @map("resolved_at")
+
+  createdBy         String?       @map("created_by") @db.Uuid
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  lines             ReturnLine[]
+
+  @@index([vendorId, status, createdAt])
+  @@index([orderId])
+  @@index([status, createdAt])
+  @@map("returns")
+}
+
+model ReturnLine {
+  id                  String   @id @default(uuid()) @db.Uuid
+  returnId            String   @map("return_id") @db.Uuid
+  return              Return   @relation(fields: [returnId], references: [id], onDelete: Cascade)
+
+  // Mirror to the originating OrderLine.
+  orderLineId         String   @map("order_line_id") @db.Uuid
+  skuId               String   @map("sku_id")
+
+  requestedQty        Int      @map("requested_qty")
+  receivedQty         Int      @default(0) @map("received_qty")
+  restockedQty        Int      @default(0) @map("restocked_qty")
+  damagedQty          Int      @default(0) @map("damaged_qty")
+  disposedQty         Int      @default(0) @map("disposed_qty")
+
+  notes               String?
+
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@index([returnId])
+  @@index([orderLineId])
+  @@map("return_lines")
+}
+
+// =============================================================================
+// VendorInvitation — sub-user invite. Implementation Plan §6.12.
+//
+// Flow:
+//   1. Vendor admin invites an email at role VENDOR_SUB_USER.
+//   2. We email a single-use, hashed-at-rest token (24h TTL).
+//   3. The recipient hits the public accept-invite endpoint with the token,
+//      sets a password, and is redirected to MFA enrolment.
+//   4. The User row is created and joined to the vendor.
+// =============================================================================
+enum VendorInvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+model VendorInvitation {
+  id            String                 @id @default(uuid()) @db.Uuid
+  vendorId      String                 @map("vendor_id") @db.Uuid
+
+  email         String                 // case-insensitive comparison enforced in service
+  // Single-use token stored as sha256 hash. Plaintext is emailed once.
+  tokenHash     String                 @map("token_hash")
+  // Role granted on accept. Currently always VENDOR_SUB_USER; modelled for
+  // future expansion (e.g., VENDOR_FINANCE_ADMIN).
+  roleAtAccept  Role                   @default(VENDOR_SUB_USER) @map("role_at_accept")
+
+  status        VendorInvitationStatus @default(PENDING)
+  invitedBy     String                 @map("invited_by") @db.Uuid
+
+  expiresAt     DateTime               @map("expires_at")
+  acceptedAt    DateTime?              @map("accepted_at")
+  revokedAt     DateTime?              @map("revoked_at")
+
+  createdAt     DateTime               @default(now()) @map("created_at")
+  updatedAt     DateTime               @updatedAt @map("updated_at")
+
+  // Two open invitations to the same email on the same vendor are prevented
+  // at the service layer; the unique below covers active accepted rows so an
+  // accepted invite is never reused.
+  @@unique([tokenHash])
+  @@index([vendorId, status, createdAt])
+  @@index([email])
+  @@map("vendor_invitations")
+}
+
+// =============================================================================
+// Configuration — fee schedule, tier dimensions, thresholds. All updates audited.
+// =============================================================================
+model Configuration {
+  key         String   @id
+  value       Json
+  description String?
+  updatedBy   String?  @map("updated_by") @db.Uuid
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("configuration")
+}

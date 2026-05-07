@@ -1,0 +1,195 @@
+/**
+ * SkuService — vendor-scoped SKU read API + internal generation helper used
+ * by the receiving workflow.
+ *
+ * SKU model: per (vendor, product, variant) combination. Each SKU bucket
+ * tracks `quantity_available` and `quantity_reserved`. Receiving 100
+ * fungible T-shirts into the same product+variant produces ONE SKU bucket
+ * with quantity_available = 100, not 100 SKU rows.
+ *
+ * Format: UER-<vendor short>-<productCode>-<variant>
+ *   vendor short = first 6 chars of vendor UUID, alphanumeric upper.
+ *   variant     = sanitized to [A-Z0-9-], max 12 chars.
+ *
+ * Implementation Plan §6.1.
+ */
+
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from "@nestjs/common";
+import type { Prisma, PrismaClient, Sku, SkuStatus, StorageTier } from "@prisma/client";
+
+import { PrismaService } from "../../common/prisma.service";
+import type { ListSkusInput } from "../../common/schemas/sku.schema";
+import { AuditService } from "../audit/audit.service";
+
+export interface PublicSku {
+  id: string;
+  productId: string;
+  variant: string;
+  quantityAvailable: number;
+  quantityReserved: number;
+  storageTier: StorageTier;
+  warehouseLocation: string | null;
+  status: SkuStatus;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
+
+@Injectable()
+export class SkuService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
+
+  // ---------------------------------------------------------------------------
+  // Vendor-scoped reads
+  // ---------------------------------------------------------------------------
+
+  async list(
+    vendorId: string,
+    input: ListSkusInput,
+  ): Promise<{ items: PublicSku[]; nextCursor: string | null }> {
+    const where: Prisma.SkuWhereInput = { vendorId };
+    if (input.status) where.status = input.status;
+    if (input.productId) where.productId = input.productId;
+    if (input.search) {
+      where.OR = [
+        { id: { contains: input.search, mode: "insensitive" } },
+        { product: { name: { contains: input.search, mode: "insensitive" } } },
+        { product: { code: { contains: input.search, mode: "insensitive" } } },
+      ];
+    }
+
+    const items = await this.prisma.sku.findMany({
+      where,
+      take: input.limit + 1,
+      orderBy: { createdAt: "desc" },
+      ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
+    });
+
+    let nextCursor: string | null = null;
+    if (items.length > input.limit) {
+      const next = items.pop();
+      nextCursor = next?.id ?? null;
+    }
+    return { items: items.map((s) => this.toPublic(s)), nextCursor };
+  }
+
+  async get(vendorId: string, id: string): Promise<PublicSku> {
+    const sku = await this.prisma.sku.findFirst({ where: { id, vendorId } });
+    if (!sku) throw new NotFoundException();
+    return this.toPublic(sku);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internal — used by the receiving workflow
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Find or create an SKU bucket for (vendorId, productId, variant). Increments
+   * `quantity_available` by `qty` and writes an InventoryMovement of type
+   * RECEIVE. Runs inside the caller's transaction.
+   *
+   * Returns the SKU id (may be a fresh row or an existing one).
+   */
+  async receiveIntoBucket(
+    tx: Tx,
+    args: {
+      vendorId: string;
+      productId: string;
+      variant: string;
+      qty: number;
+      psnId: string;
+      actorId: string;
+      storageTier?: StorageTier;
+    },
+  ): Promise<string> {
+    if (args.qty <= 0) {
+      throw new ConflictException("Receive quantity must be positive.");
+    }
+
+    const product = await tx.product.findFirst({
+      where: { id: args.productId, vendorId: args.vendorId },
+    });
+    if (!product) throw new NotFoundException("Product not found for this vendor.");
+
+    const skuId = this.computeSkuId(args.vendorId, product.code, args.variant);
+
+    // Upsert by id (deterministic). On insert, populate fields. On update,
+    // increment quantity_available atomically.
+    const existing = await tx.sku.findUnique({ where: { id: skuId } });
+    if (!existing) {
+      await tx.sku.create({
+        data: {
+          id: skuId,
+          vendorId: args.vendorId,
+          productId: args.productId,
+          variant: args.variant,
+          quantityAvailable: args.qty,
+          quantityReserved: 0,
+          storageTier: args.storageTier ?? "SMALL",
+        },
+      });
+    } else {
+      // Sanity: never allow cross-vendor reuse of an id.
+      if (existing.vendorId !== args.vendorId) {
+        throw new ConflictException("SKU id collision across vendors — this should never happen.");
+      }
+      await tx.sku.update({
+        where: { id: skuId },
+        data: { quantityAvailable: { increment: args.qty } },
+      });
+    }
+
+    await tx.inventoryMovement.create({
+      data: {
+        vendorId: args.vendorId,
+        skuId,
+        type: "RECEIVE",
+        deltaAvailable: args.qty,
+        deltaReserved: 0,
+        referenceType: "psn",
+        referenceId: args.psnId,
+        actorId: args.actorId,
+      },
+    });
+
+    return skuId;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Deterministic SKU id. Same (vendor, product, variant) → same id, so
+   * subsequent receiving events stack into the same bucket.
+   */
+  computeSkuId(vendorId: string, productCode: string, variant: string): string {
+    const short = vendorId.replace(/-/g, "").slice(0, 6).toUpperCase();
+    const code = productCode.replace(/[^A-Z0-9-]/gi, "").toUpperCase();
+    const v = (variant || "STD").replace(/[^A-Z0-9-]/gi, "").toUpperCase().slice(0, 12);
+    return `UER-${short}-${code}-${v}`;
+  }
+
+  private toPublic(s: Sku): PublicSku {
+    return {
+      id: s.id,
+      productId: s.productId,
+      variant: s.variant,
+      quantityAvailable: s.quantityAvailable,
+      quantityReserved: s.quantityReserved,
+      storageTier: s.storageTier,
+      warehouseLocation: s.warehouseLocation,
+      status: s.status,
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+    };
+  }
+}

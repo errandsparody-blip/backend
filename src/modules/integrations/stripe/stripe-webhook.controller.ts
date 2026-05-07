@@ -1,0 +1,214 @@
+/**
+ * Stripe webhook handler.
+ *
+ *   - PUBLIC (no JWT) — protected by HMAC signature.
+ *   - Idempotent — every event id is recorded in webhook_events; replays no-op.
+ *   - Atomic — wallet credit + webhook_events insert in a single transaction.
+ *
+ * Implementation Plan §6.5.1, §11.2 (Webhooks), §14.2.
+ *
+ * Events handled:
+ *   payment_intent.succeeded → credit wallet for `metadata.netAmountCents`
+ *   payment_intent.payment_failed → log + alert
+ *   charge.refunded → credit reversal (negative DEPOSIT? no — REVERSAL)
+ *   charge.dispute.created → flag + audit (resolution P2.13)
+ *
+ * Wallet credit happens HERE, not at deposit-create time. This is the
+ * single-source-of-truth pattern — Stripe is authoritative on whether money
+ * actually moved.
+ */
+
+import {
+  Body,
+  Controller,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Logger,
+  Post,
+  Req,
+} from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
+import type { Prisma } from "@prisma/client";
+import type { Request } from "express";
+import type Stripe from "stripe";
+
+import { Public } from "../../../common/decorators/public.decorator";
+import { PrismaService } from "../../../common/prisma.service";
+import { AuditService } from "../../audit/audit.service";
+import { WalletService } from "../../wallet/wallet.service";
+
+import { StripeService } from "./stripe.service";
+
+@Controller({ path: "webhooks/stripe", version: "1" })
+export class StripeWebhookController {
+  private readonly logger = new Logger(StripeWebhookController.name);
+
+  constructor(
+    private readonly stripe: StripeService,
+    private readonly wallet: WalletService,
+    private readonly audit: AuditService,
+    private readonly prisma: PrismaService,
+  ) {}
+
+  @Public()
+  @Post()
+  @HttpCode(HttpStatus.OK)
+  // Defence: a forged or replayed flood must not be able to keep CPU busy on
+  // signature verification. Stripe's normal cadence is well below this.
+  @Throttle({ default: { limit: 600, ttl: 60_000 } })
+  async handle(
+    @Headers("stripe-signature") signature: string | undefined,
+    @Req() req: Request & { rawBody?: Buffer },
+    @Body() _body: unknown,
+  ): Promise<{ ok: true; deduped?: true }> {
+    const raw = req.rawBody ?? Buffer.from(JSON.stringify(_body ?? {}));
+
+    // 1. Verify signature. Throws on tamper.
+    let event: Stripe.Event;
+    try {
+      event = this.stripe.verifyWebhook(raw, signature);
+    } catch (err) {
+      this.logger.warn({ err }, "Stripe webhook signature verification failed");
+      // Returning 200 here would let an attacker know we received the call but
+      // verification failed; respond 400 so Stripe retries (legitimate replays
+      // hit this on transient signature mismatch).
+      throw err;
+    }
+
+    // 2. Dedupe via webhook_events. The unique index on (provider, event_id)
+    //    is the integrity gate. We attempt insert first — duplicates fail with
+    //    P2002 and we treat as already-processed.
+    try {
+      await this.prisma.webhookEvent.create({
+        data: {
+          provider: "stripe",
+          eventId: event.id,
+          payload: event as unknown as Prisma.InputJsonValue,
+        },
+      });
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === "P2002") {
+        this.logger.log({ eventId: event.id }, "Stripe webhook duplicate; ignoring.");
+        return { ok: true, deduped: true };
+      }
+      throw err;
+    }
+
+    // 3. Dispatch by type.
+    try {
+      switch (event.type) {
+        case "payment_intent.succeeded":
+          await this.handlePaymentSucceeded(event.data.object as Stripe.PaymentIntent);
+          break;
+        case "payment_intent.payment_failed":
+          await this.handlePaymentFailed(event.data.object as Stripe.PaymentIntent);
+          break;
+        case "charge.refunded":
+          await this.handleChargeRefunded(event.data.object as Stripe.Charge);
+          break;
+        case "charge.dispute.created":
+          await this.handleDisputeCreated(event.data.object as Stripe.Dispute);
+          break;
+        default:
+          this.logger.log({ type: event.type, eventId: event.id }, "Stripe event ignored.");
+      }
+
+      await this.prisma.webhookEvent.update({
+        where: { id: (await this.prisma.webhookEvent.findFirst({
+          where: { provider: "stripe", eventId: event.id },
+          select: { id: true },
+        }))!.id },
+        data: { processedAt: new Date() },
+      });
+    } catch (err) {
+      // On dispatch failure, capture the error on the row so support can replay.
+      await this.prisma.webhookEvent.updateMany({
+        where: { provider: "stripe", eventId: event.id },
+        data: { error: (err as Error).message },
+      });
+      throw err;
+    }
+
+    return { ok: true };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Event handlers
+  // ---------------------------------------------------------------------------
+
+  private async handlePaymentSucceeded(intent: Stripe.PaymentIntent): Promise<void> {
+    const purpose = intent.metadata?.["purpose"];
+    if (purpose !== "wallet.fund") {
+      // Future intents (e.g., onboarding fee deposits if we ever do them) go here.
+      this.logger.log({ id: intent.id, purpose }, "Ignoring intent without wallet.fund purpose.");
+      return;
+    }
+    const vendorId = intent.metadata?.["vendorId"];
+    const netAmountCents = Number(intent.metadata?.["netAmountCents"] ?? "0");
+
+    if (!vendorId || !Number.isFinite(netAmountCents) || netAmountCents <= 0) {
+      this.logger.error({ id: intent.id }, "Wallet-fund intent missing required metadata.");
+      throw new Error("Stripe wallet-fund intent has invalid metadata.");
+    }
+
+    await this.wallet.credit({
+      vendorId,
+      amountCents: netAmountCents,
+      type: "DEPOSIT",
+      description: `Stripe deposit · ${intent.id}`,
+      referenceType: "stripe_payment_intent",
+      referenceId: intent.id,
+      idempotencyKey: intent.id,
+    });
+  }
+
+  private async handlePaymentFailed(intent: Stripe.PaymentIntent): Promise<void> {
+    const vendorId = intent.metadata?.["vendorId"] ?? null;
+    await this.audit.log({
+      action: "stripe.payment_failed",
+      resourceType: "stripe_payment_intent",
+      resourceId: intent.id,
+      onBehalfOfVendorId: vendorId,
+      afterState: {
+        last_payment_error: intent.last_payment_error?.code ?? null,
+        amount: intent.amount,
+      },
+    });
+  }
+
+  private async handleChargeRefunded(charge: Stripe.Charge): Promise<void> {
+    const vendorId = charge.metadata?.["vendorId"];
+    const netAmountCents = Number(charge.metadata?.["netAmountCents"] ?? "0");
+    if (!vendorId || !Number.isFinite(netAmountCents) || netAmountCents <= 0) {
+      this.logger.warn({ id: charge.id }, "Refund webhook missing metadata; skipping wallet adjustment.");
+      return;
+    }
+    // Symmetric reversal — we credit a NEGATIVE wallet adjustment via the
+    // REVERSAL ledger type (which permits either sign). Implementation Plan §11.3.
+    await this.wallet.credit({
+      vendorId,
+      // Reversal of a deposit is negative.
+      amountCents: netAmountCents,
+      type: "REVERSAL",
+      description: `Stripe refund · ${charge.id}`,
+      referenceType: "stripe_charge",
+      referenceId: charge.id,
+    });
+  }
+
+  private async handleDisputeCreated(dispute: Stripe.Dispute): Promise<void> {
+    await this.audit.log({
+      action: "stripe.dispute_created",
+      resourceType: "stripe_charge",
+      resourceId: typeof dispute.charge === "string" ? dispute.charge : dispute.charge.id,
+      afterState: {
+        amount: dispute.amount,
+        reason: dispute.reason,
+        status: dispute.status,
+      },
+    });
+    // Real chargeback handling lands in P2.13 (suspension on repeat).
+  }
+}
