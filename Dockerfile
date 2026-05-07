@@ -1,20 +1,25 @@
 # =============================================================================
 # USA Errands — API Dockerfile.
 #
-# Multi-stage:
-#   1. deps     — installs all node_modules (incl. devDeps + native bindings)
-#   2. builder  — generates Prisma client, compiles `nest build` → ./dist
-#   3. runner   — slim runtime with production node_modules + ./dist + ./prisma
+# Two-stage build:
+#   1. builder — installs all deps, generates Prisma client, compiles to dist.
+#                Everything happens in one stage so node_modules NEVER crosses
+#                a `COPY --from`. pnpm uses symlinked content-addressable
+#                node_modules; copying that across stages corrupts the symlink
+#                graph and leaves Prisma's typed client in a half-broken state.
+#   2. runner  — slim runtime. Re-installs prod deps from scratch (so its
+#                node_modules is fresh and its symlinks are intact), copies
+#                the compiled dist + prisma directories.
 #
 # Native modules (argon2, @sentry/profiling-node, @prisma/engines) need
-# python3/make/g++/openssl during install. Alpine works but Debian-slim is
-# more compatible with Prisma's prebuilt engines, so we use node:20-slim.
+# python3/make/g++/openssl during install. Debian-slim is more compatible
+# with Prisma's prebuilt engines than Alpine, so we use node:20-slim.
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# Stage 1 — deps. Installs every node_module including devDependencies.
+# Stage 1 — builder. All dev deps + Prisma generate + nest build.
 # -----------------------------------------------------------------------------
-FROM node:20-slim AS deps
+FROM node:20-slim AS builder
 WORKDIR /app
 
 # Build tools for native modules + openssl for Prisma's query engine.
@@ -25,46 +30,39 @@ RUN apt-get update -y \
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 
+# Copy package.json + lockfile + prisma BEFORE running install. The
+# @prisma/client package has a postinstall hook that runs `prisma generate`
+# against schema.prisma — without the schema present, that hook generates
+# either a stub or nothing at all, and the typed client is missing fields.
 COPY package.json pnpm-lock.yaml ./
-# .npmrc is optional; copied if present so registry / hoisting prefs apply.
 COPY .npmrc* ./
-# IMPORTANT: copy prisma/ BEFORE pnpm install. The @prisma/client package has
-# a postinstall hook that generates the typed client against schema.prisma.
-# Without the schema present, the hook generates a stub, and later
-# `pnpm prisma generate` cannot reliably overwrite it under pnpm's
-# content-addressable layout. Copying prisma first means the postinstall
-# generates the correct client first time and we never look at a stub again.
 COPY prisma ./prisma
+
+# Diagnostic — surface the schema's relevant fields in the build log so we
+# can immediately see whether the schema in the image matches what's on
+# main. If these greps print nothing, the repo at this commit doesn't have
+# the social-handles changes and the typed client cannot include them.
+RUN echo "=== schema.prisma diagnostic ===" \
+  && grep -E "instagram_handle|tiktok_handle|x_handle|website_url|social_verified_at|kyc_rejection_reason" prisma/schema.prisma || echo "MISSING — schema does not include social-handle fields" \
+  && echo "================================"
 
 RUN pnpm install --frozen-lockfile
 
-# -----------------------------------------------------------------------------
-# Stage 2 — builder. Compiles TypeScript with the freshly-generated Prisma
-# client already inside the deps stage's node_modules.
-# -----------------------------------------------------------------------------
-FROM node:20-slim AS builder
-WORKDIR /app
-
-RUN apt-get update -y \
-  && apt-get install -y --no-install-recommends openssl ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
-
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
-
-COPY --from=deps /app/node_modules ./node_modules
+# Now copy the rest of the source. This keeps the Docker layer cache hot for
+# install when only application code changes.
 COPY . .
 
-# Re-run prisma generate as belt-and-braces. If schema.prisma changed between
-# the deps cache layer and now (rare during a single deploy, but possible
-# with cached layers), this picks up the latest.
+# Belt-and-braces regenerate. If schema.prisma changed between the cached
+# install layer and this point, this pulls the latest. Output is pinned by
+# `output = "../node_modules/.prisma/client"` in schema.prisma so it lands
+# in a stable, hoisted path regardless of pnpm's symlink layout.
 RUN pnpm prisma generate
 
 # Compile TypeScript → dist/. nest build writes dist/main.js + dist/**.
 RUN pnpm build
 
 # -----------------------------------------------------------------------------
-# Stage 3 — runner. Slim production image.
+# Stage 2 — runner. Slim production image with fresh prod-only node_modules.
 # -----------------------------------------------------------------------------
 FROM node:20-slim AS runner
 WORKDIR /app
@@ -80,31 +78,26 @@ RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 
 ENV NODE_ENV=production
 
-# Copy production-relevant artefacts only. We re-install deps in --prod mode
-# to drop devDependencies — keeps the runtime image small.
+# Re-install in --prod mode so devDependencies are dropped and the symlink
+# graph is built fresh inside this stage. Schema is in place before install
+# so the @prisma/client postinstall hook generates a real typed client.
 COPY package.json pnpm-lock.yaml ./
 COPY .npmrc* ./
-# Copy schema.prisma BEFORE install for the same reason as the deps stage —
-# the @prisma/client postinstall hook needs the schema to generate a correct
-# typed client.
 COPY --from=builder /app/prisma ./prisma
 RUN pnpm install --frozen-lockfile --prod
 
 # The compiled application.
 COPY --from=builder /app/dist ./dist
 
-# Belt-and-braces: regenerate the Prisma client. The postinstall hook above
-# usually does this correctly, but pnpm's content-addressable layout for
-# generated clients can occasionally drift; running again here is fast (~5s)
-# and produces a definitively-correct .prisma directory.
+# Belt-and-braces regenerate. Postinstall handled it above; this is just
+# insurance against any caching surprises.
 RUN pnpm prisma generate
 
 # Drop privileges before exec.
 RUN chown -R app:app /app
 USER app
 
-# Railway injects PORT; main.ts reads API_PORT which should be set to ${{PORT}}
-# in the Railway service env vars. Default 4000 for local docker run.
+# Railway injects PORT; main.ts reads PORT first then falls back to API_PORT.
 EXPOSE 4000
 
 # Apply pending migrations, then start the API. If the migration step fails,

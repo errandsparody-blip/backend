@@ -140,6 +140,22 @@ model Vendor {
   kycProviderId String?       @map("kyc_provider_id")  // e.g., Stripe Identity verification id
   kycSubmittedAt DateTime?    @map("kyc_submitted_at")
   kycApprovedAt DateTime?     @map("kyc_approved_at")
+  kycRejectedAt DateTime?     @map("kyc_rejected_at")
+  kycRejectionReason String?  @map("kyc_rejection_reason")
+  /// Admin user id that approved / rejected / asked for resubmission. Null until any decision is made.
+  kycDecidedBy  String?       @map("kyc_decided_by") @db.Uuid
+
+  /// Public social presence — used by admin KYC reviewers to confirm the
+  /// vendor is a real business. All optional; lowercased + trimmed in the
+  /// service; format-checked at the DB level (see migration 0008).
+  instagramHandle String? @map("instagram_handle")
+  tiktokHandle    String? @map("tiktok_handle")
+  xHandle         String? @map("x_handle")
+  websiteUrl      String? @map("website_url")
+  /// Set when an admin marks the social profile as reviewed. Cleared
+  /// automatically when any handle changes — re-verification required.
+  socialVerifiedAt DateTime? @map("social_verified_at")
+  socialVerifiedBy String?   @map("social_verified_by") @db.Uuid
 
   agreementAcceptedAt   DateTime? @map("agreement_accepted_at")
   agreementVersion      String?   @map("agreement_version")
