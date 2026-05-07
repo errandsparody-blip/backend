@@ -22,6 +22,7 @@ RUN apt-get update -y \
   && apt-get install -y --no-install-recommends openssl python3 make g++ ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 
 COPY package.json pnpm-lock.yaml ./
@@ -40,6 +41,7 @@ RUN apt-get update -y \
   && apt-get install -y --no-install-recommends openssl ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 
 COPY --from=deps /app/node_modules ./node_modules
@@ -63,6 +65,7 @@ RUN apt-get update -y \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --create-home --shell /bin/bash app
 
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 
 ENV NODE_ENV=production
