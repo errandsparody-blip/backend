@@ -5,7 +5,7 @@
 
 import type { StorageTier } from "@prisma/client";
 
-import { PrismaService } from "./prisma.service";
+import type { PrismaService } from "./prisma.service";
 
 export interface FeeSchedule {
   onboarding: Record<
