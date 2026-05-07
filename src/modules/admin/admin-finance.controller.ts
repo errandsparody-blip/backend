@@ -13,13 +13,42 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { PrismaService } from "../../common/prisma.service";
 
+// Pre-parse the kycStatus query param: comma-separated list → string[].
+// `z.preprocess` keeps the schema's typed input/output equal so it slots into
+// ZodValidationPipe<T>, which constrains its constructor to symmetric schemas.
+const kycStatusEnum = z.enum([
+  "PENDING",
+  "IN_PROGRESS",
+  "REQUIRES_RESUBMISSION",
+  "APPROVED",
+  "REJECTED",
+  "EXPIRED",
+]);
+
 const listVendorsSchema = z.object({
   search: z.string().min(1).max(120).optional(),
   status: z.enum(["PENDING_KYC", "ACTIVE", "SUSPENDED", "CLOSED"]).optional(),
+  // Filter by current KYC state. Useful for the KYC review queue, which
+  // wants PENDING + IN_PROGRESS + REQUIRES_RESUBMISSION rows. The frontend
+  // joins them with comma-separated `kycStatus=PENDING,IN_PROGRESS` syntax.
+  kycStatus: z.preprocess(
+    (raw) => {
+      if (typeof raw !== "string" || raw.trim() === "") return undefined;
+      return raw
+        .split(",")
+        .map((v) => v.trim().toUpperCase())
+        .filter((v) => v !== "");
+    },
+    z.array(kycStatusEnum).optional(),
+  ),
   cursor: z.string().uuid().optional(),
-  limit: z.coerce.number().int().positive().max(100).default(50),
+  // Optional. `.default()` would make the schema's input type asymmetric
+  // (number | undefined → number) and ZodValidationPipe requires a symmetric
+  // ZodSchema<T>. We default in the handler instead.
+  limit: z.coerce.number().int().positive().max(100).optional(),
 });
 type ListVendorsInput = z.infer<typeof listVendorsSchema>;
+const DEFAULT_LIMIT = 50;
 
 @Controller({ path: "admin", version: "1" })
 @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
@@ -28,24 +57,27 @@ export class AdminFinanceController {
 
   @Get("vendors")
   async listVendors(@Query(new ZodValidationPipe(listVendorsSchema)) q: ListVendorsInput) {
+    const limit = q.limit ?? DEFAULT_LIMIT;
     const where: {
       status?: ListVendorsInput["status"];
+      kycStatus?: { in: NonNullable<ListVendorsInput["kycStatus"]> };
       OR?: Array<{ businessName?: { contains: string; mode: "insensitive" } } | { id?: { equals: string } }>;
     } = {};
     if (q.status) where.status = q.status;
+    if (q.kycStatus && q.kycStatus.length > 0) where.kycStatus = { in: q.kycStatus };
     if (q.search) {
       where.OR = [{ businessName: { contains: q.search, mode: "insensitive" } }];
     }
 
     const items = await this.prisma.vendor.findMany({
       where,
-      take: q.limit + 1,
+      take: limit + 1,
       orderBy: { createdAt: "desc" },
       ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
       include: { wallet: true },
     });
     let nextCursor: string | null = null;
-    if (items.length > q.limit) {
+    if (items.length > limit) {
       const next = items.pop();
       nextCursor = next?.id ?? null;
     }
@@ -63,6 +95,10 @@ export class AdminFinanceController {
               lowBalanceThresholdCents: v.wallet.lowBalanceThresholdCents,
             }
           : null,
+        socialVerifiedAt: v.socialVerifiedAt,
+        hasSocialHandles:
+          !!v.instagramHandle || !!v.tiktokHandle || !!v.xHandle || !!v.websiteUrl,
+        agreementAcceptedAt: v.agreementAcceptedAt,
         createdAt: v.createdAt,
       })),
       nextCursor,
