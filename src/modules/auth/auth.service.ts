@@ -327,7 +327,31 @@ export class AuthService {
       });
     }
 
-    // Issue an MFA challenge token. The client must call /auth/2fa/verify next.
+    // First-time login (MFA not yet enrolled): issue a low-privilege access
+    // token (acr="1" — password-only auth). This lets the user reach the
+    // /auth/2fa/enroll endpoint to set up their authenticator. After
+    // enrollment, future logins go through /auth/2fa/verify and issue
+    // acr="2" tokens. Wallet, finance, and other sensitive endpoints should
+    // gate on acr="2"; that's tracked separately in the security review.
+    if (!user.mfaEnrolled) {
+      await this.audit.log({
+        actorId: user.id,
+        actorRole: user.role,
+        action: "auth.password_verified_pre_mfa",
+        resourceType: "user",
+        resourceId: user.id,
+        sourceIp: meta.ip,
+        userAgent: meta.userAgent,
+      });
+      return this.completeAuthentication(
+        { id: user.id, vendorId: user.vendorId, role: user.role },
+        "1",
+        meta,
+      );
+    }
+
+    // Returning user with MFA enrolled — issue an MFA challenge token. The
+    // client must call /auth/2fa/verify next to obtain an acr="2" session.
     const challengeToken = this.tokens.signMfaChallenge(user.id);
 
     await this.audit.log({
