@@ -28,11 +28,19 @@ RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 COPY package.json pnpm-lock.yaml ./
 # .npmrc is optional; copied if present so registry / hoisting prefs apply.
 COPY .npmrc* ./
+# IMPORTANT: copy prisma/ BEFORE pnpm install. The @prisma/client package has
+# a postinstall hook that generates the typed client against schema.prisma.
+# Without the schema present, the hook generates a stub, and later
+# `pnpm prisma generate` cannot reliably overwrite it under pnpm's
+# content-addressable layout. Copying prisma first means the postinstall
+# generates the correct client first time and we never look at a stub again.
+COPY prisma ./prisma
 
 RUN pnpm install --frozen-lockfile
 
 # -----------------------------------------------------------------------------
-# Stage 2 — builder. Generates Prisma client + compiles TypeScript.
+# Stage 2 — builder. Compiles TypeScript with the freshly-generated Prisma
+# client already inside the deps stage's node_modules.
 # -----------------------------------------------------------------------------
 FROM node:20-slim AS builder
 WORKDIR /app
@@ -47,7 +55,9 @@ RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Generate Prisma client into node_modules/.prisma — required at runtime.
+# Re-run prisma generate as belt-and-braces. If schema.prisma changed between
+# the deps cache layer and now (rare during a single deploy, but possible
+# with cached layers), this picks up the latest.
 RUN pnpm prisma generate
 
 # Compile TypeScript → dist/. nest build writes dist/main.js + dist/**.
@@ -74,20 +84,19 @@ ENV NODE_ENV=production
 # to drop devDependencies — keeps the runtime image small.
 COPY package.json pnpm-lock.yaml ./
 COPY .npmrc* ./
+# Copy schema.prisma BEFORE install for the same reason as the deps stage —
+# the @prisma/client postinstall hook needs the schema to generate a correct
+# typed client.
+COPY --from=builder /app/prisma ./prisma
 RUN pnpm install --frozen-lockfile --prod
 
-# The compiled application + the Prisma schema/migrations directory.
+# The compiled application.
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/prisma ./prisma
 
-# Generate the Prisma client in the runner stage. Doing this here (instead of
-# COPY --from=builder /app/node_modules/.prisma) avoids a pnpm-specific issue:
-# pnpm symlinks .prisma into its content-addressable store at a hashed path,
-# and Docker COPY can't follow a symlink that points outside the source
-# directory it's resolving. Running `prisma generate` in the prod-installed
-# node_modules is fast (~5s) and produces a real, copyable directory.
-
-# Generate the Prisma client now that prisma/ + node_modules are in place.
+# Belt-and-braces: regenerate the Prisma client. The postinstall hook above
+# usually does this correctly, but pnpm's content-addressable layout for
+# generated clients can occasionally drift; running again here is fast (~5s)
+# and produces a definitively-correct .prisma directory.
 RUN pnpm prisma generate
 
 # Drop privileges before exec.
