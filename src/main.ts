@@ -31,9 +31,21 @@ async function bootstrap(): Promise<void> {
   // Validate config before instantiating Nest. Halts boot on bad env.
   const cfg = loadConfig();
 
+  // CORS is configured at app construction so the cors middleware is the
+  // FIRST thing in the Express stack, ahead of helmet. That way preflights
+  // (OPTIONS) are answered cleanly with allow-origin/allow-credentials before
+  // any other middleware can interfere with the response.
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
     rawBody: true,
+    cors: {
+      origin: [cfg.WEB_PUBLIC_URL],
+      credentials: true,
+      methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Authorization", "Content-Type", "X-Correlation-Id", "Idempotency-Key"],
+      exposedHeaders: ["X-Correlation-Id"],
+      maxAge: 600,
+    },
   });
   app.useLogger(app.get(Logger));
 
@@ -54,6 +66,12 @@ async function bootstrap(): Promise<void> {
           baseUri: ["'self'"],
         },
       },
+      // The API is intentionally consumed cross-origin by the web app on a
+      // different parent domain (Vercel ↔ Railway). Helmet defaults this to
+      // "same-origin" since v6, which combines with COEP to break legitimate
+      // cross-origin fetches in some browsers. Explicitly relax to
+      // "cross-origin" — CORS itself remains the gate via the allowlist above.
+      crossOriginResourcePolicy: { policy: "cross-origin" },
       crossOriginEmbedderPolicy: false, // not needed; we don't embed cross-origin
       hsts: {
         maxAge: 63072000, // 2 years
@@ -67,16 +85,6 @@ async function bootstrap(): Promise<void> {
       referrerPolicy: { policy: "strict-origin-when-cross-origin" },
     }),
   );
-
-  // CORS — explicit allowlist with credentials so cookies flow.
-  app.enableCors({
-    origin: [cfg.WEB_PUBLIC_URL],
-    credentials: true,
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Authorization", "Content-Type", "X-Correlation-Id", "Idempotency-Key"],
-    exposedHeaders: ["X-Correlation-Id"],
-    maxAge: 600,
-  });
 
   app.use(cookieParser());
 
