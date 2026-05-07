@@ -56,4 +56,20 @@ export class VendorController {
     }
     return this.vendors.acceptAgreement(user.vendorId!, user.sub, body.version);
   }
+
+  /**
+   * Vendor self-submits their account for KYC review. Flips kycStatus to
+   * IN_PROGRESS so the admin queue picks it up. Sub-users cannot submit —
+   * compliance attestation is the vendor admin's responsibility.
+   */
+  @Post("kyc/submit")
+  async submitKyc(@CurrentUser() user: AuthenticatedUser) {
+    if (user.role === Role.VENDOR_SUB_USER) {
+      throw new ForbiddenException({
+        message: "Only the vendor admin can submit KYC.",
+        code: "vendor_kyc_admin_only",
+      });
+    }
+    return this.vendors.submitKyc(user.vendorId!, user.sub);
+  }
 }

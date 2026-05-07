@@ -6,7 +6,7 @@
  * Implementation Plan §4.3, §6.1.
  */
 
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { KycStatus, VendorStatus } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
@@ -146,6 +146,69 @@ export class VendorService {
       resourceId: vendorId,
       afterState: { version },
     });
+    return this.getProfile(vendorId);
+  }
+
+  /**
+   * Vendor self-submits their account for KYC review.
+   *
+   * Pre-conditions:
+   *   - Current kycStatus is PENDING or REQUIRES_RESUBMISSION (the only states
+   *     from which a vendor can submit for review). APPROVED vendors stay
+   *     approved; REJECTED vendors must contact support.
+   *   - At least one social handle is provided. Without any web presence the
+   *     reviewer has nothing to verify.
+   *
+   * Result: kycStatus → IN_PROGRESS, kycSubmittedAt set, audit entry written.
+   * The admin queue picks it up automatically.
+   */
+  async submitKyc(vendorId: string, actorId: string): Promise<VendorProfile> {
+    const vendor = await this.prisma.vendor.findUnique({ where: { id: vendorId } });
+    if (!vendor) throw new NotFoundException();
+
+    if (
+      vendor.kycStatus !== KycStatus.PENDING &&
+      vendor.kycStatus !== KycStatus.REQUIRES_RESUBMISSION &&
+      vendor.kycStatus !== KycStatus.EXPIRED
+    ) {
+      throw new BadRequestException({
+        message: "KYC cannot be submitted in the current state.",
+        code: "kyc_not_submittable",
+      });
+    }
+
+    const hasAnyHandle =
+      !!vendor.instagramHandle ||
+      !!vendor.tiktokHandle ||
+      !!vendor.xHandle ||
+      !!vendor.websiteUrl;
+    if (!hasAnyHandle) {
+      throw new BadRequestException({
+        message: "Add at least one social handle or your business website before submitting.",
+        code: "kyc_needs_social_handles",
+      });
+    }
+
+    await this.prisma.vendor.update({
+      where: { id: vendorId },
+      data: {
+        kycStatus: KycStatus.IN_PROGRESS,
+        kycSubmittedAt: new Date(),
+        // Clearing the previous reviewer note signals to the admin that this
+        // is a fresh submission, not a re-review of the same evidence.
+        kycRejectionReason: null,
+      },
+    });
+
+    await this.audit.log({
+      actorId,
+      action: "vendor.kyc_submitted",
+      resourceType: "vendor",
+      resourceId: vendorId,
+      beforeState: { kycStatus: vendor.kycStatus },
+      afterState: { kycStatus: KycStatus.IN_PROGRESS },
+    });
+
     return this.getProfile(vendorId);
   }
 
