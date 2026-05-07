@@ -113,9 +113,15 @@ async function bootstrap(): Promise<void> {
   // routes are registered, BEFORE app.listen().
   Sentry.setupExpressErrorHandler(app.getHttpAdapter().getInstance());
 
-  await app.listen(cfg.API_PORT);
+  // Cloud platforms (Railway, Heroku, Cloud Run, Fly.io) inject a PORT env
+  // var and expect the container to bind to it. We honour PORT when present
+  // and fall back to the validated API_PORT for local dev / tests. Bind on
+  // 0.0.0.0 explicitly — some Node/Nest combinations bind to ::1 by default
+  // inside containers, which the Railway proxy cannot reach.
+  const port = Number(process.env.PORT) || cfg.API_PORT;
+  await app.listen(port, "0.0.0.0");
   // eslint-disable-next-line no-console
-  console.warn(`[usa-errands-api] listening on :${cfg.API_PORT} (${cfg.NODE_ENV})`);
+  console.warn(`[usa-errands-api] listening on :${port} (${cfg.NODE_ENV})`);
 }
 
 bootstrap().catch((err) => {

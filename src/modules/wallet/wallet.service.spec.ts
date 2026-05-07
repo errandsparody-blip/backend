@@ -13,6 +13,7 @@ import { Test, type TestingModule } from "@nestjs/testing";
 
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
+import { NotificationService } from "../notifications/notification.service";
 
 import { WalletService } from "./wallet.service";
 
@@ -88,10 +89,25 @@ class FakePrisma {
     }),
   };
 
-  /** Fake $queryRaw — returns the wallet's balance to mimic the FOR UPDATE call. */
-  $queryRaw = async <T>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T> => {
-    // The service passes vendorId as the only template value.
-    const vendorId = values[0] as string;
+  /**
+   * Fake $queryRaw — returns the wallet's balance to mimic the FOR UPDATE call.
+   *
+   * Two invocation shapes are possible:
+   *   1) Tagged template:  prisma.$queryRaw`SELECT ... ${vendorId}`
+   *      → invoked as  fn(strings: TemplateStringsArray, ...values)
+   *   2) Prisma.sql arg:   prisma.$queryRaw(Prisma.sql`SELECT ... ${vendorId}`)
+   *      → invoked as  fn(sql: Prisma.Sql) where sql.values is the param array
+   *
+   * The service uses (2). Older callers may use (1). Handle both so this fake
+   * is reusable.
+   */
+  $queryRaw = async <T>(arg: unknown, ...rest: unknown[]): Promise<T> => {
+    let vendorId: string | undefined;
+    if (arg && typeof arg === "object" && "values" in arg && Array.isArray((arg as { values: unknown[] }).values)) {
+      vendorId = (arg as { values: unknown[] }).values[0] as string;
+    } else {
+      vendorId = rest[0] as string;
+    }
     const w = this.wallets.find((x) => x.vendorId === vendorId);
     if (!w) return [] as T;
     return [{ balance_cents: w.balanceCents }] as T;
@@ -105,17 +121,23 @@ describe("WalletService", () => {
   let svc: WalletService;
   let prisma: FakePrisma;
   let audit: { log: jest.Mock };
+  let notifications: { emit: jest.Mock };
 
   const VENDOR = "v-1";
 
   beforeEach(async () => {
     prisma = new FakePrisma();
     audit = { log: jest.fn() };
+    // The service emits a low-balance notification when a debit crosses
+    // the alert threshold. None of the cases in this spec cross the threshold,
+    // but the constructor still requires the dependency.
+    notifications = { emit: jest.fn() };
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         WalletService,
         { provide: PrismaService, useValue: prisma },
         { provide: AuditService, useValue: audit },
+        { provide: NotificationService, useValue: notifications },
       ],
     }).compile();
     svc = moduleRef.get(WalletService);
