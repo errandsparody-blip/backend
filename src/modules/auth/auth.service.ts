@@ -13,7 +13,6 @@ import { timingSafeEqual } from "node:crypto";
 import * as argon2 from "argon2";
 import {
   BadRequestException,
-  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -28,6 +27,7 @@ import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import {
   emailVerifyTemplate,
+  existingAccountReminderTemplate,
   mfaEnrolledTemplate,
   passwordResetTemplate,
 } from "../email/email-templates";
@@ -100,12 +100,49 @@ export class AuthService {
   async signup(input: SignupInput, meta: RequestMeta): Promise<{ userId: string }> {
     const existing = await this.prisma.user.findUnique({ where: { email: input.email } });
     if (existing) {
-      // Return a generic message at the controller layer; throwing here ensures
-      // we don't accidentally expose existence via timing or HTTP code variation.
-      throw new ConflictException({
-        message: "Could not create account.",
-        code: "signup_conflict",
+      // "Always succeed" pattern — the API never confirms whether an email
+      // is already taken, because that would let attackers enumerate the
+      // user base by brute-forcing signups. We instead:
+      //   1. Send a "you already have an account" reminder to the legit
+      //      owner of the inbox, with a sign-in link + reset-password link.
+      //   2. Run argon2 on a dummy hash to match the timing of the
+      //      successful path so signups can't be distinguished by latency.
+      //   3. Return a synthetic userId that has no relation to any real
+      //      user record — the frontend treats this branch identically to
+      //      a brand-new signup ("we sent you a code/link, check inbox").
+      // Audit it for ops visibility but don't link it to the existing user.
+      await argon2
+        .hash(input.password, ARGON2_OPTIONS)
+        .catch(() => undefined);
+
+      const tpl = existingAccountReminderTemplate({ email: input.email });
+      await this.email.send({
+        to: input.email,
+        subject: tpl.subject,
+        html: tpl.html,
+        text: tpl.text,
+        type: "auth.signup_existing_email_attempt",
+        // Tied to the existing user so support can look it up if asked.
+        userId: existing.id,
       });
+
+      await this.audit.log({
+        // Logged against the real user but with the IP/UA of the attempt
+        // so we can correlate brute-force attempts later.
+        actorId: existing.id,
+        actorRole: existing.role,
+        action: "auth.signup_existing_email_attempt",
+        resourceType: "user",
+        resourceId: existing.id,
+        sourceIp: meta.ip,
+        userAgent: meta.userAgent,
+      });
+
+      // Return a synthetic uuid — frontend doesn't store this, just keeps
+      // the response shape consistent with a real signup. We deliberately
+      // do NOT return existing.id; that would leak existence to anyone
+      // logging API responses.
+      return { userId: "00000000-0000-0000-0000-000000000000" };
     }
 
     // HIBP k-anonymity check — Implementation Plan §4.1.

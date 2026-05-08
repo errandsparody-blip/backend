@@ -139,6 +139,32 @@ export function passwordResetTemplate(args: { email: string; resetUrl: string })
   };
 }
 
+/**
+ * Sent when someone tries to sign up with an email that already has an
+ * account. The signup endpoint returns a generic success in that case — we
+ * never confirm/deny existence to the caller — but the legitimate owner of
+ * the inbox needs a useful next step. This email gives them one.
+ */
+export function existingAccountReminderTemplate(args: { email: string }): RenderedEmail {
+  return {
+    subject: "You already have a USA Errands account",
+    html: shell({
+      eyebrow: "[01] Account exists",
+      title: "Looks like you've been here before",
+      bodyHtml: `<p style="margin:0 0 12px 0;">Someone — probably you — just tried to sign up using <strong>${escape(args.email)}</strong>. There's already an account with this email.</p>
+        <p style="margin:0 0 12px 0;">Sign in below to pick up where you left off, or reset your password if you've forgotten it.</p>
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">If this wasn't you, no action is needed — your account hasn't changed.</p>`,
+      cta: { label: "Sign in", href: `${cfg.WEB_PUBLIC_URL}/login` },
+    }),
+    text:
+      `You already have a USA Errands account\n\n` +
+      `Someone tried to sign up using ${args.email}. There's already an account with this email.\n` +
+      `Sign in here: ${cfg.WEB_PUBLIC_URL}/login\n` +
+      `Forgot your password? Reset it: ${cfg.WEB_PUBLIC_URL}/forgot-password\n\n` +
+      `If this wasn't you, no action is needed.`,
+  };
+}
+
 export function mfaEnrolledTemplate(args: { email: string }): RenderedEmail {
   return {
     subject: "Two-factor authentication is on",
