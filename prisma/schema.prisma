@@ -242,10 +242,19 @@ model Product {
   declaredValueCents Int   @map("declared_value_cents")
 
   // Dimensions (inches) and weight (oz). Used for shipping rate calc + tier sizing.
+  // Length/width/height are optional — vendors often determine box size at
+  // pack time. Order-fees treats nulls as 0 in the envelope calc; the carrier
+  // can still rate from weight alone, just less precisely.
   weightOz        Float    @map("weight_oz")
-  lengthIn        Float    @map("length_in")
-  widthIn         Float    @map("width_in")
-  heightIn        Float    @map("height_in")
+  lengthIn        Float?   @map("length_in")
+  widthIn         Float?   @map("width_in")
+  heightIn        Float?   @map("height_in")
+
+  // Storage tier the vendor declares for this product. Every SKU created
+  // from receiving this product inherits the tier — drives storage billing,
+  // tier-sizing, and the inventory grid. Default SMALL keeps existing rows
+  // working without forcing a backfill.
+  storageTier     StorageTier @default(SMALL) @map("storage_tier")
 
   status          String   @default("ACTIVE")  // ACTIVE | ARCHIVED
 

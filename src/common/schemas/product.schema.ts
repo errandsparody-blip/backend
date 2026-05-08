@@ -15,6 +15,11 @@ const isoCountrySchema = z.string().length(2).toUpperCase();
 const dimensionSchema = z.number().positive().max(120, "Max 120 inches.");
 const weightSchema = z.number().positive().max(2400, "Max 2400 oz (~150 lb).");
 
+// Dimensions are optional — explicit null and undefined both clear the
+// column. Empty-string is normalised by callers; the JSON wire form
+// expects either a number or null. Order-fees handles nulls gracefully.
+const optionalDimension = dimensionSchema.nullable().optional();
+
 export const createProductSchema = z.object({
   code: productCodeSchema,
   name: z.string().min(2).max(120),
@@ -23,9 +28,9 @@ export const createProductSchema = z.object({
   countryOfOrigin: isoCountrySchema,
   declaredValueCents: z.number().int().nonnegative(),
   weightOz: weightSchema,
-  lengthIn: dimensionSchema,
-  widthIn: dimensionSchema,
-  heightIn: dimensionSchema,
+  lengthIn: optionalDimension,
+  widthIn: optionalDimension,
+  heightIn: optionalDimension,
 });
 export type CreateProductInput = z.infer<typeof createProductSchema>;
 

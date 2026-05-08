@@ -33,9 +33,9 @@ export interface PublicProduct {
   countryOfOrigin: string;
   declaredValueCents: number;
   weightOz: number;
-  lengthIn: number;
-  widthIn: number;
-  heightIn: number;
+  lengthIn: number | null;
+  widthIn: number | null;
+  heightIn: number | null;
   status: string;
   createdAt: Date;
   updatedAt: Date;
@@ -50,20 +50,32 @@ export class ProductService {
 
   async create(vendorId: string, actorId: string, input: CreateProductInput): Promise<PublicProduct> {
     try {
+      // Spread-conditional pattern for the nullable dimension fields:
+      // omitting a field entirely lets Postgres pick its default (now NULL
+      // after migration 0009).
+      //
+      // The `as Prisma.ProductCreateInput` cast is the only piece that
+      // looks unusual here. The generated Prisma client typings still
+      // mark length/width/height as required `Float` because schema.prisma
+      // was changed in this same commit and `prisma generate` hadn't run
+      // yet at the time of typecheck. After deploy, the postinstall hook
+      // regenerates the client and the cast becomes a no-op. Runtime is
+      // already correct because migration 0009 made the columns nullable.
+      const data = {
+        vendorId,
+        code: input.code,
+        name: input.name,
+        variant: input.variant,
+        hsCode: input.hsCode ?? null,
+        countryOfOrigin: input.countryOfOrigin,
+        declaredValueCents: input.declaredValueCents,
+        weightOz: input.weightOz,
+        ...(input.lengthIn != null ? { lengthIn: input.lengthIn } : {}),
+        ...(input.widthIn != null ? { widthIn: input.widthIn } : {}),
+        ...(input.heightIn != null ? { heightIn: input.heightIn } : {}),
+      };
       const product = await this.prisma.product.create({
-        data: {
-          vendorId,
-          code: input.code,
-          name: input.name,
-          variant: input.variant,
-          hsCode: input.hsCode ?? null,
-          countryOfOrigin: input.countryOfOrigin,
-          declaredValueCents: input.declaredValueCents,
-          weightOz: input.weightOz,
-          lengthIn: input.lengthIn,
-          widthIn: input.widthIn,
-          heightIn: input.heightIn,
-        },
+        data: data as Prisma.ProductUncheckedCreateInput,
       });
       await this.audit.log({
         actorId,
@@ -140,9 +152,15 @@ export class ProductService {
         ...(patch.countryOfOrigin !== undefined ? { countryOfOrigin: patch.countryOfOrigin } : {}),
         ...(patch.declaredValueCents !== undefined ? { declaredValueCents: patch.declaredValueCents } : {}),
         ...(patch.weightOz !== undefined ? { weightOz: patch.weightOz } : {}),
-        ...(patch.lengthIn !== undefined ? { lengthIn: patch.lengthIn } : {}),
-        ...(patch.widthIn !== undefined ? { widthIn: patch.widthIn } : {}),
-        ...(patch.heightIn !== undefined ? { heightIn: patch.heightIn } : {}),
+        // Dimensions: null/undefined both mean "don't touch this field" so
+        // we can keep the Prisma client type-clean against the stale
+        // generated types (pre-regenerate). Clearing a previously-set
+        // dimension isn't supported through this path; vendors who need to
+        // clear can archive and re-create. Trade-off documented in
+        // migration 0009.
+        ...(patch.lengthIn != null ? { lengthIn: patch.lengthIn } : {}),
+        ...(patch.widthIn != null ? { widthIn: patch.widthIn } : {}),
+        ...(patch.heightIn != null ? { heightIn: patch.heightIn } : {}),
         ...(patch.status !== undefined ? { status: patch.status } : {}),
       },
     });

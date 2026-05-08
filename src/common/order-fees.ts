@@ -82,9 +82,13 @@ export function computeOrderFees(args: ComputeOrderFeesArgs): OrderFeeBreakdown 
 export interface ParcelLineDims {
   qty: number;
   weightOz: number;
-  lengthIn: number;
-  widthIn: number;
-  heightIn: number;
+  // Optional — vendors may not have measured product dimensions yet.
+  // Lines without dims contribute weight only; the parcel envelope
+  // collapses to whatever the dimensioned lines say (or zeros, in which
+  // case the carrier rates from weight alone — less precise but valid).
+  lengthIn: number | null;
+  widthIn: number | null;
+  heightIn: number | null;
 }
 
 export function aggregateParcel(lines: ParcelLineDims[]): {
@@ -103,10 +107,13 @@ export function aggregateParcel(lines: ParcelLineDims[]): {
   for (const l of lines) {
     if (l.qty <= 0) continue;
     weightOz += l.weightOz * l.qty;
-    lengthIn = Math.max(lengthIn, l.lengthIn);
-    widthIn = Math.max(widthIn, l.widthIn);
+    // Nullable dims — treat unset as 0. Math.max with the running max
+    // means a line without dims doesn't shrink the envelope; height
+    // simply doesn't grow for those lines.
+    lengthIn = Math.max(lengthIn, l.lengthIn ?? 0);
+    widthIn = Math.max(widthIn, l.widthIn ?? 0);
     // Height stacks (rough heuristic: items stacked vertically).
-    heightIn += l.heightIn * l.qty;
+    heightIn += (l.heightIn ?? 0) * l.qty;
   }
   return {
     weightOz: Math.ceil(weightOz),
