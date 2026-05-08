@@ -60,13 +60,20 @@ const websiteUrlSchema = z
   .url("Enter a full URL including https://")
   .max(500);
 
-// Empty string strips the value (sets it back to null on the vendor row).
-// Undefined leaves it unchanged.
-const optionalSocial = <T extends z.ZodTypeAny>(schema: T) =>
+// Empty string OR explicit null both strip the value (set the column back
+// to null on the vendor row). Undefined leaves it unchanged. The frontend
+// posts `null` from the settings form when a vendor clears a handle, so
+// the schema must accept that without raising "Expected string, received
+// null".
+const optionalSocial = <T extends z.ZodType<string, z.ZodTypeDef, unknown>>(
+  schema: T,
+): z.ZodType<string | null | undefined, z.ZodTypeDef, unknown> =>
   z
-    .union([z.literal(""), schema])
+    .union([z.literal(""), z.null(), schema])
     .optional()
-    .transform((v) => (v === "" ? null : v));
+    .transform<string | null | undefined>((v) =>
+      v === "" || v === null ? null : v,
+    );
 
 export const updateVendorSchema = z.object({
   businessName: z.string().min(2).max(120).optional(),
