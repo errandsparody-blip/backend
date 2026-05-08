@@ -54,7 +54,7 @@ export class VendorController {
         code: "vendor_agreement_admin_only",
       });
     }
-    return this.vendors.acceptAgreement(user.vendorId!, user.sub, body.version);
+    return this.vendors.acceptAgreement(user.vendorId!, user.sub, body.version, body.signatureName);
   }
 
   /**

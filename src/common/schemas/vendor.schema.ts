@@ -79,5 +79,12 @@ export type UpdateVendorInput = z.infer<typeof updateVendorSchema>;
 
 export const acceptAgreementSchema = z.object({
   version: z.string().min(1),
+  /**
+   * Vendor's typed-name e-signature. Optional on the wire (sub-user
+   * activation flows that don't have a UI yet might post the version
+   * alone), but the friendly UI always provides it. We persist it in
+   * the audit log alongside the actor + timestamp for legal traceability.
+   */
+  signatureName: z.string().trim().min(2).max(120).optional(),
 });
 export type AcceptAgreementInput = z.infer<typeof acceptAgreementSchema>;

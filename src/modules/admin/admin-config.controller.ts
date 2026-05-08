@@ -31,6 +31,7 @@ import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
+import { AgreementService } from "../vendors/agreement.service";
 
 const KEY_RE = /^[a-z0-9_]{2,64}$/;
 
@@ -49,6 +50,7 @@ export class AdminConfigController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly agreement: AgreementService,
   ) {}
 
   @Get()
@@ -105,6 +107,11 @@ export class AdminConfigController {
       beforeState: { value: before.value, description: before.description },
       afterState: { value: updated.value, description: updated.description },
     });
+
+    // Bust caches that depend on this row. Add new keys here as needed.
+    if (key === "agreement_version") {
+      this.agreement.invalidate();
+    }
 
     return updated;
   }

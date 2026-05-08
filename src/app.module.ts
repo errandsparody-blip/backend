@@ -17,6 +17,7 @@ import { loadConfig } from "./common/config";
 import { CryptoModule } from "./common/crypto.module";
 import { AllExceptionsFilter } from "./common/filters/all-exceptions.filter";
 import { IdempotencyModule } from "./common/idempotency.module";
+import { AgreementVersionGuard } from "./common/guards/agreement-version.guard";
 import { JwtAuthGuard } from "./common/guards/jwt-auth.guard";
 import { RolesGuard } from "./common/guards/roles.guard";
 import { PrismaModule } from "./common/prisma.module";
@@ -114,6 +115,10 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    // AgreementVersionGuard runs after JWT + Roles. NestJS executes APP_GUARDs
+    // in order, so a JWT failure short-circuits before we hit the agreement
+    // check (we never need to query Postgres for an unauth'd request).
+    { provide: APP_GUARD, useClass: AgreementVersionGuard },
   ],
 })
 export class AppModule {}

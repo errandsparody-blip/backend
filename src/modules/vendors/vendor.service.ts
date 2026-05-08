@@ -11,6 +11,7 @@ import { KycStatus, VendorStatus } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
+import { AgreementService } from "./agreement.service";
 
 export interface VendorProfile {
   id: string;
@@ -19,6 +20,19 @@ export interface VendorProfile {
   kycStatus: KycStatus;
   agreementAcceptedAt: Date | null;
   agreementVersion: string | null;
+  /**
+   * The version the vendor MUST be on. Read from the `agreement_version`
+   * configuration row at request time. The frontend posts this value back
+   * when the vendor accepts so the client and server agree on what was
+   * signed.
+   */
+  currentAgreementVersion: string;
+  /**
+   * True when `agreementAcceptedAt` is set AND the accepted version
+   * matches the current published version. Pre-computed here so the
+   * frontend doesn't need to know about version comparison logic.
+   */
+  agreementUpToDate: boolean;
   status: VendorStatus;
   createdAt: Date;
 
@@ -36,11 +50,15 @@ export class VendorService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly agreement: AgreementService,
   ) {}
 
   async getProfile(vendorId: string): Promise<VendorProfile> {
     const vendor = await this.prisma.vendor.findUnique({ where: { id: vendorId } });
     if (!vendor) throw new NotFoundException();
+    const currentAgreementVersion = await this.agreement.getCurrentVersion();
+    const agreementUpToDate =
+      vendor.agreementAcceptedAt !== null && vendor.agreementVersion === currentAgreementVersion;
     return {
       id: vendor.id,
       businessName: vendor.businessName,
@@ -48,6 +66,8 @@ export class VendorService {
       kycStatus: vendor.kycStatus,
       agreementAcceptedAt: vendor.agreementAcceptedAt,
       agreementVersion: vendor.agreementVersion,
+      currentAgreementVersion,
+      agreementUpToDate,
       status: vendor.status,
       createdAt: vendor.createdAt,
       instagramHandle: vendor.instagramHandle,
@@ -122,11 +142,34 @@ export class VendorService {
 
   /**
    * Accept the vendor agreement. Records timestamp + version. Idempotent: if
-   * already accepted, this is a no-op (returns the existing record).
+   * already accepted at the current version, this is a no-op.
+   *
+   * The frontend must post the version it just displayed to the user. We
+   * compare it against the published `agreement_version` config and refuse
+   * if they disagree — that means the published terms changed between the
+   * page render and the click, and the vendor's "I accept" no longer
+   * applies to what we want them to be agreeing to.
    */
-  async acceptAgreement(vendorId: string, actorId: string, version: string): Promise<VendorProfile> {
+  async acceptAgreement(
+    vendorId: string,
+    actorId: string,
+    version: string,
+    signatureName?: string,
+  ): Promise<VendorProfile> {
     const vendor = await this.prisma.vendor.findUnique({ where: { id: vendorId } });
     if (!vendor) throw new NotFoundException();
+
+    const currentVersion = await this.agreement.getCurrentVersion();
+    if (version !== currentVersion) {
+      throw new BadRequestException({
+        message:
+          "The terms changed while this page was open. Reload the agreement and accept the latest version.",
+        code: "agreement_version_mismatch",
+        currentAgreementVersion: currentVersion,
+        postedVersion: version,
+      });
+    }
+
     if (vendor.agreementAcceptedAt && vendor.agreementVersion === version) {
       return this.getProfile(vendorId);
     }
@@ -144,7 +187,10 @@ export class VendorService {
       action: "vendor.agreement_accepted",
       resourceType: "vendor",
       resourceId: vendorId,
-      afterState: { version },
+      // signatureName lands in the audit JSON next to actor + timestamp,
+      // forming the e-signature record. Fine to be null for legacy
+      // acceptances that predate the typed-name capture.
+      afterState: { version, ...(signatureName ? { signatureName } : {}) },
     });
     return this.getProfile(vendorId);
   }
