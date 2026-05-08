@@ -13,7 +13,10 @@ module.exports = {
   ],
   root: true,
   env: { node: true, jest: true },
-  ignorePatterns: [".eslintrc.cjs", "dist/**", "coverage/**"],
+  // `scripts/` and `prisma/` live outside tsconfig's `include` paths; they
+  // run via ts-node directly. The project-aware parser would fail on them,
+  // and the existing lint glob (`{src,test}/**/*.ts`) already skips them.
+  ignorePatterns: [".eslintrc.cjs", "dist/**", "coverage/**", "scripts/**", "prisma/**"],
   rules: {
     "@typescript-eslint/no-explicit-any": "error",
     "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
