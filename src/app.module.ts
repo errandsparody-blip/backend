@@ -26,6 +26,7 @@ import { AuditModule } from "./modules/audit/audit.module";
 import { AuthModule } from "./modules/auth/auth.module";
 import { EmailModule } from "./modules/email/email.module";
 import { ExportModule } from "./modules/exports/export.module";
+import { FeesModule } from "./modules/fees/fees.module";
 import { HealthModule } from "./modules/health/health.module";
 import { KycModule } from "./modules/integrations/kyc/kyc.module";
 import { StripeModule } from "./modules/integrations/stripe/stripe.module";
@@ -103,6 +104,7 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     OrderModule,
     ReturnModule,
     ExportModule,
+    FeesModule,
     TeamModule,
     TrackingModule,
     KycModule,
