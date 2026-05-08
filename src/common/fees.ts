@@ -3,9 +3,25 @@
  * PRD §6.3.
  */
 
+import { BadRequestException } from "@nestjs/common";
 import type { StorageTier } from "@prisma/client";
 
 import type { PrismaService } from "./prisma.service";
+
+/**
+ * Thrown when a declared tier needs a manual quote that hasn't been
+ * configured yet. NestJS maps this to 400 + the stable code so the
+ * frontend can render actionable copy.
+ */
+export class NegotiatedTierError extends BadRequestException {
+  constructor(public readonly tier: StorageTier) {
+    super({
+      message: `${tier} pallets are priced per-quote. Contact support to set up a rate before submitting.`,
+      code: "psn_negotiated_tier",
+      tier,
+    });
+  }
+}
 
 export interface FeeSchedule {
   onboarding: Record<
@@ -22,7 +38,11 @@ export type DeclaredBoxCounts = Partial<Record<StorageTier, number>>;
 
 /**
  * Sum onboarding fees for a declared mix of boxes.
- * Throws if any tier present has `negotiated=true` and no explicit override.
+ *
+ * Throws NegotiatedTierError (400, code = `psn_negotiated_tier`) if any
+ * tier present has `negotiated=true` and no explicit override. The frontend
+ * should detect this code and tell the vendor to contact support before
+ * resubmitting — it's a normal product flow, not an error to log to Sentry.
  */
 export function computeOnboardingFeeCents(
   schedule: FeeSchedule,
@@ -35,9 +55,7 @@ export function computeOnboardingFeeCents(
     if (!count || count <= 0) continue;
     const fee = schedule.onboarding[tier];
     if ("negotiated" in fee && fee.negotiated) {
-      throw new Error(
-        `Tier ${tier} requires a negotiated quote — ask the vendor to contact us before submitting.`,
-      );
+      throw new NegotiatedTierError(tier);
     }
     const subtotal = (fee as { totalCents: number }).totalCents * count;
     perTier.push({ tier, count, subtotalCents: subtotal });
