@@ -3,7 +3,7 @@
  * PRD §6.3.
  */
 
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, InternalServerErrorException } from "@nestjs/common";
 import type { StorageTier } from "@prisma/client";
 
 import type { PrismaService } from "./prisma.service";
@@ -18,6 +18,27 @@ export class NegotiatedTierError extends BadRequestException {
     super({
       message: `${tier} pallets are priced per-quote. Contact support to set up a rate before submitting.`,
       code: "psn_negotiated_tier",
+      tier,
+    });
+  }
+}
+
+/**
+ * Thrown when the fee schedule row is missing a tier that the vendor has
+ * declared. This is an operational gap — usually a stale seed in prod
+ * that predates a tier being added — and not the vendor's fault. We
+ * surface a 500 with a stable code so it lights up in Sentry distinctly
+ * from "real" 500s, but the user-facing message tells them the same
+ * thing as the negotiated case (contact support).
+ *
+ * Without this, the function would `"negotiated" in undefined` and throw
+ * a raw TypeError, which became a generic 500 on the wire.
+ */
+export class MissingTierFeeError extends InternalServerErrorException {
+  constructor(public readonly tier: StorageTier) {
+    super({
+      message: `${tier} fee is not configured on this environment. Contact support to set up a rate before submitting.`,
+      code: "psn_tier_misconfigured",
       tier,
     });
   }
@@ -54,10 +75,23 @@ export function computeOnboardingFeeCents(
   for (const [tier, count] of Object.entries(declared) as Array<[StorageTier, number]>) {
     if (!count || count <= 0) continue;
     const fee = schedule.onboarding[tier];
+    // Defensive: if the schedule was seeded before this tier existed, `fee`
+    // is undefined. `"negotiated" in undefined` would throw a raw TypeError
+    // and surface as a generic 500. Convert it to a structured exception so
+    // the frontend can render a helpful banner and Sentry can tag it.
+    if (!fee) {
+      throw new MissingTierFeeError(tier);
+    }
     if ("negotiated" in fee && fee.negotiated) {
       throw new NegotiatedTierError(tier);
     }
-    const subtotal = (fee as { totalCents: number }).totalCents * count;
+    const totalCentsForTier = (fee as { totalCents?: number }).totalCents;
+    if (typeof totalCentsForTier !== "number" || !Number.isFinite(totalCentsForTier)) {
+      // Same defence as above: an inconsistent config row should produce
+      // a structured response, not a NaN that propagates into the ledger.
+      throw new MissingTierFeeError(tier);
+    }
+    const subtotal = totalCentsForTier * count;
     perTier.push({ tier, count, subtotalCents: subtotal });
     totalCents += subtotal;
   }
@@ -65,9 +99,24 @@ export function computeOnboardingFeeCents(
   return { totalCents, perTier };
 }
 
-/** Load the fee schedule from the configuration table. Throws if missing. */
+/**
+ * Load the fee schedule from the configuration table.
+ *
+ * Throws an InternalServerErrorException with a stable code when the row
+ * is missing. The plain `Error` that lived here previously would surface
+ * as a generic 500 with no code, which the catch-all wrapped as
+ * "An unexpected error occurred." The structured form lets the frontend
+ * catalog render a meaningful banner and Sentry tags the gap distinctly
+ * from runtime crashes.
+ */
 export async function loadFeeSchedule(prisma: PrismaService): Promise<FeeSchedule> {
   const row = await prisma.configuration.findUnique({ where: { key: "fee_schedule" } });
-  if (!row) throw new Error("fee_schedule configuration is missing — run prisma:seed.");
+  if (!row) {
+    throw new InternalServerErrorException({
+      message:
+        "Fee schedule is not configured on this environment. Contact support before submitting.",
+      code: "fee_schedule_missing",
+    });
+  }
   return row.value as unknown as FeeSchedule;
 }
