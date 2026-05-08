@@ -124,15 +124,29 @@ export class AdminPsnService {
 
         let skuId: string | null = declared.skuId;
         if (submitted.acceptedQty > 0) {
+          // Pull both the variant and the storage tier from the product so
+          // the resulting SKU bucket lands in the right tier for monthly
+          // storage billing. Pre-0010 rows default to SMALL on the Product
+          // side, so this is always defined at runtime. The cast handles
+          // the stale Prisma client (which doesn't yet know about
+          // storage_tier on Product) — `prisma generate` updates it on
+          // deploy.
+          const product = (await tx.product.findUnique({
+            where: { id: declared.productId },
+          })) as null | {
+            variant: string;
+            storageTier: "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET";
+          };
           skuId = await this.skus.receiveIntoBucket(tx as unknown as Tx, {
             vendorId: psn.vendorId,
             productId: declared.productId,
             // Receive into product's own variant; future enhancement: allow
             // operator to override at receiving time.
-            variant: (await tx.product.findUnique({ where: { id: declared.productId } }))?.variant ?? "STD",
+            variant: product?.variant ?? "STD",
             qty: submitted.acceptedQty,
             psnId: psn.id,
             actorId,
+            storageTier: product?.storageTier,
           });
         }
 

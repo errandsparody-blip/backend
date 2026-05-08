@@ -20,6 +20,10 @@ const weightSchema = z.number().positive().max(2400, "Max 2400 oz (~150 lb).");
 // expects either a number or null. Order-fees handles nulls gracefully.
 const optionalDimension = dimensionSchema.nullable().optional();
 
+// Storage tier defaults to SMALL — the SKU bucket the vendor's product
+// lives in for monthly storage billing. Different from PSN box mix.
+const storageTierSchema = z.enum(["SMALL", "MEDIUM", "LARGE", "X_LARGE", "PALLET"]);
+
 export const createProductSchema = z.object({
   code: productCodeSchema,
   name: z.string().min(2).max(120),
@@ -31,6 +35,7 @@ export const createProductSchema = z.object({
   lengthIn: optionalDimension,
   widthIn: optionalDimension,
   heightIn: optionalDimension,
+  storageTier: storageTierSchema.default("SMALL"),
 });
 export type CreateProductInput = z.infer<typeof createProductSchema>;
 

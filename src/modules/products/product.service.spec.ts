@@ -126,6 +126,7 @@ describe("ProductService — tenant isolation (IDOR)", () => {
     lengthIn: 12,
     widthIn: 9,
     heightIn: 1,
+    storageTier: "SMALL",
   } as const;
 
   beforeEach(async () => {

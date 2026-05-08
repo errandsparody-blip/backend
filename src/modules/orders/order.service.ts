@@ -79,9 +79,12 @@ interface ProductSnapshot {
   code: string;
   name: string;
   weightOz: number;
-  lengthIn: number;
-  widthIn: number;
-  heightIn: number;
+  // Length/width/height became optional in migration 0009. The order-fees
+  // aggregator handles nulls by treating them as 0 in the parcel
+  // envelope; the carrier rates from weight alone in that case.
+  lengthIn: number | null;
+  widthIn: number | null;
+  heightIn: number | null;
   declaredValueCents: number;
   countryOfOrigin: string;
 }

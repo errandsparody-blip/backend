@@ -36,6 +36,7 @@ export interface PublicProduct {
   lengthIn: number | null;
   widthIn: number | null;
   heightIn: number | null;
+  storageTier: "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET";
   status: string;
   createdAt: Date;
   updatedAt: Date;
@@ -73,6 +74,7 @@ export class ProductService {
         ...(input.lengthIn != null ? { lengthIn: input.lengthIn } : {}),
         ...(input.widthIn != null ? { widthIn: input.widthIn } : {}),
         ...(input.heightIn != null ? { heightIn: input.heightIn } : {}),
+        storageTier: input.storageTier,
       };
       const product = await this.prisma.product.create({
         data: data as Prisma.ProductUncheckedCreateInput,
@@ -161,6 +163,7 @@ export class ProductService {
         ...(patch.lengthIn != null ? { lengthIn: patch.lengthIn } : {}),
         ...(patch.widthIn != null ? { widthIn: patch.widthIn } : {}),
         ...(patch.heightIn != null ? { heightIn: patch.heightIn } : {}),
+        ...(patch.storageTier !== undefined ? { storageTier: patch.storageTier } : {}),
         ...(patch.status !== undefined ? { status: patch.status } : {}),
       },
     });
@@ -197,6 +200,12 @@ export class ProductService {
       lengthIn: p.lengthIn,
       widthIn: p.widthIn,
       heightIn: p.heightIn,
+      // The stale Prisma client (pre-`prisma generate`) doesn't yet
+      // know about storage_tier. Read it via a cast; runtime is correct
+      // because migration 0010 added the column with a SMALL default.
+      storageTier:
+        ((p as unknown as { storageTier?: PublicProduct["storageTier"] }).storageTier ??
+          "SMALL") as PublicProduct["storageTier"],
       status: p.status,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
