@@ -10,6 +10,7 @@
  */
 
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -144,6 +145,24 @@ export class ProductService {
   ): Promise<PublicProduct> {
     const before = await this.prisma.product.findFirst({ where: { id, vendorId } });
     if (!before) throw new NotFoundException();
+
+    // Variant becomes part of the SKU id format
+    // (`UER-<vendor>-<productCode>-<variant>`). Once any SKU exists for
+    // this product, changing the variant would mean the next receipt
+    // mints SKUs at a new id while the existing SKUs keep their old id —
+    // same product, two id formats, audit nightmare. Lock it.
+    if (patch.variant !== undefined && patch.variant !== before.variant) {
+      const skuCount = await this.prisma.sku.count({
+        where: { productId: id, vendorId },
+      });
+      if (skuCount > 0) {
+        throw new BadRequestException({
+          message:
+            "Variant can't change once stock has been received under this product. Archive this product and create a new one with the new variant instead.",
+          code: "product_variant_locked",
+        });
+      }
+    }
 
     const updated = await this.prisma.product.update({
       where: { id }, // safe — we just confirmed scope above
