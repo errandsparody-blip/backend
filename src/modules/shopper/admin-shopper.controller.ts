@@ -332,6 +332,30 @@ export class AdminShopperController {
   // Cancel ± refund
   // ---------------------------------------------------------------------------
 
+  /**
+   * Cancel + (optional) refund. Correctness contract:
+   *
+   *   1. If buyer never paid intake → no refund possible, status flips to CANCELLED.
+   *
+   *   2. If buyer paid intake only → refund the *remaining refundable* on the
+   *      intake intent. Remaining = intake_total − sum(prior succeeded/pending
+   *      refunds against that intent). This handles the case where a
+   *      negative-followup refund already moved part of the intake back, and
+   *      avoids the "charge_already_refunded" 4xx that would otherwise lock
+   *      the cancel.
+   *
+   *   3. If buyer also paid a positive followup → also refund the *remaining
+   *      refundable* on the followup intent. Two separate Stripe Refund calls,
+   *      separate idempotency keys, both refund ids persisted.
+   *
+   *   4. If a Stripe refund call hard-fails (network, auth, anything not
+   *      "already refunded"), abort the cancel — the row stays in its current
+   *      state so admin can retry without orphan refunds.
+   *
+   *   5. Idempotency keys are scoped per-direction (intake vs followup) and
+   *      per-request, so a network retry from the admin's browser produces
+   *      the SAME refund id rather than a second one.
+   */
   @Post(":id/cancel")
   @HttpCode(HttpStatus.OK)
   async cancel(
@@ -342,30 +366,85 @@ export class AdminShopperController {
     this.assertFinanceRole(user);
     const request = await this.requests.getById(id, { includeLines: false });
 
-    let refundIssued = false;
-    if (body.issueRefund && request.intakePaidAt && request.intakeStripeIntentId) {
-      // Refund whatever the buyer has paid in total (intake + any follow-up
-      // already collected). For simplicity, MVP supports only intake refund;
-      // follow-up refunds at cancel time are a future enhancement.
-      const refundAmount = request.intakeTotalCents;
-      try {
-        await this.stripe.refundShopperIntake({
-          paymentIntentId: request.intakeStripeIntentId,
-          amountCents: refundAmount,
-          requestId: id,
-          idempotencyKey: `shopper:refund:cancel:${id}`,
-          reason: "requested_by_customer",
-        });
-        refundIssued = true;
-      } catch (err) {
-        this.logger.error(
-          { err, requestId: id },
-          "shopper.cancel.refund_failed",
-        );
-        throw new InternalServerErrorException({
-          message: "Could not issue refund. The request was not cancelled.",
-          code: "shopper_cancel_refund_failed",
-        });
+    let intakeRefundId: string | null = null;
+    let followupRefundId: string | null = null;
+    let refundedAmountCents = 0;
+
+    if (body.issueRefund) {
+      // INTAKE refund — only meaningful if the buyer actually paid the intake.
+      if (request.intakePaidAt && request.intakeStripeIntentId) {
+        try {
+          const alreadyRefunded = await this.stripe.getRefundedAmountForIntent(
+            request.intakeStripeIntentId,
+          );
+          const remaining = request.intakeTotalCents - alreadyRefunded;
+          if (remaining > 0) {
+            const r = await this.stripe.refundShopperIntake({
+              paymentIntentId: request.intakeStripeIntentId,
+              amountCents: remaining,
+              requestId: id,
+              // Per-direction idempotency key. A second click from the admin
+              // returns the same refund id rather than double-refunding.
+              idempotencyKey: `shopper:cancel:intake:${id}`,
+              reason: "requested_by_customer",
+            });
+            intakeRefundId = r.refundId;
+            refundedAmountCents += remaining;
+          }
+          // remaining <= 0 means a prior refund already covered the intake;
+          // nothing to do but record the cancel.
+        } catch (err) {
+          this.logger.error({ err, requestId: id }, "shopper.cancel.intake_refund_failed");
+          throw new InternalServerErrorException({
+            message:
+              "Could not issue refund against the intake payment. The request was not cancelled.",
+            code: "shopper_cancel_refund_failed",
+            stage: "intake",
+          });
+        }
+      }
+
+      // FOLLOWUP refund — only when buyer paid a positive followup. The
+      // negative-followup case (we issued a refund earlier) is handled
+      // implicitly above because that refund is counted in alreadyRefunded.
+      if (
+        request.followupAmountCents != null &&
+        request.followupAmountCents > 0 &&
+        request.followupResolvedAt &&
+        request.followupStripeIntentId
+      ) {
+        try {
+          const alreadyRefunded = await this.stripe.getRefundedAmountForIntent(
+            request.followupStripeIntentId,
+          );
+          const remaining = request.followupAmountCents - alreadyRefunded;
+          if (remaining > 0) {
+            const r = await this.stripe.refundShopperIntake({
+              paymentIntentId: request.followupStripeIntentId,
+              amountCents: remaining,
+              requestId: id,
+              idempotencyKey: `shopper:cancel:followup:${id}`,
+              reason: "requested_by_customer",
+            });
+            followupRefundId = r.refundId;
+            refundedAmountCents += remaining;
+          }
+        } catch (err) {
+          // Intake may have already been refunded successfully above. We
+          // don't try to "undo" it here — admin's choice to retry is safer
+          // than us guessing. Status stays put; idempotency means the next
+          // attempt won't re-refund the intake.
+          this.logger.error({ err, requestId: id }, "shopper.cancel.followup_refund_failed");
+          throw new InternalServerErrorException({
+            message:
+              "Could not issue refund against the follow-up payment. " +
+              "Intake refund (if any) was issued; the follow-up refund must be retried " +
+              "before the cancel finalises.",
+            code: "shopper_cancel_refund_failed",
+            stage: "followup",
+            partialIntakeRefundId: intakeRefundId,
+          });
+        }
       }
     }
 
@@ -373,7 +452,9 @@ export class AdminShopperController {
       requestId: id,
       reason: body.reason,
       actorId: user.sub,
-      refundIssued,
+      intakeRefundId,
+      followupRefundId,
+      refundedAmountCents,
     });
   }
 

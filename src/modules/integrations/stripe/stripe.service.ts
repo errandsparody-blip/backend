@@ -346,6 +346,47 @@ export class StripeService {
   }
 
   /**
+   * Sum the cents already refunded against a PaymentIntent. Used by the
+   * cancel-with-refund path to compute the *remaining* refundable amount,
+   * so a previous partial refund (from the negative-followup branch, a
+   * support-issued refund from the Stripe Dashboard, or a dispute) doesn't
+   * cause a 4xx when we try to refund again.
+   *
+   * Counts both `succeeded` and `pending` refunds — pending ones reserve
+   * the funds even if they haven't fully settled at the bank yet, so
+   * trying to refund the "remaining" again would race and fail.
+   *
+   * Returns 0 if Stripe isn't configured (dev) or the intent has no refunds.
+   */
+  async getRefundedAmountForIntent(paymentIntentId: string): Promise<number> {
+    if (!this.stripe) return 0;
+    let total = 0;
+    // The list endpoint returns up to 100 per page. In practice a single
+    // intent rarely has more than a couple of refunds; we still iterate
+    // pages defensively in case a buyer racks up many. Hard cap at 50
+    // pages (5,000 refunds) so a misbehaving response can't loop forever.
+    let startingAfter: string | undefined;
+    let hasMore = true;
+    for (let page = 0; page < 50 && hasMore; page++) {
+      const res = await this.stripe.refunds.list({
+        payment_intent: paymentIntentId,
+        limit: 100,
+        ...(startingAfter ? { starting_after: startingAfter } : {}),
+      });
+      for (const r of res.data) {
+        if (r.status === "succeeded" || r.status === "pending") {
+          total += r.amount;
+        }
+      }
+      hasMore = res.has_more;
+      const last = res.data[res.data.length - 1];
+      startingAfter = last?.id;
+      if (!last) break;
+    }
+    return total;
+  }
+
+  /**
    * Verify the Stripe webhook signature. Throws on tamper or expired timestamp.
    * Returns the parsed Stripe event on success.
    */

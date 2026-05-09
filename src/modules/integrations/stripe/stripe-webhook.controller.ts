@@ -257,6 +257,24 @@ export class StripeWebhookController {
   }
 
   private async handleChargeRefunded(charge: Stripe.Charge): Promise<void> {
+    // Branch by the metadata stamped onto the underlying PaymentIntent.
+    // Wallet funding charges carry vendorId + netAmountCents (we credit a
+    // REVERSAL); shopper charges carry shopperRequestId (we audit + maybe
+    // mark the request REFUNDED).
+    //
+    // Stripe-Dashboard-issued refunds AND admin-initiated ones both hit
+    // here. Our admin path already updates the DB synchronously, so the
+    // webhook is mostly a safety net that catches:
+    //   - support refunding directly from Stripe Dashboard
+    //   - dispute-driven automatic refunds
+    // For both, we want the audit row + a status update if the charge is
+    // now fully refunded.
+    const purpose = charge.metadata?.["purpose"] ?? "";
+    if (purpose.startsWith("shopper.")) {
+      await this.handleShopperChargeRefunded(charge);
+      return;
+    }
+
     const vendorId = charge.metadata?.["vendorId"];
     const netAmountCents = Number(charge.metadata?.["netAmountCents"] ?? "0");
     if (!vendorId || !Number.isFinite(netAmountCents) || netAmountCents <= 0) {
@@ -274,6 +292,64 @@ export class StripeWebhookController {
       referenceType: "stripe_charge",
       referenceId: charge.id,
     });
+  }
+
+  /**
+   * Refund webhook for a shopper-purpose charge (intake or follow-up).
+   *
+   * - Always writes an audit entry so support can reconcile.
+   * - If the charge is now FULLY refunded (`amount_refunded === amount_captured`)
+   *   AND the request isn't already in a terminal-refunded state, we mark
+   *   the request REFUNDED. We don't store the Stripe refund id here —
+   *   Dashboard-initiated refunds aren't tied to one of our cancel-refund
+   *   slots, and overwriting `cancelIntakeRefundId` blindly could clobber
+   *   the admin-flow's own refund id. The Stripe charge id + audit row is
+   *   sufficient forensic linkage.
+   */
+  private async handleShopperChargeRefunded(charge: Stripe.Charge): Promise<void> {
+    const requestId = charge.metadata?.["shopperRequestId"] ?? null;
+    const purpose = charge.metadata?.["purpose"] ?? "shopper.unknown";
+    if (!requestId) {
+      this.logger.warn({ id: charge.id }, "Shopper refund webhook missing requestId.");
+      return;
+    }
+
+    await this.audit.log({
+      action: "shopper.charge.refunded",
+      resourceType: "shopper_request",
+      resourceId: requestId,
+      afterState: {
+        purpose,
+        chargeId: charge.id,
+        amountCaptured: charge.amount_captured,
+        amountRefunded: charge.amount_refunded,
+        fullyRefunded: charge.amount_refunded >= charge.amount_captured,
+      },
+    });
+
+    if (charge.amount_refunded >= charge.amount_captured) {
+      // Best-effort terminal status flip. Returning a non-error status from
+      // shopper.cancel when the row is already REFUNDED/CANCELLED is fine —
+      // we ignore that ConflictException to keep the webhook idempotent.
+      try {
+        await this.shopper.cancel({
+          requestId,
+          reason: `Stripe refund webhook · ${charge.id}`,
+          // Webhooks have no human actor — null is acceptable on the
+          // audit row. The "reason" string above identifies the webhook
+          // path for forensics.
+          actorId: null,
+          refundedAmountCents: charge.amount_refunded,
+        });
+      } catch (err) {
+        // Already in a terminal state, or another race resolved first.
+        // Audit row is already in place; we don't need to retry.
+        this.logger.log(
+          { err, requestId, chargeId: charge.id },
+          "shopper.charge.refunded: terminal state already reached, no-op",
+        );
+      }
+    }
   }
 
   private async handleDisputeCreated(dispute: Stripe.Dispute): Promise<void> {

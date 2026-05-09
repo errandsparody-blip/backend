@@ -1000,8 +1000,15 @@ model ShopperRequest {
   followupAmountCents         Int?                   @map("followup_amount_cents")
   followupStripeSessionId     String?                @map("followup_stripe_session_id")
   followupStripeIntentId      String?                @map("followup_stripe_intent_id")
+  // Refund issued because actuals came in UNDER estimate (negative-followup branch).
   followupStripeRefundId      String?                @map("followup_stripe_refund_id")
   followupResolvedAt          DateTime?              @map("followup_resolved_at")
+
+  // Refunds issued at cancel time. Migration 0012. Distinct from
+  // followupStripeRefundId so we don't conflate "actuals came in cheaper"
+  // with "we cancelled the whole order".
+  cancelIntakeRefundId        String?                @map("cancel_intake_refund_id")
+  cancelFollowupRefundId      String?                @map("cancel_followup_refund_id")
 
   // State
   status                      ShopperRequestStatus   @default(AWAITING_INTAKE_PAYMENT)

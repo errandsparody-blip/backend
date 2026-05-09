@@ -91,6 +91,10 @@ export interface RequestRow {
   followupStripeIntentId: string | null;
   followupStripeRefundId: string | null;
   followupResolvedAt: Date | null;
+  // Migration 0012 — refund ids for the cancel-with-refund flow. Distinct from
+  // followupStripeRefundId so we never overwrite the negative-followup refund.
+  cancelIntakeRefundId: string | null;
+  cancelFollowupRefundId: string | null;
   status: ShopperRequestStatus;
   assignedAdminId: string | null;
   internalNotes: string | null;
@@ -770,15 +774,24 @@ export class ShopperRequestService {
   // =========================================================================
 
   /**
-   * Cancel a request. Whether to refund is the caller's call — the
-   * controller verifies against intake_paid_at and issues the actual
-   * Stripe Refund. We record the audit + flip status here.
+   * Cancel a request. The controller is responsible for issuing any Stripe
+   * refunds and passing the resulting refund ids in here so we can persist
+   * them on the row — that way support can correlate our cancel record
+   * with the Stripe refunds without grepping audit timestamps.
+   *
+   * `refundedAmountCents` is the actual cents that moved back to the buyer
+   * (sum of intake refund + followup refund). Used purely for the audit
+   * row's afterState — the row itself stores ids, not amounts.
    */
   async cancel(args: {
     requestId: string;
     reason: string;
-    actorId: string;
-    refundIssued: boolean;
+    // Actor is the user id when admin-initiated; null when the cancel comes
+    // from a Stripe webhook (no human in the loop). Audit log allows null.
+    actorId: string | null;
+    intakeRefundId?: string | null;
+    followupRefundId?: string | null;
+    refundedAmountCents?: number;
   }) {
     const row = await this.getById(args.requestId, { includeLines: false });
     if (row.status === "DELIVERED" || row.status === "CANCELLED" || row.status === "REFUNDED") {
@@ -788,21 +801,38 @@ export class ShopperRequestService {
         status: row.status,
       });
     }
-    // Enum split: REFUNDED is its own terminal state when money moved back.
-    const newStatus: ShopperRequestStatus = args.refundIssued ? "REFUNDED" : "CANCELLED";
+    // Refund happened iff at least one refund id was issued OR the caller
+    // recorded a positive refunded amount. Status splits accordingly:
+    // REFUNDED is the terminal state when money moved back; CANCELLED is
+    // for "no payment ever happened" (or admin chose not to refund).
+    const refundIssued =
+      !!args.intakeRefundId ||
+      !!args.followupRefundId ||
+      (args.refundedAmountCents != null && args.refundedAmountCents > 0);
+    const newStatus: ShopperRequestStatus = refundIssued ? "REFUNDED" : "CANCELLED";
+    const updateData: Record<string, unknown> = { status: newStatus };
+    if (args.intakeRefundId) updateData.cancelIntakeRefundId = args.intakeRefundId;
+    if (args.followupRefundId) updateData.cancelFollowupRefundId = args.followupRefundId;
+
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
     ).shopperRequest.update({
       where: { id: args.requestId },
-      data: { status: newStatus },
+      data: updateData,
     });
     await this.audit.log({
       actorId: args.actorId,
-      action: args.refundIssued ? "shopper.refunded" : "shopper.cancelled",
+      action: refundIssued ? "shopper.refunded" : "shopper.cancelled",
       resourceType: "shopper_request",
       resourceId: args.requestId,
       beforeState: { status: row.status },
-      afterState: { status: newStatus, reason: args.reason },
+      afterState: {
+        status: newStatus,
+        reason: args.reason,
+        intakeRefundId: args.intakeRefundId ?? null,
+        followupRefundId: args.followupRefundId ?? null,
+        refundedAmountCents: args.refundedAmountCents ?? 0,
+      },
     });
     return updated;
   }
