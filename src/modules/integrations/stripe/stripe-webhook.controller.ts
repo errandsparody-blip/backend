@@ -36,6 +36,7 @@ import type Stripe from "stripe";
 import { Public } from "../../../common/decorators/public.decorator";
 import { PrismaService } from "../../../common/prisma.service";
 import { AuditService } from "../../audit/audit.service";
+import { ShopperRequestService } from "../../shopper/shopper-request.service";
 import { WalletService } from "../../wallet/wallet.service";
 
 import { StripeService } from "./stripe.service";
@@ -49,6 +50,7 @@ export class StripeWebhookController {
     private readonly wallet: WalletService,
     private readonly audit: AuditService,
     private readonly prisma: PrismaService,
+    private readonly shopper: ShopperRequestService,
   ) {}
 
   @Public()
@@ -111,6 +113,15 @@ export class StripeWebhookController {
         case "charge.dispute.created":
           await this.handleDisputeCreated(event.data.object as Stripe.Dispute);
           break;
+        // Personal Shopper — Checkout-based payments. We listen to the
+        // session-level event because that's what fires at the moment
+        // payment is confirmed in Checkout (a couple seconds before the
+        // payment_intent.succeeded sibling event). Both arrive though;
+        // ShopperRequestService.markIntakePaid is idempotent on intentId
+        // so a double-handle is a no-op.
+        case "checkout.session.completed":
+          await this.handleCheckoutCompleted(event.data.object as Stripe.Checkout.Session);
+          break;
         default:
           this.logger.log({ type: event.type, eventId: event.id }, "Stripe event ignored.");
       }
@@ -140,6 +151,29 @@ export class StripeWebhookController {
 
   private async handlePaymentSucceeded(intent: Stripe.PaymentIntent): Promise<void> {
     const purpose = intent.metadata?.["purpose"];
+
+    // Shopper intents — handled in checkout.session.completed too, but the
+    // PaymentIntent event is our second-chance / safety-net. Both branches
+    // call the idempotent ShopperRequestService methods.
+    if (purpose === "shopper.intake") {
+      const requestId = intent.metadata?.["shopperRequestId"];
+      if (!requestId) {
+        this.logger.error({ id: intent.id }, "Shopper intake intent missing requestId.");
+        return;
+      }
+      await this.shopper.markIntakePaid({ requestId, stripeIntentId: intent.id });
+      return;
+    }
+    if (purpose === "shopper.followup") {
+      const requestId = intent.metadata?.["shopperRequestId"];
+      if (!requestId) {
+        this.logger.error({ id: intent.id }, "Shopper follow-up intent missing requestId.");
+        return;
+      }
+      await this.shopper.markFollowupPaid({ requestId, stripeIntentId: intent.id });
+      return;
+    }
+
     if (purpose !== "wallet.fund") {
       // Future intents (e.g., onboarding fee deposits if we ever do them) go here.
       this.logger.log({ id: intent.id, purpose }, "Ignoring intent without wallet.fund purpose.");
@@ -162,6 +196,50 @@ export class StripeWebhookController {
       referenceId: intent.id,
       idempotencyKey: intent.id,
     });
+  }
+
+  /**
+   * Handle a completed Checkout Session. Only shopper sessions live here —
+   * wallet funding uses PaymentIntent flows directly (no Checkout). Routes
+   * to either intake-paid or follow-up-paid based on the session metadata.
+   */
+  private async handleCheckoutCompleted(session: Stripe.Checkout.Session): Promise<void> {
+    const purpose = session.metadata?.["purpose"];
+    const requestId = session.metadata?.["shopperRequestId"];
+    if (!purpose || !purpose.startsWith("shopper.")) {
+      this.logger.log({ id: session.id, purpose }, "Non-shopper checkout session ignored.");
+      return;
+    }
+    if (!requestId) {
+      this.logger.error({ id: session.id }, "Shopper checkout session missing requestId.");
+      return;
+    }
+    if (session.payment_status !== "paid") {
+      // Async / Buy-Now-Pay-Later flows can fire this with a non-paid status.
+      // We defer to the corresponding payment_intent.succeeded event in that
+      // case. Refusing to mark paid keeps the status guard tight.
+      this.logger.log(
+        { id: session.id, payment_status: session.payment_status },
+        "Checkout session completed but not paid; deferring to PI event.",
+      );
+      return;
+    }
+    const intentId =
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : session.payment_intent?.id;
+    if (!intentId) {
+      this.logger.error({ id: session.id }, "Shopper checkout session missing payment intent.");
+      return;
+    }
+
+    if (purpose === "shopper.intake") {
+      await this.shopper.markIntakePaid({ requestId, stripeIntentId: intentId });
+    } else if (purpose === "shopper.followup") {
+      await this.shopper.markFollowupPaid({ requestId, stripeIntentId: intentId });
+    } else {
+      this.logger.warn({ id: session.id, purpose }, "Unknown shopper checkout purpose.");
+    }
   }
 
   private async handlePaymentFailed(intent: Stripe.PaymentIntent): Promise<void> {

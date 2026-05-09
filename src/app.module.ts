@@ -29,6 +29,7 @@ import { ExportModule } from "./modules/exports/export.module";
 import { FeesModule } from "./modules/fees/fees.module";
 import { HealthModule } from "./modules/health/health.module";
 import { KycModule } from "./modules/integrations/kyc/kyc.module";
+import { R2Module } from "./modules/integrations/r2/r2.module";
 import { StripeModule } from "./modules/integrations/stripe/stripe.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
 import { NotificationModule } from "./modules/notifications/notification.module";
@@ -36,6 +37,7 @@ import { OrderModule } from "./modules/orders/order.module";
 import { ProductModule } from "./modules/products/product.module";
 import { PsnModule } from "./modules/psn/psn.module";
 import { ReturnModule } from "./modules/returns/return.module";
+import { ShopperModule } from "./modules/shopper/shopper.module";
 import { SkuModule } from "./modules/sku/sku.module";
 import { TeamModule } from "./modules/team/team.module";
 import { TrackingModule } from "./modules/tracking/tracking.module";
@@ -103,11 +105,13 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     WalletModule,
     OrderModule,
     ReturnModule,
+    ShopperModule,
     ExportModule,
     FeesModule,
     TeamModule,
     TrackingModule,
     KycModule,
+    R2Module,
     StripeModule,
     JobsModule,
     AdminModule,

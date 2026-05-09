@@ -122,6 +122,10 @@ model User {
   recoveryCodes       RecoveryCode[]
   auditEntries        AuditLogEntry[] @relation("AuditActor")
 
+  // Personal Shopper feature back-relations.
+  shopperRequestsAssigned ShopperRequest[] @relation("ShopperAssignedAdmin")
+  shopperMessages         ShopperMessage[] @relation("ShopperMessageSender")
+
   @@index([role])
   @@index([vendorId])
   @@index([status])
@@ -932,4 +936,149 @@ model Configuration {
   updatedAt   DateTime @updatedAt @map("updated_at")
 
   @@map("configuration")
+}
+
+// =============================================================================
+// Personal Shopper — public-facing service. A buyer pastes product links,
+// pays upfront for items + commission, and the platform procures + ships.
+// No vendor in the loop; the platform is the merchant of record for the
+// service. Buyers are tied to email + magic-link tokens; no User row.
+// Implementation Plan §6.10 (added in migration 0011).
+// =============================================================================
+
+enum ShopperRequestStatus {
+  AWAITING_INTAKE_PAYMENT
+  PAID
+  PROCURING
+  AWAITING_RECONCILIATION
+  READY_TO_SHIP
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum ShopperMessageSender {
+  BUYER
+  ADMIN
+}
+
+enum ShopperShippingMethod {
+  PLATFORM_FREIGHT
+  BUYER_FORWARDER
+  PICKUP
+}
+
+model ShopperRequest {
+  id                          String                 @id @default(uuid()) @db.Uuid
+
+  // Buyer identity (no User row — magic-link only)
+  buyerEmail                  String                 @map("buyer_email")
+  buyerName                   String?                @map("buyer_name")
+
+  // Shipping (optional at intake, captured later in chat if missing)
+  shippingAddress             Json?                  @map("shipping_address")
+  shippingMethod              ShopperShippingMethod? @map("shipping_method")
+  trackingNumber              String?                @map("tracking_number")
+  carrier                     String?
+  shippedAt                   DateTime?              @map("shipped_at")
+  deliveredAt                 DateTime?              @map("delivered_at")
+
+  // Money — intake payment (sum of buyer's estimates + commission)
+  itemsSubtotalCents          Int                    @map("items_subtotal_cents")
+  commissionRateBps           Int                    @map("commission_rate_bps")
+  commissionCents             Int                    @map("commission_cents")
+  intakeTotalCents            Int                    @map("intake_total_cents")
+  intakeStripeSessionId       String?                @map("intake_stripe_session_id")
+  intakeStripeIntentId        String?                @map("intake_stripe_intent_id")
+  intakePaidAt                DateTime?              @map("intake_paid_at")
+
+  // Money — reconciliation (after admin procures, knows actuals + shipping)
+  itemsActualSubtotalCents    Int?                   @map("items_actual_subtotal_cents")
+  shippingCostCents           Int?                   @map("shipping_cost_cents")
+  // Signed: positive = buyer owes additional, negative = admin refunds, zero = no action.
+  followupAmountCents         Int?                   @map("followup_amount_cents")
+  followupStripeSessionId     String?                @map("followup_stripe_session_id")
+  followupStripeIntentId      String?                @map("followup_stripe_intent_id")
+  followupStripeRefundId      String?                @map("followup_stripe_refund_id")
+  followupResolvedAt          DateTime?              @map("followup_resolved_at")
+
+  // State
+  status                      ShopperRequestStatus   @default(AWAITING_INTAKE_PAYMENT)
+  assignedAdminId             String?                @map("assigned_admin_id") @db.Uuid
+  assignedAdmin               User?                  @relation("ShopperAssignedAdmin", fields: [assignedAdminId], references: [id], onDelete: SetNull)
+
+  internalNotes               String?                @map("internal_notes")
+
+  createdAt                   DateTime               @default(now()) @map("created_at")
+  updatedAt                   DateTime               @updatedAt @map("updated_at")
+
+  lines                       ShopperRequestLine[]
+  messages                    ShopperMessage[]
+  accessTokens                ShopperAccessToken[]
+
+  @@index([buyerEmail, createdAt])
+  @@index([status, createdAt])
+  @@index([assignedAdminId, status])
+  @@map("shopper_requests")
+}
+
+model ShopperRequestLine {
+  id                       String         @id @default(uuid()) @db.Uuid
+  requestId                String         @map("request_id") @db.Uuid
+  request                  ShopperRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  productUrl               String         @map("product_url")
+  productTitle             String?        @map("product_title")
+  productNotes             String?        @map("product_notes")
+  quantity                 Int
+
+  estimatedUnitPriceCents  Int            @map("estimated_unit_price_cents")
+  actualUnitPriceCents     Int?           @map("actual_unit_price_cents")
+
+  procurementStatus        String?        @map("procurement_status")
+  procurementNotes         String?        @map("procurement_notes")
+
+  createdAt                DateTime       @default(now()) @map("created_at")
+  updatedAt                DateTime       @updatedAt @map("updated_at")
+
+  @@index([requestId])
+  @@map("shopper_request_lines")
+}
+
+model ShopperMessage {
+  id              String               @id @default(uuid()) @db.Uuid
+  requestId       String               @map("request_id") @db.Uuid
+  request         ShopperRequest       @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  sender          ShopperMessageSender
+  // Non-null for ADMIN messages, null for BUYER (CHECK constraint enforces).
+  senderUserId    String?              @map("sender_user_id") @db.Uuid
+  senderUser      User?                @relation("ShopperMessageSender", fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  body            String
+  attachmentUrls  String[]             @map("attachment_urls")
+
+  readByBuyerAt   DateTime?            @map("read_by_buyer_at")
+  readByAdminAt   DateTime?            @map("read_by_admin_at")
+
+  createdAt       DateTime             @default(now()) @map("created_at")
+
+  @@index([requestId, createdAt])
+  @@map("shopper_messages")
+}
+
+model ShopperAccessToken {
+  id          String         @id @default(uuid()) @db.Uuid
+  requestId   String         @map("request_id") @db.Uuid
+  request     ShopperRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  tokenHash   String         @unique @map("token_hash")
+  expiresAt   DateTime       @map("expires_at")
+  lastUsedAt  DateTime?      @map("last_used_at")
+  revokedAt   DateTime?      @map("revoked_at")
+  createdAt   DateTime       @default(now()) @map("created_at")
+
+  @@index([requestId])
+  @@map("shopper_access_tokens")
 }

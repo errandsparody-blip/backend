@@ -38,6 +38,13 @@ const listSchema = z.object({
       "RETURNED",
     ])
     .optional(),
+  /**
+   * Without this flag, the service falls back to "queue mode" (ALLOCATED
+   * → PACKED) so the operator's default screen is the work in front of
+   * them. Pass `view=all` to see every order regardless of status —
+   * needed for "where's my shipped order?" lookups and audit trails.
+   */
+  view: z.enum(["queue", "all"]).optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().positive().max(100).default(50),
 });

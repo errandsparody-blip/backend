@@ -110,6 +110,23 @@ const ConfigSchema = z.object({
     .regex(/^.+@.+\..+$/, "Must be a valid email or 'Name <email>' header.")
     .default("USA Errands <noreply@usa-errands.com>"),
   EMAIL_REPLY_TO: z.string().email().default("support@usa-errands.com"),
+
+  // Cloudflare R2 — Personal Shopper attachment uploads (P6).
+  // R2 is S3-compatible; we presign PUTs with AWS SigV4 against the
+  // account-scoped S3 endpoint. All four values are required to enable
+  // uploads; with any missing the upload endpoints return a structured 503.
+  R2_ACCOUNT_ID: z.string().optional(),
+  R2_ACCESS_KEY_ID: z.string().optional(),
+  R2_SECRET_ACCESS_KEY: z.string().optional(),
+  // The bucket holding shopper-attachment objects.
+  R2_BUCKET: z.string().optional(),
+  // Public read URL prefix (CDN-fronted Cloudflare worker, custom domain,
+  // or `https://pub-<hash>.r2.dev/<bucket>/`). The presign endpoint composes
+  // the final URL by appending the object key. No trailing slash.
+  R2_PUBLIC_BASE_URL: z
+    .string()
+    .url("Must be a full URL like https://attachments.usa-errands.com")
+    .optional(),
 })
   .superRefine((cfg, ctx) => {
     if (cfg.EMAIL_PROVIDER === "resend" && !cfg.RESEND_API_KEY) {
@@ -124,6 +141,23 @@ const ConfigSchema = z.object({
         code: z.ZodIssueCode.custom,
         path: ["EASYPOST_WEBHOOK_SECRET"],
         message: "Required in production.",
+      });
+    }
+    // R2 is all-or-nothing — partial settings would fail at runtime in
+    // a confusing way. Validate the group atomically.
+    const r2Set = [
+      cfg.R2_ACCOUNT_ID,
+      cfg.R2_ACCESS_KEY_ID,
+      cfg.R2_SECRET_ACCESS_KEY,
+      cfg.R2_BUCKET,
+      cfg.R2_PUBLIC_BASE_URL,
+    ].filter((v) => v && v.length > 0).length;
+    if (r2Set !== 0 && r2Set !== 5) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["R2_BUCKET"],
+        message:
+          "Set ALL of R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET, R2_PUBLIC_BASE_URL — or none.",
       });
     }
   });

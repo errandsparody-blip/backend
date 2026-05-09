@@ -30,6 +30,13 @@ type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction"
 
 export interface AdminOrderListInput {
   status?: OrderStatus;
+  /**
+   * "queue" (default): ALLOCATED → PACKED only — the operator's working
+   * set.
+   * "all": no status filter, show every order so post-shipment lookups
+   * and history queries work.
+   */
+  view?: "queue" | "all";
   cursor?: string | undefined;
   limit: number;
 }
@@ -55,9 +62,15 @@ export class AdminOrderService {
   // ---------------------------------------------------------------------------
 
   async list(input: AdminOrderListInput) {
+    // Filter precedence:
+    //   1. Explicit `status` → exact match (e.g. "show me all SHIPPED orders").
+    //   2. `view=all`        → no filter, every order regardless of status.
+    //   3. Default           → operator queue (ALLOCATED → PACKED).
     const where: Prisma.OrderWhereInput = input.status
       ? { status: input.status }
-      : { status: { in: ["ALLOCATED", "LABEL_PURCHASED", "PICKING", "PACKED"] } };
+      : input.view === "all"
+        ? {}
+        : { status: { in: ["ALLOCATED", "LABEL_PURCHASED", "PICKING", "PACKED"] } };
 
     const orders = await this.prisma.order.findMany({
       where,

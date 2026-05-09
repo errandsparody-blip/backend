@@ -393,3 +393,148 @@ export function returnRefundedTemplate(args: { rmaCode: string; netRefundCents: 
       `Open wallet: ${cfg.WEB_PUBLIC_URL}/wallet`,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Personal Shopper — public buyer flow
+// ---------------------------------------------------------------------------
+//
+// All shopper emails go to the buyer's email (no User row). The thread URL
+// is the magic-link form: WEB_PUBLIC_URL/shopper/r/<token>. Tokens are 60-day
+// long-lived and tracked at the DB level — see ShopperTokenService.
+
+function shopperThreadUrl(token: string): string {
+  return `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(token)}`;
+}
+
+function shopperPayUrl(checkoutUrl: string): string {
+  // Stripe Checkout URLs are full URLs we just pass through. Encoded once.
+  return checkoutUrl;
+}
+
+export function shopperIntakeReceivedTemplate(args: {
+  threadToken: string;
+  intakePayUrl: string;
+  intakeTotalCents: number;
+}): RenderedEmail {
+  const total = `$${(args.intakeTotalCents / 100).toFixed(2)}`;
+  return {
+    subject: `Your USA Errands shopper request — ${total}`,
+    html: shell({
+      eyebrow: "[08] Shopper request",
+      title: "Your request is in. One step to finish.",
+      bodyHtml: `<p style="margin:0 0 12px 0;">Thanks for using USA Errands. To start procurement we need the upfront amount of <strong>${total}</strong>.</p>
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">After we buy your items we'll either send a small follow-up invoice for the actual cost difference + shipping, or refund the difference. Either way, you'll see it in this thread.</p>`,
+      cta: { label: `Pay ${total} securely`, href: shopperPayUrl(args.intakePayUrl) },
+    }),
+    text:
+      `Your USA Errands shopper request — ${total}\n\n` +
+      `Thanks for using USA Errands. To start procurement we need the upfront amount of ${total}.\n\n` +
+      `Pay securely: ${args.intakePayUrl}\n\n` +
+      `Open your request thread anytime: ${shopperThreadUrl(args.threadToken)}`,
+  };
+}
+
+export function shopperIntakePaidTemplate(args: {
+  threadToken: string;
+  intakeTotalCents: number;
+}): RenderedEmail {
+  const total = `$${(args.intakeTotalCents / 100).toFixed(2)}`;
+  return {
+    subject: `Payment received — ${total}`,
+    html: shell({
+      eyebrow: "[08] Payment received",
+      title: "Got it — we're on it.",
+      bodyHtml: `<p style="margin:0 0 12px 0;">We've received your payment of <strong>${total}</strong> and are starting procurement now.</p>
+        <p style="margin:0 0 12px 0;">You'll get an update in your thread when we have item updates or a shipping quote.</p>`,
+      cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
+    }),
+    text:
+      `Payment received — ${total}\n\n` +
+      `We've received your payment and are starting procurement now.\n\n` +
+      `Open your thread: ${shopperThreadUrl(args.threadToken)}`,
+  };
+}
+
+export function shopperNewMessageTemplate(args: {
+  threadToken: string;
+  preview: string;
+}): RenderedEmail {
+  const trimmed = args.preview.length > 280 ? `${args.preview.slice(0, 280)}…` : args.preview;
+  return {
+    subject: "New message from USA Errands",
+    html: shell({
+      eyebrow: "[08] New message",
+      title: "USA Errands replied to your request",
+      bodyHtml: `<blockquote style="margin:0 0 16px 0;padding:12px 16px;background:#F1EFE9;border-left:3px solid #C99428;color:#3A3A3A;font-size:14px;">${escape(trimmed)}</blockquote>`,
+      cta: { label: "Open thread to reply", href: shopperThreadUrl(args.threadToken) },
+    }),
+    text:
+      `New message from USA Errands\n\n` +
+      `${trimmed}\n\n` +
+      `Reply in your thread: ${shopperThreadUrl(args.threadToken)}`,
+  };
+}
+
+export function shopperFollowupOwedTemplate(args: {
+  threadToken: string;
+  followupPayUrl: string;
+  amountCents: number;
+}): RenderedEmail {
+  const amount = `$${(args.amountCents / 100).toFixed(2)}`;
+  return {
+    subject: `Adjustment + shipping invoice — ${amount}`,
+    html: shell({
+      eyebrow: "[08] Follow-up invoice",
+      title: "Final payment to release shipping",
+      bodyHtml: `<p style="margin:0 0 12px 0;">We've finished procurement and confirmed shipping cost. The remaining balance is <strong>${amount}</strong>.</p>
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">As soon as this is paid we'll dispatch your package and email tracking.</p>`,
+      cta: { label: `Pay ${amount} securely`, href: shopperPayUrl(args.followupPayUrl) },
+    }),
+    text:
+      `Adjustment + shipping invoice — ${amount}\n\n` +
+      `Pay securely: ${args.followupPayUrl}\n\n` +
+      `Thread: ${shopperThreadUrl(args.threadToken)}`,
+  };
+}
+
+export function shopperRefundIssuedTemplate(args: {
+  threadToken: string;
+  amountCents: number;
+}): RenderedEmail {
+  const amount = `$${(args.amountCents / 100).toFixed(2)}`;
+  return {
+    subject: `Refund issued — ${amount}`,
+    html: shell({
+      eyebrow: "[08] Refund issued",
+      title: `${amount} on its way back to your card`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">Actual costs came in under your estimate. We've refunded <strong>${amount}</strong> to the card you paid with — most banks settle within 5–10 business days.</p>
+        <p style="margin:0 0 12px 0;">Your package will ship as soon as the warehouse picks it up.</p>`,
+      cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
+    }),
+    text:
+      `Refund issued — ${amount}\n\n` +
+      `We've refunded ${amount} to your card. Most banks settle within 5–10 business days.\n\n` +
+      `Thread: ${shopperThreadUrl(args.threadToken)}`,
+  };
+}
+
+export function shopperShippedTemplate(args: {
+  threadToken: string;
+  carrier: string;
+  trackingNumber: string;
+}): RenderedEmail {
+  return {
+    subject: `Your shopper order shipped via ${args.carrier}`,
+    html: shell({
+      eyebrow: "[08] Shipped",
+      title: "Package handed to the carrier",
+      bodyHtml: `<p style="margin:0 0 12px 0;">${escape(args.carrier)} picked up your package.</p>
+        <p style="margin:0 0 12px 0;font-family:'JetBrains Mono',monospace;font-size:14px;color:#0A0A0A;">${escape(args.trackingNumber)}</p>`,
+      cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
+    }),
+    text:
+      `Your shopper order shipped via ${args.carrier}\n\n` +
+      `Tracking: ${args.trackingNumber}\n\n` +
+      `Thread: ${shopperThreadUrl(args.threadToken)}`,
+  };
+}

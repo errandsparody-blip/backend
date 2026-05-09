@@ -38,6 +38,55 @@ export interface CreatePaymentIntentArgs {
   receiptEmail?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Personal Shopper checkout types
+// ---------------------------------------------------------------------------
+
+export interface CreateShopperIntakeSessionArgs {
+  /** Shopper request id — surfaced in metadata + success URL. */
+  requestId: string;
+  /** Buyer email — used as customer_email + receipt destination. */
+  buyerEmail: string;
+  /** Sum of buyer estimates in cents (the items line). */
+  itemsSubtotalCents: number;
+  /** Platform commission in cents (the service-fee line). */
+  commissionCents: number;
+  /** Idempotency key — typically `shopper:intake:<requestId>`. */
+  idempotencyKey: string;
+  /** Where Stripe sends the buyer after success — must include {CHECKOUT_SESSION_ID}. */
+  successUrl: string;
+  /** Where Stripe sends the buyer if they cancel checkout. */
+  cancelUrl: string;
+}
+
+export interface CreateShopperFollowupSessionArgs {
+  requestId: string;
+  buyerEmail: string;
+  /**
+   * Signed amount cents: must be > 0 for a Checkout session. Negative deltas
+   * use `refundShopperIntake` instead.
+   */
+  amountCents: number;
+  /** Optional pretty description for the line item ("Items adjustment + shipping"). */
+  description?: string;
+  idempotencyKey: string;
+  successUrl: string;
+  cancelUrl: string;
+}
+
+export interface RefundShopperIntakeArgs {
+  /** PaymentIntent id captured at intake. */
+  paymentIntentId: string;
+  /** Always positive cents — the refund magnitude (caller flips the sign). */
+  amountCents: number;
+  /** Tag the refund with the request id for cross-checking. */
+  requestId: string;
+  /** Idempotency key — typically `shopper:refund:<requestId>`. */
+  idempotencyKey: string;
+  /** Free text — appears on the buyer's bank statement reference. */
+  reason?: "duplicate" | "fraudulent" | "requested_by_customer";
+}
+
 @Injectable()
 export class StripeService {
   private readonly logger = new Logger(StripeService.name);
@@ -123,6 +172,177 @@ export class StripeService {
       netAmountCents: args.netAmountCents,
       processorFeeCents,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Personal Shopper — Checkout Sessions + Refunds
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Create a Checkout Session for the buyer's intake payment.
+   *
+   * Two line items are presented separately so the buyer's receipt clearly
+   * shows what they're paying the platform vs. what's being held against
+   * their items. The actual items are NOT a Stripe product — Stripe never
+   * sees the merchandise URLs, only the totals.
+   *
+   * Returns the session id + the hosted Checkout URL. The caller persists
+   * the session id on the ShopperRequest before redirecting.
+   */
+  async createShopperIntakeSession(args: CreateShopperIntakeSessionArgs): Promise<{
+    sessionId: string;
+    paymentIntentId: string | null;
+    url: string;
+  }> {
+    if (!this.stripe) throw new Error("Stripe is not configured.");
+    if (!Number.isInteger(args.itemsSubtotalCents) || args.itemsSubtotalCents <= 0) {
+      throw new Error("itemsSubtotalCents must be a positive integer.");
+    }
+    if (!Number.isInteger(args.commissionCents) || args.commissionCents < 0) {
+      throw new Error("commissionCents must be a non-negative integer.");
+    }
+
+    const session = await this.stripe.checkout.sessions.create(
+      {
+        mode: "payment",
+        customer_email: args.buyerEmail,
+        // We don't enable Link / wallets explicitly — Stripe's defaults
+        // surface what's available in the buyer's region.
+        payment_method_types: ["card"],
+        line_items: [
+          {
+            quantity: 1,
+            price_data: {
+              currency: "usd",
+              unit_amount: args.itemsSubtotalCents,
+              product_data: { name: "Items (estimate, charged at procurement)" },
+            },
+          },
+          {
+            quantity: 1,
+            price_data: {
+              currency: "usd",
+              unit_amount: args.commissionCents,
+              product_data: { name: "USA Errands service fee" },
+            },
+          },
+        ],
+        // The webhook handler reads these to identify which request was paid.
+        metadata: {
+          purpose: "shopper.intake",
+          shopperRequestId: args.requestId,
+        },
+        payment_intent_data: {
+          // Mirror the metadata onto the underlying PaymentIntent so refund
+          // and dispute webhooks can also find the request id without a
+          // session lookup.
+          metadata: {
+            purpose: "shopper.intake",
+            shopperRequestId: args.requestId,
+          },
+          description: `USA Errands shopper intake · ${args.requestId}`,
+        },
+        success_url: args.successUrl,
+        cancel_url: args.cancelUrl,
+        // Buyers don't have accounts — let them enter shipping themselves
+        // on the form, not in Stripe Checkout.
+        billing_address_collection: "auto",
+      },
+      { idempotencyKey: args.idempotencyKey },
+    );
+
+    return {
+      sessionId: session.id,
+      paymentIntentId:
+        typeof session.payment_intent === "string"
+          ? session.payment_intent
+          : session.payment_intent?.id ?? null,
+      url: session.url ?? "",
+    };
+  }
+
+  /**
+   * Create a Checkout Session for the buyer's follow-up payment (positive
+   * delta — when actual items + shipping exceeded the intake estimate).
+   */
+  async createShopperFollowupSession(args: CreateShopperFollowupSessionArgs): Promise<{
+    sessionId: string;
+    paymentIntentId: string | null;
+    url: string;
+  }> {
+    if (!this.stripe) throw new Error("Stripe is not configured.");
+    if (!Number.isInteger(args.amountCents) || args.amountCents <= 0) {
+      throw new Error("amountCents must be a positive integer for a follow-up Checkout session.");
+    }
+
+    const session = await this.stripe.checkout.sessions.create(
+      {
+        mode: "payment",
+        customer_email: args.buyerEmail,
+        payment_method_types: ["card"],
+        line_items: [
+          {
+            quantity: 1,
+            price_data: {
+              currency: "usd",
+              unit_amount: args.amountCents,
+              product_data: { name: args.description ?? "Adjustment + shipping" },
+            },
+          },
+        ],
+        metadata: {
+          purpose: "shopper.followup",
+          shopperRequestId: args.requestId,
+        },
+        payment_intent_data: {
+          metadata: {
+            purpose: "shopper.followup",
+            shopperRequestId: args.requestId,
+          },
+          description: `USA Errands shopper follow-up · ${args.requestId}`,
+        },
+        success_url: args.successUrl,
+        cancel_url: args.cancelUrl,
+      },
+      { idempotencyKey: args.idempotencyKey },
+    );
+    return {
+      sessionId: session.id,
+      paymentIntentId:
+        typeof session.payment_intent === "string"
+          ? session.payment_intent
+          : session.payment_intent?.id ?? null,
+      url: session.url ?? "",
+    };
+  }
+
+  /**
+   * Issue a refund against the original intake PaymentIntent. Used when:
+   *   - actual items + shipping came in UNDER the intake estimate, OR
+   *   - the request is being cancelled with `issueRefund=true`.
+   *
+   * Returns the Refund id; caller persists it on the ShopperRequest.
+   */
+  async refundShopperIntake(args: RefundShopperIntakeArgs): Promise<{ refundId: string }> {
+    if (!this.stripe) throw new Error("Stripe is not configured.");
+    if (!Number.isInteger(args.amountCents) || args.amountCents <= 0) {
+      throw new Error("amountCents must be a positive integer.");
+    }
+
+    const refund = await this.stripe.refunds.create(
+      {
+        payment_intent: args.paymentIntentId,
+        amount: args.amountCents,
+        reason: args.reason,
+        metadata: {
+          purpose: "shopper.refund",
+          shopperRequestId: args.requestId,
+        },
+      },
+      { idempotencyKey: args.idempotencyKey },
+    );
+
+    return { refundId: refund.id };
   }
 
   /**
