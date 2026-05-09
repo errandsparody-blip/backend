@@ -538,3 +538,280 @@ export function shopperShippedTemplate(args: {
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
 }
+
+export function shopperFollowupPaidTemplate(args: {
+  threadToken: string;
+  amountCents: number;
+}): RenderedEmail {
+  const amount = `$${(args.amountCents / 100).toFixed(2)}`;
+  return {
+    subject: `Final payment received — ${amount}`,
+    html: shell({
+      eyebrow: "[08] Final payment received",
+      title: "All set — your package ships next.",
+      bodyHtml: `<p style="margin:0 0 12px 0;">Thanks — we&apos;ve received the final payment of <strong>${amount}</strong>. Your package is being prepared for dispatch and we&apos;ll email tracking the moment it leaves the warehouse.</p>`,
+      cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
+    }),
+    text:
+      `Final payment received — ${amount}\n\n` +
+      `Your package is being prepared for dispatch. Tracking lands in your thread shortly.\n\n` +
+      `Thread: ${shopperThreadUrl(args.threadToken)}`,
+  };
+}
+
+export function shopperDeliveredTemplate(args: {
+  threadToken: string;
+}): RenderedEmail {
+  return {
+    subject: "Your shopper order was delivered",
+    html: shell({
+      eyebrow: "[08] Delivered",
+      title: "Delivered — thanks for using USA Errands.",
+      bodyHtml: `<p style="margin:0 0 12px 0;">The carrier marked your package delivered. If anything is wrong, reply in your thread within 14 days and we&apos;ll help you sort it.</p>`,
+      cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
+    }),
+    text:
+      `Your shopper order was delivered\n\n` +
+      `If something&apos;s wrong, reply in your thread within 14 days.\n\n` +
+      `Thread: ${shopperThreadUrl(args.threadToken)}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PSN — vendor-facing
+// ---------------------------------------------------------------------------
+
+export function psnSubmittedTemplate(args: {
+  psnId: string;
+  lineCount: number;
+  onboardingFeeCents: number;
+}): RenderedEmail {
+  const fee = `$${(args.onboardingFeeCents / 100).toFixed(2)}`;
+  return {
+    subject: `PSN ${args.psnId.slice(0, 8)} submitted — ${fee} debited`,
+    html: shell({
+      eyebrow: "[03] PSN submitted",
+      title: "We&apos;re ready for your inbound shipment",
+      bodyHtml: `<p style="margin:0 0 12px 0;">Your Pre-Shipment Notice with <strong>${args.lineCount} ${args.lineCount === 1 ? "line" : "lines"}</strong> is in our queue.</p>
+        <p style="margin:0 0 12px 0;">Onboarding fee debited from your wallet: <strong>${fee}</strong>.</p>
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">We&apos;ll email you again when the package is received and inventory is reflected on your dashboard.</p>`,
+      cta: { label: "View PSN", href: `${cfg.WEB_PUBLIC_URL}/psn/${encodeURIComponent(args.psnId)}` },
+    }),
+    text:
+      `PSN ${args.psnId.slice(0, 8)} submitted\n\n` +
+      `${args.lineCount} line(s). Onboarding fee debited: ${fee}.\n\n` +
+      `View: ${cfg.WEB_PUBLIC_URL}/psn/${args.psnId}`,
+  };
+}
+
+export function psnReceivedTemplate(args: {
+  psnId: string;
+  acceptedUnits: number;
+  rejectedUnits: number;
+}): RenderedEmail {
+  const ok = args.acceptedUnits;
+  const bad = args.rejectedUnits;
+  return {
+    subject: `PSN ${args.psnId.slice(0, 8)} received — ${ok} units accepted`,
+    html: shell({
+      eyebrow: "[03] Inventory received",
+      title: "Your shipment is in the warehouse",
+      bodyHtml: `<p style="margin:0 0 12px 0;"><strong>${ok}</strong> units have been accepted into inventory and are reflected on your dashboard.</p>
+        ${bad > 0 ? `<p style="margin:0 0 12px 0;color:#C99428;"><strong>${bad}</strong> units were rejected on inspection — see the PSN for details.</p>` : ""}`,
+      cta: { label: "Open PSN", href: `${cfg.WEB_PUBLIC_URL}/psn/${encodeURIComponent(args.psnId)}` },
+    }),
+    text:
+      `PSN ${args.psnId.slice(0, 8)} received\n\n` +
+      `${ok} units accepted${bad > 0 ? `; ${bad} rejected` : ""}.\n\n` +
+      `View: ${cfg.WEB_PUBLIC_URL}/psn/${args.psnId}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Orders — vendor-facing
+// ---------------------------------------------------------------------------
+
+export function orderCreatedTemplate(args: {
+  orderRef: string;
+  orderId: string;
+  totalChargedCents: number;
+  walletBalanceAfterCents: number;
+}): RenderedEmail {
+  const total = `$${(args.totalChargedCents / 100).toFixed(2)}`;
+  const balance = `$${(args.walletBalanceAfterCents / 100).toFixed(2)}`;
+  return {
+    subject: `Order ${args.orderRef} created — ${total} reserved`,
+    html: shell({
+      eyebrow: "[04] Order created",
+      title: "Order in fulfillment queue",
+      bodyHtml: `<p style="margin:0 0 12px 0;"><strong>${total}</strong> reserved from your wallet (new balance: ${balance}). We&apos;ll email tracking the moment it ships.</p>`,
+      cta: { label: "View order", href: `${cfg.WEB_PUBLIC_URL}/orders/${encodeURIComponent(args.orderId)}` },
+    }),
+    text:
+      `Order ${args.orderRef} created — ${total} reserved\n\n` +
+      `New wallet balance: ${balance}.\n\n` +
+      `View: ${cfg.WEB_PUBLIC_URL}/orders/${args.orderId}`,
+  };
+}
+
+export function orderInsufficientFundsTemplate(args: {
+  shortfallCents: number;
+  walletBalanceCents: number;
+  requiredCents: number;
+}): RenderedEmail {
+  const short = `$${(args.shortfallCents / 100).toFixed(2)}`;
+  const bal = `$${(args.walletBalanceCents / 100).toFixed(2)}`;
+  const req = `$${(args.requiredCents / 100).toFixed(2)}`;
+  return {
+    subject: `Order rejected — wallet short by ${short}`,
+    html: shell({
+      eyebrow: "[02] Wallet shortfall",
+      title: "Order couldn&apos;t be created — top up your wallet",
+      bodyHtml: `<p style="margin:0 0 12px 0;">An order failed to submit because your wallet balance (<strong>${bal}</strong>) is below the required <strong>${req}</strong>.</p>
+        <p style="margin:0 0 12px 0;">Add at least <strong>${short}</strong> to your wallet and re-submit the order from your dashboard.</p>`,
+      cta: { label: "Fund wallet", href: `${cfg.WEB_PUBLIC_URL}/wallet/fund` },
+    }),
+    text:
+      `Order rejected — wallet short by ${short}\n\n` +
+      `Balance: ${bal}. Required: ${req}.\n\n` +
+      `Fund: ${cfg.WEB_PUBLIC_URL}/wallet/fund`,
+  };
+}
+
+export function orderCancelledTemplate(args: {
+  orderRef: string;
+  orderId: string;
+  reason: string;
+  refundedToWalletCents: number;
+}): RenderedEmail {
+  const refund = `$${(args.refundedToWalletCents / 100).toFixed(2)}`;
+  return {
+    subject: `Order ${args.orderRef} cancelled`,
+    html: shell({
+      eyebrow: "[04] Order cancelled",
+      title: `Order ${args.orderRef} was cancelled`,
+      bodyHtml: `<p style="margin:0 0 12px 0;"><strong>Reason:</strong> ${escape(args.reason)}.</p>
+        ${args.refundedToWalletCents > 0 ? `<p style="margin:0 0 12px 0;"><strong>${refund}</strong> credited back to your wallet.</p>` : ""}`,
+      cta: { label: "View order", href: `${cfg.WEB_PUBLIC_URL}/orders/${encodeURIComponent(args.orderId)}` },
+    }),
+    text:
+      `Order ${args.orderRef} cancelled\n\n` +
+      `Reason: ${args.reason}\n` +
+      (args.refundedToWalletCents > 0 ? `Refunded to wallet: ${refund}\n` : "") +
+      `\nView: ${cfg.WEB_PUBLIC_URL}/orders/${args.orderId}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Ops alerts — internal team alerts. Plain styling, action-oriented.
+// ---------------------------------------------------------------------------
+
+function opsShell(args: { eyebrow: string; title: string; bodyHtml: string; cta: { label: string; href: string } }): string {
+  return shell(args);
+}
+
+export function opsNewPsnTemplate(args: {
+  psnId: string;
+  vendorBusinessName: string;
+  lineCount: number;
+  onboardingFeeCents: number;
+}): RenderedEmail {
+  const fee = `$${(args.onboardingFeeCents / 100).toFixed(2)}`;
+  return {
+    subject: `[OPS] New PSN — ${args.vendorBusinessName} (${fee})`,
+    html: opsShell({
+      eyebrow: "[Ops] New PSN",
+      title: `${escape(args.vendorBusinessName)} submitted PSN ${args.psnId.slice(0, 8)}`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">${args.lineCount} line(s); onboarding fee ${fee}.</p>`,
+      cta: { label: "Open PSN", href: `${cfg.WEB_PUBLIC_URL}/admin/psn/${encodeURIComponent(args.psnId)}` },
+    }),
+    text: `[OPS] New PSN from ${args.vendorBusinessName} — ${args.psnId.slice(0, 8)}, ${args.lineCount} line(s), ${fee}.\n${cfg.WEB_PUBLIC_URL}/admin/psn/${args.psnId}`,
+  };
+}
+
+export function opsNewKycTemplate(args: {
+  vendorId: string;
+  vendorBusinessName: string;
+}): RenderedEmail {
+  return {
+    subject: `[OPS] KYC submitted — ${args.vendorBusinessName}`,
+    html: opsShell({
+      eyebrow: "[Ops] KYC submitted",
+      title: `Review KYC for ${escape(args.vendorBusinessName)}`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">A new KYC submission needs review.</p>`,
+      cta: { label: "Open vendor", href: `${cfg.WEB_PUBLIC_URL}/admin/vendors/${encodeURIComponent(args.vendorId)}` },
+    }),
+    text: `[OPS] KYC submitted by ${args.vendorBusinessName}.\n${cfg.WEB_PUBLIC_URL}/admin/vendors/${args.vendorId}`,
+  };
+}
+
+export function opsNewShopperRequestTemplate(args: {
+  requestId: string;
+  buyerEmail: string;
+  itemsCount: number;
+  intakeTotalCents: number;
+}): RenderedEmail {
+  const total = `$${(args.intakeTotalCents / 100).toFixed(2)}`;
+  return {
+    subject: `[OPS] New shopper request — ${total} (${args.buyerEmail})`,
+    html: opsShell({
+      eyebrow: "[Ops] New shopper request",
+      title: `${args.itemsCount} item(s) — ${total}`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">From <strong>${escape(args.buyerEmail)}</strong>. Awaiting intake payment.</p>`,
+      cta: { label: "Open request", href: `${cfg.WEB_PUBLIC_URL}/admin/shopper/${encodeURIComponent(args.requestId)}` },
+    }),
+    text: `[OPS] New shopper request — ${total} from ${args.buyerEmail}.\n${cfg.WEB_PUBLIC_URL}/admin/shopper/${args.requestId}`,
+  };
+}
+
+export function opsBuyerMessageTemplate(args: {
+  requestId: string;
+  buyerEmail: string;
+  preview: string;
+}): RenderedEmail {
+  const trimmed = args.preview.length > 160 ? `${args.preview.slice(0, 160)}…` : args.preview;
+  return {
+    subject: `[OPS] New buyer message — ${args.buyerEmail}`,
+    html: opsShell({
+      eyebrow: "[Ops] Buyer message",
+      title: `Reply needed`,
+      bodyHtml: `<blockquote style="margin:0 0 12px 0;padding:8px 12px;background:#F1EFE9;border-left:3px solid #C99428;font-size:13px;">${escape(trimmed)}</blockquote>
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">From <strong>${escape(args.buyerEmail)}</strong>.</p>`,
+      cta: { label: "Open thread", href: `${cfg.WEB_PUBLIC_URL}/admin/shopper/${encodeURIComponent(args.requestId)}` },
+    }),
+    text: `[OPS] New buyer message from ${args.buyerEmail}: ${trimmed}\n${cfg.WEB_PUBLIC_URL}/admin/shopper/${args.requestId}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
+
+export function shopperCancelledTemplate(args: {
+  threadToken: string;
+  refundedAmountCents: number;
+  reason: string;
+}): RenderedEmail {
+  const refunded = args.refundedAmountCents > 0
+    ? ` We&apos;ve refunded <strong>$${(args.refundedAmountCents / 100).toFixed(2)}</strong> to your card — most banks settle within 5–10 business days.`
+    : "";
+  return {
+    subject:
+      args.refundedAmountCents > 0
+        ? `Request cancelled — $${(args.refundedAmountCents / 100).toFixed(2)} refunded`
+        : "Your shopper request was cancelled",
+    html: shell({
+      eyebrow: "[08] Cancelled",
+      title: "Your request was cancelled.",
+      bodyHtml: `<p style="margin:0 0 12px 0;">Your USA Errands shopper request has been cancelled.${refunded}</p>
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;"><strong>Reason from our team:</strong> ${escape(args.reason)}</p>
+        <p style="margin:0 0 12px 0;">If you have questions, reply in your thread.</p>`,
+      cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
+    }),
+    text:
+      `Your shopper request was cancelled\n\n` +
+      (args.refundedAmountCents > 0
+        ? `Refund issued: $${(args.refundedAmountCents / 100).toFixed(2)}. Most banks settle within 5–10 business days.\n\n`
+        : "") +
+      `Reason: ${args.reason}\n\n` +
+      `Thread: ${shopperThreadUrl(args.threadToken)}`,
+  };
+}

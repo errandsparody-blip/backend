@@ -40,7 +40,12 @@ import {
   type PresignShopperUploadInput,
 } from "../../common/schemas/shopper.schema";
 import { EmailService } from "../email/email.service";
-import { shopperIntakeReceivedTemplate } from "../email/email-templates";
+import {
+  opsBuyerMessageTemplate,
+  opsNewShopperRequestTemplate,
+  shopperIntakeReceivedTemplate,
+} from "../email/email-templates";
+import { OpsAlertService } from "../notifications/ops-alert.service";
 import { R2Service } from "../integrations/r2/r2.service";
 import { StripeService } from "../integrations/stripe/stripe.service";
 
@@ -64,6 +69,7 @@ export class ShopperController {
     private readonly email: EmailService,
     private readonly prisma: PrismaService,
     private readonly r2: R2Service,
+    private readonly opsAlerts: OpsAlertService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -139,6 +145,24 @@ export class ShopperController {
       type: "shopper.intake_received",
     });
 
+    // Ops alert — admin team needs to know a new request landed even
+    // before the buyer pays. The intake-paid signal is separate.
+    const ops = opsNewShopperRequestTemplate({
+      requestId: created.id,
+      buyerEmail: created.buyerEmail,
+      itemsCount: created.lines.length,
+      intakeTotalCents: created.intakeTotalCents,
+    });
+    void this.opsAlerts
+      .send({
+        type: "ops.shopper.request",
+        subject: ops.subject,
+        html: ops.html,
+        text: ops.text,
+        idempotencyKey: `ops:shopper:new:${created.id}`,
+      })
+      .catch(() => undefined);
+
     return {
       requestId: created.id,
       threadUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(issued.plaintext)}`,
@@ -194,14 +218,24 @@ export class ShopperController {
       attachmentUrls: body.attachmentUrls,
     });
 
-    // Notify the admin via in-app notifications (we don't email admins for
-    // every buyer reply — they live on the queue page). The notification
-    // hookup lands in the admin controller's notification settings; for now
-    // we just log so the assigned admin sees it via the queue's unread badge.
-    this.logger.log(
-      { requestId: resolved.requestId, messageId: message.id },
-      "shopper.buyer_message",
-    );
+    // Ops alert — admin team should know a buyer is waiting on a reply.
+    // Look up the buyer's email so the alert subject is useful.
+    const request = await this.requests.getById(resolved.requestId, { includeLines: false });
+    const ops = opsBuyerMessageTemplate({
+      requestId: resolved.requestId,
+      buyerEmail: request.buyerEmail,
+      preview: body.body,
+    });
+    void this.opsAlerts
+      .send({
+        type: "ops.shopper.buyer_message",
+        subject: ops.subject,
+        html: ops.html,
+        text: ops.text,
+        // Per-message dedupe — a webhook replay won't double-alert.
+        idempotencyKey: `ops:shopper:msg:${message.id}`,
+      })
+      .catch(() => undefined);
 
     return {
       id: message.id,

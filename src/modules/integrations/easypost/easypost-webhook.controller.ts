@@ -33,6 +33,8 @@ import type { Request } from "express";
 
 import { Public } from "../../../common/decorators/public.decorator";
 import { PrismaService } from "../../../common/prisma.service";
+import { orderDeliveredTemplate } from "../../email/email-templates";
+import { NotificationService } from "../../notifications/notification.service";
 
 import { EasyPostService } from "./easypost.service";
 
@@ -78,6 +80,7 @@ export class EasyPostWebhookController {
   constructor(
     private readonly easypost: EasyPostService,
     private readonly prisma: PrismaService,
+    private readonly notifications: NotificationService,
   ) {}
 
   @Public()
@@ -208,6 +211,38 @@ export class EasyPostWebhookController {
           },
         },
       });
+    });
+
+    // Vendor delivery notification — only on the actual SHIPPED → DELIVERED
+    // transition (not on duplicate webhook delivery, since the rank guard
+    // above already short-circuits those). Best-effort.
+    if (targetStatus === "DELIVERED") {
+      void this.notifyOrderDelivered(order.id).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Send the vendor an "order delivered" email + in-app notification.
+   * Re-fetches the order to get the canonical externalReference / vendor.
+   */
+  private async notifyOrderDelivered(orderId: string): Promise<void> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { id: true, externalReference: true, vendorId: true },
+    });
+    if (!order) return;
+    const tpl = orderDeliveredTemplate({
+      orderRef: order.externalReference ?? order.id.slice(0, 8),
+      orderId: order.id,
+    });
+    await this.notifications.emit({
+      vendorId: order.vendorId,
+      type: "order.delivered",
+      severity: "INFO",
+      title: `Order ${order.externalReference ?? order.id.slice(0, 8)} delivered`,
+      body: "The carrier confirmed delivery.",
+      href: `/orders/${order.id}`,
+      email: { subject: tpl.subject, html: tpl.html, text: tpl.text },
     });
   }
 }

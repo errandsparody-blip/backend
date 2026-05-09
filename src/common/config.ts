@@ -110,6 +110,19 @@ const ConfigSchema = z.object({
     .regex(/^.+@.+\..+$/, "Must be a valid email or 'Name <email>' header.")
     .default("USA Errands <noreply@usa-errands.com>"),
   EMAIL_REPLY_TO: z.string().email().default("support@usa-errands.com"),
+  // Comma-separated list of operations email addresses that receive admin
+  // alerts (new PSN submitted, new shopper request, KYC submitted, buyer
+  // message in shopper thread). Empty list = no admin emails (in-app
+  // notifications still fire). Useful in dev so test traffic doesn't spam ops.
+  OPS_ALERT_EMAILS: z
+    .string()
+    .optional()
+    .transform((s) =>
+      (s ?? "")
+        .split(",")
+        .map((v) => v.trim())
+        .filter((v) => v.length > 0 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)),
+    ),
 
   // Cloudflare R2 — Personal Shopper attachment uploads (P6).
   // R2 is S3-compatible; we presign PUTs with AWS SigV4 against the

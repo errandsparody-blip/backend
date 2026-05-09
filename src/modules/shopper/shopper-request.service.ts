@@ -61,6 +61,15 @@ import type {
   ShopperShippingMethod,
 } from "../../common/schemas/shopper.schema";
 import { AuditService } from "../audit/audit.service";
+import {
+  shopperCancelledTemplate,
+  shopperDeliveredTemplate,
+  shopperFollowupPaidTemplate,
+  shopperIntakePaidTemplate,
+} from "../email/email-templates";
+import { EmailService } from "../email/email.service";
+
+import { ShopperTokenService } from "./shopper-token.service";
 
 // ---------------------------------------------------------------------------
 // Cast helpers — see the long-form note in shopper-token.service.ts. Drop
@@ -169,6 +178,8 @@ export class ShopperRequestService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly email: EmailService,
+    private readonly tokens: ShopperTokenService,
   ) {}
 
   // =========================================================================
@@ -375,6 +386,7 @@ export class ShopperRequestService {
     if (row.intakePaidAt && row.intakeStripeIntentId === args.stripeIntentId) {
       return row; // Already settled by an earlier webhook — idempotent path.
     }
+    const isFirstPaymentTransition = row.status === "AWAITING_INTAKE_PAYMENT";
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
     ).shopperRequest.update({
@@ -391,6 +403,13 @@ export class ShopperRequestService {
       resourceId: args.requestId,
       afterState: { stripeIntentId: args.stripeIntentId },
     });
+
+    // Buyer thank-you email — only on the actual transition (not on
+    // duplicate webhook delivery for an already-PAID row). Idempotency
+    // key keeps Resend from sending twice even if we accidentally do.
+    if (isFirstPaymentTransition) {
+      void this.notifyIntakePaid(updated).catch(() => undefined);
+    }
     return updated;
   }
 
@@ -646,6 +665,10 @@ export class ShopperRequestService {
       resourceId: args.requestId,
       afterState: { stripeIntentId: args.stripeIntentId },
     });
+
+    // Buyer thank-you for the follow-up payment. Same idempotency rationale
+    // as the intake-paid email — only fires when we actually transitioned.
+    void this.notifyFollowupPaid(updated).catch(() => undefined);
     return updated;
   }
 
@@ -766,6 +789,8 @@ export class ShopperRequestService {
       resourceType: "shopper_request",
       resourceId: args.requestId,
     });
+    // Buyer delivery confirmation. Best-effort.
+    void this.notifyDelivered(updated).catch(() => undefined);
     return updated;
   }
 
@@ -834,6 +859,12 @@ export class ShopperRequestService {
         refundedAmountCents: args.refundedAmountCents ?? 0,
       },
     });
+    // Buyer cancel/refund email. Best-effort. The reason field IS shown to
+    // the buyer — admin sees this warning in the UI before clicking cancel.
+    void this.notifyCancelled(updated, {
+      reason: args.reason,
+      refundedAmountCents: args.refundedAmountCents ?? 0,
+    }).catch(() => undefined);
     return updated;
   }
 
@@ -886,5 +917,79 @@ export class ShopperRequestService {
       return err.code === "P2025";
     }
     return false;
+  }
+
+  // -------------------------------------------------------------------------
+  // Buyer email notifications. Each mints a fresh magic-link token (we don't
+  // store plaintext) so the email always contains a working URL, and uses a
+  // stable idempotency key so Resend de-dupes if a webhook double-fires.
+  // -------------------------------------------------------------------------
+
+  private async notifyIntakePaid(row: RequestRow): Promise<void> {
+    const issued = await this.tokens.issue(row.id);
+    const tpl = shopperIntakePaidTemplate({
+      threadToken: issued.plaintext,
+      intakeTotalCents: row.intakeTotalCents,
+    });
+    await this.email.send({
+      to: row.buyerEmail,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+      idempotencyKey: `shopper:intake_paid_email:${row.id}`,
+      type: "shopper.intake_paid",
+    });
+  }
+
+  private async notifyFollowupPaid(row: RequestRow): Promise<void> {
+    const issued = await this.tokens.issue(row.id);
+    const amount = row.followupAmountCents ?? 0;
+    const tpl = shopperFollowupPaidTemplate({
+      threadToken: issued.plaintext,
+      amountCents: amount > 0 ? amount : 0,
+    });
+    await this.email.send({
+      to: row.buyerEmail,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+      idempotencyKey: `shopper:followup_paid_email:${row.id}`,
+      type: "shopper.followup_paid",
+    });
+  }
+
+  private async notifyDelivered(row: RequestRow): Promise<void> {
+    const issued = await this.tokens.issue(row.id);
+    const tpl = shopperDeliveredTemplate({ threadToken: issued.plaintext });
+    await this.email.send({
+      to: row.buyerEmail,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+      idempotencyKey: `shopper:delivered_email:${row.id}`,
+      type: "shopper.delivered",
+    });
+  }
+
+  private async notifyCancelled(
+    row: RequestRow,
+    args: { reason: string; refundedAmountCents: number },
+  ): Promise<void> {
+    const issued = await this.tokens.issue(row.id);
+    const tpl = shopperCancelledTemplate({
+      threadToken: issued.plaintext,
+      reason: args.reason,
+      refundedAmountCents: args.refundedAmountCents,
+    });
+    await this.email.send({
+      to: row.buyerEmail,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+      // Idempotency key uses status so repeated cancel→reactivate→cancel
+      // would still send, but a single cancel never duplicates.
+      idempotencyKey: `shopper:cancelled_email:${row.id}:${row.status}`,
+      type: "shopper.cancelled",
+    });
   }
 }

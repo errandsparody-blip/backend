@@ -1,6 +1,7 @@
 import { forwardRef, Module } from "@nestjs/common";
 
 import { AuditModule } from "../../audit/audit.module";
+import { NotificationModule } from "../../notifications/notification.module";
 import { ShopperModule } from "../../shopper/shopper.module";
 import { WalletModule } from "../../wallet/wallet.module";
 
@@ -12,7 +13,7 @@ import { StripeService } from "./stripe.service";
   // forwardRef breaks the circular import: ShopperModule imports StripeModule
   // (to issue Checkout sessions from controllers) and StripeModule needs
   // ShopperRequestService here (to fulfil webhook events).
-  imports: [WalletModule, AuditModule, forwardRef(() => ShopperModule)],
+  imports: [WalletModule, AuditModule, NotificationModule, forwardRef(() => ShopperModule)],
   controllers: [StripeDepositController, StripeWebhookController],
   providers: [StripeService],
   exports: [StripeService],

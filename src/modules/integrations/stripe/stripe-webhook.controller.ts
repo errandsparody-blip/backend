@@ -36,6 +36,8 @@ import type Stripe from "stripe";
 import { Public } from "../../../common/decorators/public.decorator";
 import { PrismaService } from "../../../common/prisma.service";
 import { AuditService } from "../../audit/audit.service";
+import { depositReceiptTemplate } from "../../email/email-templates";
+import { NotificationService } from "../../notifications/notification.service";
 import { ShopperRequestService } from "../../shopper/shopper-request.service";
 import { WalletService } from "../../wallet/wallet.service";
 
@@ -51,6 +53,7 @@ export class StripeWebhookController {
     private readonly audit: AuditService,
     private readonly prisma: PrismaService,
     private readonly shopper: ShopperRequestService,
+    private readonly notifications: NotificationService,
   ) {}
 
   @Public()
@@ -187,7 +190,7 @@ export class StripeWebhookController {
       throw new Error("Stripe wallet-fund intent has invalid metadata.");
     }
 
-    await this.wallet.credit({
+    const result = await this.wallet.credit({
       vendorId,
       amountCents: netAmountCents,
       type: "DEPOSIT",
@@ -195,6 +198,25 @@ export class StripeWebhookController {
       referenceType: "stripe_payment_intent",
       referenceId: intent.id,
       idempotencyKey: intent.id,
+    });
+
+    // Receipt — wallet was credited, vendor should know. Best-effort:
+    // failures here don't roll back the credit (which Stripe already
+    // settled). The notification fanout finds every active user on the
+    // vendor and emails each one.
+    const tpl = depositReceiptTemplate({
+      amountCents: netAmountCents,
+      balanceAfterCents: result.balanceAfterCents,
+      reference: intent.id,
+    });
+    await this.notifications.emit({
+      vendorId,
+      type: "wallet.deposit_received",
+      severity: "INFO",
+      title: `Wallet credited $${(netAmountCents / 100).toFixed(2)}`,
+      body: `Stripe deposit · ${intent.id}. New balance: $${(result.balanceAfterCents / 100).toFixed(2)}.`,
+      href: "/wallet",
+      email: { subject: tpl.subject, html: tpl.html, text: tpl.text },
     });
   }
 

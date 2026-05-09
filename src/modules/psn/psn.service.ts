@@ -26,6 +26,12 @@ import type {
   UpdatePsnDraftInput,
 } from "../../common/schemas/psn.schema";
 import { AuditService } from "../audit/audit.service";
+import {
+  opsNewPsnTemplate,
+  psnSubmittedTemplate,
+} from "../email/email-templates";
+import { NotificationService } from "../notifications/notification.service";
+import { OpsAlertService } from "../notifications/ops-alert.service";
 import { WalletService } from "../wallet/wallet.service";
 
 export interface PublicPsn {
@@ -60,6 +66,8 @@ export class PsnService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly wallet: WalletService,
+    private readonly notifications: NotificationService,
+    private readonly opsAlerts: OpsAlertService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -259,6 +267,46 @@ export class PsnService {
       resourceId: id,
       afterState: { onboardingFeeCents: totalCents },
     });
+
+    // Vendor notification + ops alert. Best-effort.
+    const tpl = psnSubmittedTemplate({
+      psnId: id,
+      lineCount: updated.lines.length,
+      onboardingFeeCents: totalCents,
+    });
+    await this.notifications.emit({
+      vendorId,
+      type: "psn.submitted",
+      severity: "INFO",
+      title: `PSN ${id.slice(0, 8)} submitted`,
+      body: `${updated.lines.length} line(s); onboarding fee $${(totalCents / 100).toFixed(2)} debited.`,
+      href: `/psn/${id}`,
+      email: { subject: tpl.subject, html: tpl.html, text: tpl.text },
+    });
+
+    // Ops alert — fetch business name for the subject line.
+    const vendor = await this.prisma.vendor.findUnique({
+      where: { id: vendorId },
+      select: { businessName: true },
+    });
+    if (vendor) {
+      const ops = opsNewPsnTemplate({
+        psnId: id,
+        vendorBusinessName: vendor.businessName,
+        lineCount: updated.lines.length,
+        onboardingFeeCents: totalCents,
+      });
+      void this.opsAlerts
+        .send({
+          type: "ops.psn.new",
+          subject: ops.subject,
+          html: ops.html,
+          text: ops.text,
+          idempotencyKey: `ops:psn:${id}`,
+        })
+        .catch(() => undefined);
+    }
+
     return this.toPublic(updated);
   }
 

@@ -11,6 +11,9 @@ import { KycStatus, VendorStatus } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
+import { opsNewKycTemplate } from "../email/email-templates";
+import { OpsAlertService } from "../notifications/ops-alert.service";
+
 import { AgreementService } from "./agreement.service";
 
 export interface VendorProfile {
@@ -51,6 +54,7 @@ export class VendorService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly agreement: AgreementService,
+    private readonly opsAlerts: OpsAlertService,
   ) {}
 
   async getProfile(vendorId: string): Promise<VendorProfile> {
@@ -254,6 +258,23 @@ export class VendorService {
       beforeState: { kycStatus: vendor.kycStatus },
       afterState: { kycStatus: KycStatus.IN_PROGRESS },
     });
+
+    // Ops alert — admin team needs to know to review.
+    const ops = opsNewKycTemplate({
+      vendorId,
+      vendorBusinessName: vendor.businessName,
+    });
+    void this.opsAlerts
+      .send({
+        type: "ops.kyc.submitted",
+        subject: ops.subject,
+        html: ops.html,
+        text: ops.text,
+        // Re-submissions should re-alert; key includes the kycSubmittedAt
+        // timestamp so each fresh submission produces a distinct dedupe key.
+        idempotencyKey: `ops:kyc:${vendorId}:${Date.now()}`,
+      })
+      .catch(() => undefined);
 
     return this.getProfile(vendorId);
   }
