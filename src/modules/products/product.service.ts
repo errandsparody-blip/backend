@@ -41,6 +41,13 @@ export interface PublicProduct {
   status: string;
   createdAt: Date;
   updatedAt: Date;
+  /**
+   * True once any SKU exists for this product (i.e. stock has been
+   * received). Locks all fields except `status`. Computed at read time;
+   * the frontend uses it to render the form as read-only and to surface
+   * the "archive + recreate" hint.
+   */
+  locked: boolean;
 }
 
 @Injectable()
@@ -134,7 +141,12 @@ export class ProductService {
     // existence to the wrong tenant.
     const product = await this.prisma.product.findFirst({ where: { id, vendorId } });
     if (!product) throw new NotFoundException();
-    return this.toPublic(product);
+    // Compute lock state — needed for the form to render fields read-only.
+    // Done at read time rather than persisted because it's a pure function
+    // of `count(skus where productId)` and we'd otherwise need triggers to
+    // keep a `lockedAt` column in sync.
+    const skuCount = await this.prisma.sku.count({ where: { productId: id, vendorId } });
+    return this.toPublic(product, { locked: skuCount > 0 });
   }
 
   async update(
@@ -146,20 +158,57 @@ export class ProductService {
     const before = await this.prisma.product.findFirst({ where: { id, vendorId } });
     if (!before) throw new NotFoundException();
 
-    // Variant becomes part of the SKU id format
-    // (`UER-<vendor>-<productCode>-<variant>`). Once any SKU exists for
-    // this product, changing the variant would mean the next receipt
-    // mints SKUs at a new id while the existing SKUs keep their old id —
-    // same product, two id formats, audit nightmare. Lock it.
-    if (patch.variant !== undefined && patch.variant !== before.variant) {
-      const skuCount = await this.prisma.sku.count({
-        where: { productId: id, vendorId },
+    // Once stock has been received under this product (i.e. any SKU exists),
+    // the entire product becomes IMMUTABLE except for `status` — vendors
+    // can still archive. Rationale:
+    //
+    //   - variant   → part of the SKU id format (`UER-<vendor>-<code>-<variant>`).
+    //                 Editing would silently fork ids on the next receive.
+    //   - weight, dimensions, storageTier
+    //               → drive shipping rates and storage billing. Edits would
+    //                 desync our published prices from what the vendor signed
+    //                 up for and let a vendor under-declare retroactively to
+    //                 dodge carrier reweigh charges and storage fees.
+    //   - declaredValueCents, countryOfOrigin, hsCode
+    //               → customs declarations on every order we&apos;ve already
+    //                 shipped. Editing creates retroactive customs liability.
+    //   - name      → labels physical inventory in the warehouse. Renaming
+    //                 mid-flight breaks pick lists.
+    //
+    // The escape hatch is the same as before: archive the product and create
+    // a fresh one with the new attributes. Historical orders/PSNs stay
+    // attached to the archived product for audit purposes.
+    const skuCount = await this.prisma.sku.count({
+      where: { productId: id, vendorId },
+    });
+    const lockableFields: Array<keyof UpdateProductInput> = [
+      "name",
+      "variant",
+      "hsCode",
+      "countryOfOrigin",
+      "declaredValueCents",
+      "weightOz",
+      "lengthIn",
+      "widthIn",
+      "heightIn",
+      "storageTier",
+    ];
+    if (skuCount > 0) {
+      // Detect *attempted* changes — patch fields that differ from the
+      // current value. A patch that just re-sends the same value is a
+      // no-op idempotent edit and we accept it silently.
+      const changedFields = lockableFields.filter((field) => {
+        const next = patch[field];
+        if (next === undefined) return false;
+        const current = (before as unknown as Record<string, unknown>)[field];
+        return next !== current;
       });
-      if (skuCount > 0) {
+      if (changedFields.length > 0) {
         throw new BadRequestException({
           message:
-            "Variant can't change once stock has been received under this product. Archive this product and create a new one with the new variant instead.",
-          code: "product_variant_locked",
+            "Product can't be edited once stock has been received. Archive this product and create a new one with the updated details instead.",
+          code: "product_locked",
+          fields: changedFields,
         });
       }
     }
@@ -195,7 +244,7 @@ export class ProductService {
       beforeState: this.diffSnapshot(before),
       afterState: this.diffSnapshot(updated),
     });
-    return this.toPublic(updated);
+    return this.toPublic(updated, { locked: skuCount > 0 });
   }
 
   /**
@@ -206,7 +255,7 @@ export class ProductService {
     return this.update(vendorId, actorId, id, { status: "ARCHIVED" });
   }
 
-  private toPublic(p: Product): PublicProduct {
+  private toPublic(p: Product, opts: { locked?: boolean } = {}): PublicProduct {
     return {
       id: p.id,
       code: p.code,
@@ -228,6 +277,11 @@ export class ProductService {
       status: p.status,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
+      // `locked` defaults to false. Caller passes true for the per-product
+      // detail path where we counted SKUs. The list path passes false to
+      // avoid an N+1 SKU-count query — the list table doesn't render an
+      // edit form anyway.
+      locked: opts.locked ?? false,
     };
   }
 

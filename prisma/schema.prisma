@@ -984,10 +984,19 @@ model ShopperRequest {
   shippedAt                   DateTime?              @map("shipped_at")
   deliveredAt                 DateTime?              @map("delivered_at")
 
-  // Money — intake payment (sum of buyer's estimates + commission)
+  // Money — intake payment (sum of buyer's estimates + commission + tax)
   itemsSubtotalCents          Int                    @map("items_subtotal_cents")
   commissionRateBps           Int                    @map("commission_rate_bps")
   commissionCents             Int                    @map("commission_cents")
+  // Migration 0013 — U.S. sales tax. Rate snapshot + estimated cents at
+  // intake; actual cents captured by admin during procurement.
+  estimatedTaxRateBps         Int                    @map("estimated_tax_rate_bps")
+  estimatedTaxCents           Int                    @map("estimated_tax_cents")
+  actualTaxCents              Int?                   @map("actual_tax_cents")
+  // Migration 0014 — which state's tax rate was applied. Audit snapshot;
+  // typically the warehouse state for PLATFORM_FREIGHT, the buyer's
+  // forwarder state for BUYER_FORWARDER.
+  effectiveTaxState           String?                @map("effective_tax_state")
   intakeTotalCents            Int                    @map("intake_total_cents")
   intakeStripeSessionId       String?                @map("intake_stripe_session_id")
   intakeStripeIntentId        String?                @map("intake_stripe_intent_id")
@@ -1027,6 +1036,7 @@ model ShopperRequest {
   @@index([buyerEmail, createdAt])
   @@index([status, createdAt])
   @@index([assignedAdminId, status])
+  @@index([effectiveTaxState])
   @@map("shopper_requests")
 }
 

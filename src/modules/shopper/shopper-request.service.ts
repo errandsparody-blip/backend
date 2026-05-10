@@ -89,6 +89,12 @@ export interface RequestRow {
   itemsSubtotalCents: number;
   commissionRateBps: number;
   commissionCents: number;
+  // Migration 0013 — U.S. sales tax estimated at intake, actual at procurement.
+  estimatedTaxRateBps: number;
+  estimatedTaxCents: number;
+  actualTaxCents: number | null;
+  // Migration 0014 — which state's rate was used.
+  effectiveTaxState: string | null;
   intakeTotalCents: number;
   intakeStripeSessionId: string | null;
   intakeStripeIntentId: string | null;
@@ -158,11 +164,20 @@ export interface FollowupPlan {
   /**
    * Signed delta (cents). Positive = buyer pays, negative = admin refunds,
    * zero = nothing to settle.
+   *
+   * Formula:
+   *   amount = (items_actual + actual_tax + shipping)
+   *          - (items_subtotal + estimated_tax)
+   *
+   * Note that commission is NOT in this calculation — it was already paid
+   * at intake and is non-refundable (we did the procurement work).
    */
   amountCents: number;
   itemsActualSubtotalCents: number;
+  actualTaxCents: number;
   shippingCostCents: number;
   itemsSubtotalCents: number;
+  estimatedTaxCents: number;
   /** Highest possible refund the platform can issue (intake_total_cents). */
   maxRefundCents: number;
 }
@@ -195,13 +210,29 @@ export class ShopperRequestService {
    */
   async create(
     input: CreateShopperRequestInput,
-    commissionBps: number,
+    rates: {
+      commissionBps: number;
+      /** Tax bps for the state we'll actually ship to. */
+      estimatedTaxBps: number;
+      /**
+       * 2-letter ISO of the state whose rate was used. Snapshot for audit
+       * — survives operator tweaks to the rate map.
+       */
+      effectiveTaxState: string;
+    },
   ): Promise<RequestWithLines> {
+    const { commissionBps, estimatedTaxBps, effectiveTaxState } = rates;
     if (!Number.isInteger(commissionBps) || commissionBps < 0 || commissionBps > COMMISSION_BPS_CAP) {
       // Defence in depth: should already be validated upstream.
       throw new BadRequestException({
         message: "Commission rate is misconfigured.",
         code: "shopper_commission_misconfigured",
+      });
+    }
+    if (!Number.isInteger(estimatedTaxBps) || estimatedTaxBps < 0 || estimatedTaxBps > COMMISSION_BPS_CAP) {
+      throw new BadRequestException({
+        message: "Estimated tax rate is misconfigured.",
+        code: "shopper_estimated_tax_misconfigured",
       });
     }
 
@@ -216,8 +247,16 @@ export class ShopperRequestService {
         code: "shopper_subtotal_invalid",
       });
     }
+    // Commission is on items only — we don't earn margin on the sales tax
+    // we'll be passing through to the U.S. retailer.
     const commissionCents = Math.floor((itemsSubtotalCents * commissionBps) / COMMISSION_BPS_CAP);
-    const intakeTotalCents = itemsSubtotalCents + commissionCents;
+    // Estimated U.S. sales tax. This is a buyer-protective estimate so the
+    // intake total isn't dramatically lower than the actual cost. Reconciled
+    // against `actualTaxCents` after admin completes procurement.
+    const estimatedTaxCents = Math.floor(
+      (itemsSubtotalCents * estimatedTaxBps) / COMMISSION_BPS_CAP,
+    );
+    const intakeTotalCents = itemsSubtotalCents + commissionCents + estimatedTaxCents;
 
     // Persist request + lines in a single transaction so we never end up
     // with a half-built request if a line insert fails.
@@ -234,6 +273,9 @@ export class ShopperRequestService {
           itemsSubtotalCents,
           commissionRateBps: commissionBps,
           commissionCents,
+          estimatedTaxRateBps: estimatedTaxBps,
+          estimatedTaxCents,
+          effectiveTaxState,
           intakeTotalCents,
           status: "AWAITING_INTAKE_PAYMENT",
           lines: {
@@ -259,8 +301,11 @@ export class ShopperRequestService {
         buyerEmail: created.buyerEmail,
         itemsSubtotalCents,
         commissionCents,
+        estimatedTaxCents,
         intakeTotalCents,
         commissionBps,
+        estimatedTaxBps,
+        effectiveTaxState,
         lineCount: input.lines.length,
       },
     });
@@ -506,6 +551,11 @@ export class ShopperRequestService {
     if (args.input.shippingMethod !== undefined) {
       data.shippingMethod = args.input.shippingMethod;
     }
+    // actualTaxCents is optional. Explicit null clears (rare but valid for
+    // a tax-free state); a number sets; undefined leaves untouched.
+    if (args.input.actualTaxCents !== undefined) {
+      data.actualTaxCents = args.input.actualTaxCents;
+    }
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
     ).shopperRequest.update({
@@ -520,6 +570,7 @@ export class ShopperRequestService {
       beforeState: {
         shippingCostCents: before.shippingCostCents,
         shippingMethod: before.shippingMethod,
+        actualTaxCents: before.actualTaxCents,
       },
       afterState: data as Prisma.InputJsonValue,
     });
@@ -528,8 +579,13 @@ export class ShopperRequestService {
 
   /**
    * Compute the follow-up plan from the current row. Pure function over
-   * the loaded request; doesn't mutate. Returns null only if any actuals
-   * are missing — caller should treat that as "not ready yet".
+   * the loaded request; doesn't mutate. Returns null only if a required
+   * actual is missing — caller should treat that as "not ready yet".
+   *
+   * `actualTaxCents` is treated as 0 if not yet entered — for purchases in
+   * tax-free states (Oregon, Delaware, etc.) admin can leave it null and
+   * the math correctly cancels against the estimated tax buyer paid at
+   * intake (we owe them a refund of the full estimate).
    */
   computeFollowup(row: RequestWithLines): FollowupPlan | null {
     if (row.shippingCostCents == null) return null;
@@ -546,13 +602,22 @@ export class ShopperRequestService {
       itemsActualSubtotalCents += actual * line.quantity;
     }
 
-    const total = itemsActualSubtotalCents + row.shippingCostCents;
-    const amountCents = total - row.itemsSubtotalCents;
+    const actualTaxCents = row.actualTaxCents ?? 0;
+    // Buyer paid items_subtotal + estimated_tax at intake (commission is
+    // out of scope for reconciliation — non-refundable service fee).
+    // Reconciliation compares "what they paid for items + tax" vs "what
+    // we actually paid for items + tax + shipping".
+    const intakePaidForItemsAndTax = row.itemsSubtotalCents + row.estimatedTaxCents;
+    const actualForItemsTaxShipping =
+      itemsActualSubtotalCents + actualTaxCents + row.shippingCostCents;
+    const amountCents = actualForItemsTaxShipping - intakePaidForItemsAndTax;
     return {
       amountCents,
       itemsActualSubtotalCents,
+      actualTaxCents,
       shippingCostCents: row.shippingCostCents,
       itemsSubtotalCents: row.itemsSubtotalCents,
+      estimatedTaxCents: row.estimatedTaxCents,
       // We can never refund more than the buyer paid in total at intake.
       maxRefundCents: row.intakeTotalCents,
     };
@@ -620,7 +685,9 @@ export class ShopperRequestService {
       afterState: {
         followupAmountCents: plan.amountCents,
         itemsActualSubtotalCents: plan.itemsActualSubtotalCents,
+        actualTaxCents: plan.actualTaxCents,
         shippingCostCents: plan.shippingCostCents,
+        estimatedTaxCents: plan.estimatedTaxCents,
       },
     });
     return { row, plan };

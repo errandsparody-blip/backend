@@ -56,6 +56,12 @@ import { ShopperTokenService } from "./shopper-token.service";
 const COMMISSION_CONFIG_KEY = "shopper_commission_bps";
 const COMMISSION_DEFAULT_BPS = 1800;
 const COMMISSION_MAX_BPS = 10_000;
+const TAX_RATES_CONFIG_KEY = "shopper_tax_rates";
+const WAREHOUSE_STATE_CONFIG_KEY = "shopper_warehouse_state";
+// Texas combined-average rate, used as fallback when the warehouse-state
+// row is missing or the resolved state isn't in the tax-rate map.
+const FALLBACK_WAREHOUSE_STATE = "TX";
+const FALLBACK_TAX_BPS = 825;
 
 @Controller({ path: "shopper", version: "1" })
 export class ShopperController {
@@ -92,8 +98,31 @@ export class ShopperController {
     const cfg = loadConfig();
     const commissionBps = await this.loadCommissionBps();
 
+    // Resolve the effective tax state for this request. The retailer ships
+    // to whoever's address gets put on the order — that's our warehouse
+    // unless the buyer is using their own forwarder, in which case we use
+    // the forwarder's state (when supplied at intake).
+    const taxRates = await this.loadTaxRates();
+    const warehouseState = await this.loadWarehouseState();
+    const buyerAddrState =
+      body.shippingAddress?.state && /^[A-Z]{2}$/.test(body.shippingAddress.state)
+        ? body.shippingAddress.state
+        : null;
+    // For now, always use the warehouse state — we don't yet expose the
+    // shipping-method choice on the intake form. When BUYER_FORWARDER lands,
+    // the address.state above is the right input.
+    const effectiveTaxState = warehouseState;
+    void buyerAddrState; // referenced when forwarder support lands
+    const estimatedTaxBps =
+      taxRates[effectiveTaxState] ??
+      (effectiveTaxState === FALLBACK_WAREHOUSE_STATE ? FALLBACK_TAX_BPS : 0);
+
     // 1. Persist request (status = AWAITING_INTAKE_PAYMENT).
-    const created = await this.requests.create(body, commissionBps);
+    const created = await this.requests.create(body, {
+      commissionBps,
+      estimatedTaxBps,
+      effectiveTaxState,
+    });
 
     // 2. Mint a magic-link token for the buyer to access the thread.
     const issued = await this.tokens.issue(created.id);
@@ -114,6 +143,7 @@ export class ShopperController {
         buyerEmail: created.buyerEmail,
         itemsSubtotalCents: created.itemsSubtotalCents,
         commissionCents: created.commissionCents,
+        estimatedTaxCents: created.estimatedTaxCents,
         idempotencyKey: `shopper:intake:${created.id}`,
         successUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(issued.plaintext)}?paid=1`,
         cancelUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(issued.plaintext)}?cancelled=1`,
@@ -326,6 +356,88 @@ export class ShopperController {
   }
 
   /**
+   * Pull the state-keyed sales-tax rate map from the configuration table.
+   * Returns a frozen object so callers can't mutate it. Falls back to
+   * `{ TX: FALLBACK_TAX_BPS }` if the row is missing — reasonable for a
+   * fresh dev environment that hasn't run migration 0014 yet.
+   *
+   * The rate map is intentionally PESSIMISTIC for unknown states (returns
+   * 0 if a state isn't in the map) so we never overcharge — if we miss a
+   * state, the buyer pays only items + commission at intake and the
+   * actual tax surfaces in the followup invoice. Better than the inverse
+   * (charging tax we don't know how to compute) which would produce
+   * unjustified refunds.
+   */
+  private async loadTaxRates(): Promise<Record<string, number>> {
+    try {
+      const row = await this.prisma.configuration.findUnique({
+        where: { key: TAX_RATES_CONFIG_KEY },
+      });
+      if (!row) return { [FALLBACK_WAREHOUSE_STATE]: FALLBACK_TAX_BPS };
+      const value = row.value as unknown;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new BadRequestException({
+          message: "Shopper tax rates are misconfigured (expected an object).",
+          code: "shopper_tax_rates_misconfigured",
+        });
+      }
+      // Validate each entry: key must look like a US state code, value
+      // must be an integer 0–10000 bps. Skip invalid entries with a
+      // warning rather than failing the whole request.
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(value)) {
+        if (!/^[A-Z]{2}$/.test(k)) continue;
+        const bps = typeof v === "number" ? v : Number(v);
+        if (Number.isInteger(bps) && bps >= 0 && bps <= COMMISSION_MAX_BPS) {
+          out[k] = bps;
+        } else {
+          this.logger.warn({ state: k, value: v }, "shopper_tax_rates: skipping invalid entry");
+        }
+      }
+      return out;
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      this.logger.error({ err }, "shopper.tax_rates_load_failed");
+      throw new InternalServerErrorException({
+        message: "Could not load configuration.",
+        code: "shopper_config_unavailable",
+      });
+    }
+  }
+
+  /**
+   * Resolve the warehouse state we ship to by default. Single-warehouse
+   * setup today; this is the lookup point we'd extend if/when we run
+   * multiple US warehouses. Falls back to TX if the row is missing.
+   */
+  private async loadWarehouseState(): Promise<string> {
+    try {
+      const row = await this.prisma.configuration.findUnique({
+        where: { key: WAREHOUSE_STATE_CONFIG_KEY },
+      });
+      if (!row) return FALLBACK_WAREHOUSE_STATE;
+      const value = row.value as unknown;
+      const state =
+        typeof value === "string" ? value.toUpperCase() : String(value ?? "").toUpperCase();
+      if (!/^[A-Z]{2}$/.test(state)) {
+        throw new BadRequestException({
+          message: "Shopper warehouse state is misconfigured (expected 2-letter ISO).",
+          code: "shopper_warehouse_state_misconfigured",
+          value,
+        });
+      }
+      return state;
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      this.logger.error({ err }, "shopper.warehouse_state_load_failed");
+      throw new InternalServerErrorException({
+        message: "Could not load configuration.",
+        code: "shopper_config_unavailable",
+      });
+    }
+  }
+
+  /**
    * Buyer-facing serialization. Strips internal fields (admin notes,
    * Stripe ids, internal fee breakdown) — the buyer sees totals, status,
    * shipping, and lines without admin commentary.
@@ -344,6 +456,10 @@ export class ShopperController {
       deliveredAt: row.deliveredAt,
       itemsSubtotalCents: row.itemsSubtotalCents,
       commissionCents: row.commissionCents,
+      estimatedTaxRateBps: row.estimatedTaxRateBps,
+      estimatedTaxCents: row.estimatedTaxCents,
+      actualTaxCents: row.actualTaxCents,
+      effectiveTaxState: row.effectiveTaxState,
       intakeTotalCents: row.intakeTotalCents,
       intakePaidAt: row.intakePaidAt,
       itemsActualSubtotalCents: row.itemsActualSubtotalCents,

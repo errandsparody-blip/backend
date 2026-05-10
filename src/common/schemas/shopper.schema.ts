@@ -212,6 +212,13 @@ export type AdminUpdateShopperLineInput = z.infer<typeof adminUpdateShopperLineS
 export const adminSetShopperShippingSchema = z.object({
   shippingCostCents: cents(500_000, "Shipping cost"),
   shippingMethod: z.enum(ShopperShippingMethodValues).optional(),
+  // Actual U.S. sales tax the platform paid at procurement (cents). Optional
+  // — admin can set it before, after, or alongside shipping. Reconciled
+  // against estimatedTaxCents to compute the buyer follow-up.
+  // Cap matches itemsSubtotalCents max (lines × estimatedUnitPrice cap × qty
+  // cap is unbounded in principle, but per-line is 2.5M and the tax should
+  // never exceed items × 100% so we cap at the same items ceiling).
+  actualTaxCents: cents(2_500_000, "Sales tax").nullable().optional(),
 });
 export type AdminSetShopperShippingInput = z.infer<typeof adminSetShopperShippingSchema>;
 

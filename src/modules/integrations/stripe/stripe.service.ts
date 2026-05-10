@@ -51,6 +51,12 @@ export interface CreateShopperIntakeSessionArgs {
   itemsSubtotalCents: number;
   /** Platform commission in cents (the service-fee line). */
   commissionCents: number;
+  /**
+   * Estimated U.S. sales tax in cents (the tax line). Zero collapses the
+   * line item to a $0 entry which Stripe rejects, so the service drops it
+   * silently when zero — buyer's checkout still shows the right total.
+   */
+  estimatedTaxCents: number;
   /** Idempotency key — typically `shopper:intake:<requestId>`. */
   idempotencyKey: string;
   /** Where Stripe sends the buyer after success — must include {CHECKOUT_SESSION_ID}. */
@@ -202,6 +208,43 @@ export class StripeService {
       throw new Error("commissionCents must be a non-negative integer.");
     }
 
+    // Build line items, dropping any zero-amount entries — Stripe rejects
+    // a line with `unit_amount: 0`. Tax can legitimately be zero in dev or
+    // for tax-free states; commission too if the operator sets the rate
+    // to 0%. Items must always be > 0 (validated above).
+    const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
+      {
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: args.itemsSubtotalCents,
+          product_data: { name: "Items (estimate, charged at procurement)" },
+        },
+      },
+    ];
+    if (args.commissionCents > 0) {
+      lineItems.push({
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: args.commissionCents,
+          product_data: { name: "USA Errands service fee" },
+        },
+      });
+    }
+    if (args.estimatedTaxCents > 0) {
+      lineItems.push({
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: args.estimatedTaxCents,
+          product_data: {
+            name: "Estimated U.S. sales tax (reconciled at procurement)",
+          },
+        },
+      });
+    }
+
     const session = await this.stripe.checkout.sessions.create(
       {
         mode: "payment",
@@ -209,24 +252,7 @@ export class StripeService {
         // We don't enable Link / wallets explicitly — Stripe's defaults
         // surface what's available in the buyer's region.
         payment_method_types: ["card"],
-        line_items: [
-          {
-            quantity: 1,
-            price_data: {
-              currency: "usd",
-              unit_amount: args.itemsSubtotalCents,
-              product_data: { name: "Items (estimate, charged at procurement)" },
-            },
-          },
-          {
-            quantity: 1,
-            price_data: {
-              currency: "usd",
-              unit_amount: args.commissionCents,
-              product_data: { name: "USA Errands service fee" },
-            },
-          },
-        ],
+        line_items: lineItems,
         // The webhook handler reads these to identify which request was paid.
         metadata: {
           purpose: "shopper.intake",
