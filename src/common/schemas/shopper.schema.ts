@@ -241,7 +241,18 @@ const dim = () =>
   z.number().nonnegative("Cannot be negative.").max(200, "Too large.");
 
 export const adminSetShopperShippingSchema = z.object({
-  shippingCostCents: cents(500_000, "Shipping cost"),
+  // Migration 0017 — `shippingCostCents` is now derived by default from
+  // (parcel weight × method's per-lb rate) but admin can override (real-
+  // world surcharges, partner pricing, etc.). The `useCalculated` flag
+  // controls which path the service takes:
+  //   - true  → ignore shippingCostCents, compute from rate × weight.
+  //             Required: shippingMethod set, parcelWeightOz > 0,
+  //             freight rate row populated for that method.
+  //   - false → trust shippingCostCents as the operator's override; the
+  //             service still snapshots the system-calculated number into
+  //             `shippingCalculatedCents` so the receipt can show both.
+  shippingCostCents: cents(500_000, "Shipping cost").optional(),
+  useCalculated: z.boolean().optional().default(false),
   shippingMethod: z.enum(ShopperShippingMethodValues).optional(),
   // Actual U.S. sales tax the platform paid at procurement (cents). Optional
   // — admin can set it before, after, or alongside shipping. Reconciled
@@ -259,7 +270,13 @@ export const adminSetShopperShippingSchema = z.object({
     .max(80_000, "Weight too large.")
     .nullable()
     .optional(),
-});
+}).refine(
+  (v) => v.useCalculated === true || typeof v.shippingCostCents === "number",
+  {
+    message: "Either useCalculated must be true or shippingCostCents must be provided.",
+    path: ["shippingCostCents"],
+  },
+);
 export type AdminSetShopperShippingInput = z.infer<typeof adminSetShopperShippingSchema>;
 
 // ---------------------------------------------------------------------------

@@ -80,6 +80,20 @@ export interface ReceiptBreakdown {
   parcelHeightIn: number | null;
   parcelWeightOz: number | null;
 
+  /**
+   * Migration 0017 — freight breakdown. `freightRateCentsPerLb` is the
+   * snapshot of the per-method rate used at save time; together with
+   * `shippingCalculatedCents` it lets the receipt show
+   * `weight × rate = calc · charged X` so the buyer sees any operator
+   * override. `shippingMethod` labels the rate (Platform freight /
+   * Buyer forwarder / Warehouse pickup) — same field as on the row,
+   * mirrored here so the builder doesn't take a dependency on the
+   * Prisma enum types.
+   */
+  shippingMethod: string | null;
+  freightRateCentsPerLb: number | null;
+  shippingCalculatedCents: number | null;
+
   /** Follow-up (signed: + buyer pays, − we refund, 0 nothing). */
   followupAmountCents: number | null;
 
@@ -126,6 +140,9 @@ export function buildReceiptBreakdown(
     parcelWidthIn: request.parcelWidthIn,
     parcelHeightIn: request.parcelHeightIn,
     parcelWeightOz: request.parcelWeightOz,
+    shippingMethod: request.shippingMethod,
+    freightRateCentsPerLb: request.freightRateCentsPerLb,
+    shippingCalculatedCents: request.shippingCalculatedCents,
     followupAmountCents: request.followupAmountCents,
     carrier: request.carrier,
     trackingNumber: request.trackingNumber,
@@ -181,6 +198,41 @@ function formatDims(d: ReceiptBreakdown): string {
 
 function formatStatus(status: string): string {
   return status.replace(/_/g, " ").toLowerCase();
+}
+
+function formatShippingMethod(m: string | null): string {
+  if (!m) return "—";
+  switch (m) {
+    case "PLATFORM_FREIGHT":
+      return "Platform freight";
+    case "BUYER_FORWARDER":
+      return "Buyer forwarder";
+    case "PICKUP":
+      return "Warehouse pickup";
+    default:
+      return m.replace(/_/g, " ").toLowerCase();
+  }
+}
+
+/**
+ * "1.52 lb × $4.50/lb = $6.84" — the human-readable freight calculation
+ * shown under the Shipping line so the buyer sees how it was reached.
+ *
+ * Returns null when the inputs to the calc aren't all present (no
+ * weight, no rate, or PICKUP @ $0). Caller decides whether to render
+ * the line at all.
+ */
+function formatFreightCalc(d: ReceiptBreakdown): string | null {
+  if (d.freightRateCentsPerLb == null || d.parcelWeightOz == null || d.parcelWeightOz <= 0) {
+    return null;
+  }
+  const lb = d.parcelWeightOz / 16;
+  // parseFloat drops trailing zeros without losing precision (1.50 → 1.5,
+  // 1.25 → 1.25). A regex on toFixed only strips ".00", so 1.50 leaks
+  // through and reads weirdly next to "$4.50/lb".
+  const lbStr = parseFloat(lb.toFixed(2)).toString();
+  const ratePerLbDollars = (d.freightRateCentsPerLb / 100).toFixed(2);
+  return `${lbStr} lb × $${ratePerLbDollars}/lb`;
 }
 
 function escapeXml(s: string): string {
@@ -285,10 +337,39 @@ function buildRows(d: ReceiptBreakdown): RenderRow[] {
       label: "Sales tax (actual)",
       amount: formatUSD(d.actualTaxCents),
     });
+
+    // Freight: method + system calc + override delta. Three possible
+    // shapes:
+    //   (a) PICKUP / no freight data    → single "Shipping cost" row
+    //   (b) Auto-calculated, no override → method + "weight × rate" subline
+    //   (c) Override                     → also show system calc + delta
+    const calcText = formatFreightCalc(d);
+    const methodLabel = d.shippingMethod ? `Shipping (${formatShippingMethod(d.shippingMethod)})` : "Shipping cost";
     rows.push({
-      label: "Shipping cost",
+      label: methodLabel,
       amount: formatUSD(d.shippingCostCents),
     });
+    if (calcText) {
+      rows.push({
+        label: `   ${calcText}`,
+        amount: formatUSD(d.shippingCalculatedCents),
+        isMuted: true,
+      });
+      // Override surfacing — only when the operator-charged number
+      // differs from the system calc by more than rounding noise.
+      if (
+        d.shippingCalculatedCents != null &&
+        d.shippingCostCents != null &&
+        Math.abs(d.shippingCalculatedCents - d.shippingCostCents) > 1
+      ) {
+        const delta = d.shippingCostCents - d.shippingCalculatedCents;
+        rows.push({
+          label: "   Operator adjustment",
+          amount: formatUSD(delta, { signed: true }),
+          isMuted: true,
+        });
+      }
+    }
   }
 
   if (d.followupAmountCents != null) {
@@ -443,11 +524,14 @@ export function buildReceiptText(d: ReceiptBreakdown): string {
   out.push("BREAKDOWN");
   out.push("---------");
   for (const r of buildRows(d)) {
-    if (r.isMuted) {
+    if (r.isMuted && r.amount === "") {
+      // Section divider — blank line + label only, no money column.
       out.push("");
       out.push(r.label);
       continue;
     }
+    // Everything else (regular rows + muted sub-lines like the freight
+    // breakdown and operator-adjustment rows) prints the amount too.
     out.push(`  ${r.label.padEnd(38, " ")} ${r.amount}`);
   }
   if (

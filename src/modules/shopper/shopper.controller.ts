@@ -500,6 +500,10 @@ export class ShopperController {
       parcelWidthIn: row.parcelWidthIn,
       parcelHeightIn: row.parcelHeightIn,
       parcelWeightOz: row.parcelWeightOz,
+      // Migration 0017 — freight rate snapshot + system-calculated cost.
+      // Both nullable until admin saves shipping for the first time.
+      freightRateCentsPerLb: row.freightRateCentsPerLb,
+      shippingCalculatedCents: row.shippingCalculatedCents,
       createdAt: row.createdAt,
       lines: row.lines.map((line) => ({
         id: line.id,

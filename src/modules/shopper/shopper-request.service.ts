@@ -119,6 +119,10 @@ export interface RequestRow {
   parcelWidthIn: number | null;
   parcelHeightIn: number | null;
   parcelWeightOz: number | null;
+  // Migration 0017 — freight rate snapshot + system-calculated cost. Lets
+  // the receipt explain "weight × rate = $X · charged $Y".
+  freightRateCentsPerLb: number | null;
+  shippingCalculatedCents: number | null;
   status: ShopperRequestStatus;
   assignedAdminId: string | null;
   internalNotes: string | null;
@@ -619,6 +623,12 @@ export class ShopperRequestService {
     requestId: string;
     input: AdminSetShopperShippingInput;
     actorId: string;
+    /**
+     * Per-method freight rate map (cents per pound). Loaded from the
+     * `shopper_freight_rates` configuration row by the controller and
+     * threaded in so the service stays free of DB-config lookups.
+     */
+    freightRates: Record<string, number>;
   }): Promise<RequestRow> {
     const before = await this.getById(args.requestId, { includeLines: false });
     if (before.status !== "PROCURING" && before.status !== "AWAITING_RECONCILIATION") {
@@ -628,15 +638,67 @@ export class ShopperRequestService {
         status: before.status,
       });
     }
+
+    // Resolve the effective method + weight for the calc. We accept
+    // partial updates (e.g. admin saves shipping cost first, then comes
+    // back for parcel dims), so fall back to whatever the row already
+    // has when this PATCH doesn't override it.
+    const effectiveMethod =
+      (args.input.shippingMethod ?? before.shippingMethod) as
+        | ShopperShippingMethod
+        | null;
+    const effectiveWeightOz =
+      args.input.parcelWeightOz !== undefined
+        ? args.input.parcelWeightOz
+        : before.parcelWeightOz;
+
+    // Look up the per-lb rate for the resolved method. PICKUP and
+    // unrecognised methods are 0 — pickup never has shipping; an
+    // unrecognised value would fail Zod validation upstream anyway.
+    const ratePerLb =
+      effectiveMethod && Number.isFinite(args.freightRates[effectiveMethod])
+        ? args.freightRates[effectiveMethod]!
+        : 0;
+
+    // Compute system shipping cost: weight (lb) × rate (cents/lb).
+    // `Math.round` so the cents land as an integer; truncating with
+    // floor would systematically under-charge by sub-cent amounts.
+    const calculatedCents =
+      effectiveWeightOz != null && effectiveWeightOz > 0
+        ? Math.round((effectiveWeightOz / 16) * ratePerLb)
+        : 0;
+
+    // Decide what to actually charge based on the override flag.
+    let chargedCents: number;
+    if (args.input.useCalculated) {
+      // Use the system number. Refuse if the inputs needed to compute
+      // it aren't ready — better than silently charging $0.
+      if (!effectiveMethod) {
+        throw new BadRequestException({
+          message: "Pick a shipping method before using auto-calculated cost.",
+          code: "shopper_shipping_no_method",
+        });
+      }
+      // PICKUP legitimately has weight=0 and cost=0; the explicit method
+      // check above is enough — don't reject zero weight here.
+      chargedCents = calculatedCents;
+    } else {
+      // Override path. Schema's refine() guarantees shippingCostCents is
+      // present when useCalculated is false.
+      chargedCents = args.input.shippingCostCents!;
+    }
+
     const data: Record<string, unknown> = {
-      shippingCostCents: args.input.shippingCostCents,
+      shippingCostCents: chargedCents,
+      shippingCalculatedCents: calculatedCents,
+      // Always snapshot the rate that was active at this save — even if
+      // admin overrode, the receipt needs to explain how the system
+      // number was reached. Null only if no method is set yet.
+      freightRateCentsPerLb: effectiveMethod ? ratePerLb : null,
     };
     if (args.input.shippingMethod !== undefined) {
       data.shippingMethod = args.input.shippingMethod;
     }
-    // actualTaxCents is optional. Explicit null clears (rare but valid for
-    // a tax-free state); a number sets; undefined leaves untouched. Same
-    // semantics for parcel dimensions + parcel weight.
     if (args.input.actualTaxCents !== undefined) {
       data.actualTaxCents = args.input.actualTaxCents;
     }
@@ -644,6 +706,7 @@ export class ShopperRequestService {
     if (args.input.parcelWidthIn !== undefined) data.parcelWidthIn = args.input.parcelWidthIn;
     if (args.input.parcelHeightIn !== undefined) data.parcelHeightIn = args.input.parcelHeightIn;
     if (args.input.parcelWeightOz !== undefined) data.parcelWeightOz = args.input.parcelWeightOz;
+
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
     ).shopperRequest.update({
@@ -659,6 +722,8 @@ export class ShopperRequestService {
         shippingCostCents: before.shippingCostCents,
         shippingMethod: before.shippingMethod,
         actualTaxCents: before.actualTaxCents,
+        freightRateCentsPerLb: before.freightRateCentsPerLb,
+        shippingCalculatedCents: before.shippingCalculatedCents,
       },
       afterState: data as Prisma.InputJsonValue,
     });

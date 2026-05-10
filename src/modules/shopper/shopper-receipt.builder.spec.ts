@@ -51,6 +51,8 @@ const baseRequest: RequestRow = {
   parcelWidthIn: null,
   parcelHeightIn: null,
   parcelWeightOz: null,
+  freightRateCentsPerLb: null,
+  shippingCalculatedCents: null,
   status: "PROCURING",
   assignedAdminId: null,
   internalNotes: null,
@@ -151,7 +153,10 @@ describe("shopper receipt builder", () => {
       expect(text).toContain("$132.00");
       expect(text).toContain("Sales tax (actual)");
       expect(text).toContain("$10.80");
-      expect(text).toContain("Shipping cost");
+      // baseRequest defaults shippingMethod to PLATFORM_FREIGHT, so the
+      // label is the method-prefixed variant. Plain "Shipping cost"
+      // shows up only when the row has no method (legacy / pre-0017).
+      expect(text).toContain("Shipping (Platform freight)");
       expect(text).toContain("$14.50");
       expect(text).toContain("Follow-up due (you pay)");
       expect(text).toContain("+$11.99");
@@ -221,6 +226,60 @@ describe("shopper receipt builder", () => {
     it("omits PARCEL block when no dims and no weight", () => {
       const text = buildReceiptText(buildReceiptBreakdown(baseRequest, baseLines));
       expect(text).not.toContain("PARCEL");
+    });
+  });
+
+  describe("buildReceiptText — freight breakdown (migration 0017)", () => {
+    it("shows method + weight × rate + calc when auto-calculated", () => {
+      const req = {
+        ...baseRequest,
+        itemsActualSubtotalCents: 12500,
+        actualTaxCents: 1031,
+        shippingMethod: "PLATFORM_FREIGHT" as const,
+        parcelWeightOz: 24, // 1.5 lb
+        freightRateCentsPerLb: 450, // $4.50/lb
+        shippingCalculatedCents: 675, // 1.5 × 450 = 675
+        shippingCostCents: 675,
+      };
+      const text = buildReceiptText(buildReceiptBreakdown(req, baseLines));
+      expect(text).toContain("Shipping (Platform freight)");
+      expect(text).toContain("$6.75");
+      expect(text).toContain("1.5 lb × $4.50/lb");
+      // No operator adjustment — calc == charged
+      expect(text).not.toContain("Operator adjustment");
+    });
+
+    it("surfaces an operator override delta when calc != charged", () => {
+      const req = {
+        ...baseRequest,
+        itemsActualSubtotalCents: 12500,
+        actualTaxCents: 1031,
+        shippingMethod: "PLATFORM_FREIGHT" as const,
+        parcelWeightOz: 24,
+        freightRateCentsPerLb: 450,
+        shippingCalculatedCents: 675, // system says $6.75
+        shippingCostCents: 800, // operator charged $8.00 (+$1.25 surcharge)
+      };
+      const text = buildReceiptText(buildReceiptBreakdown(req, baseLines));
+      expect(text).toContain("$8.00"); // charged
+      expect(text).toContain("$6.75"); // calculated
+      expect(text).toContain("Operator adjustment");
+      expect(text).toContain("+$1.25");
+    });
+
+    it("collapses to plain Shipping cost when no freight data (PICKUP / legacy)", () => {
+      const req = {
+        ...baseRequest,
+        itemsActualSubtotalCents: 12500,
+        actualTaxCents: 1031,
+        shippingCostCents: 0,
+        shippingMethod: "PICKUP" as const,
+        // no rate, no calc → no breakdown subline
+      };
+      const text = buildReceiptText(buildReceiptBreakdown(req, baseLines));
+      expect(text).toContain("Shipping (Warehouse pickup)");
+      expect(text).not.toContain("× $");
+      expect(text).not.toContain("Operator adjustment");
     });
   });
 

@@ -167,10 +167,16 @@ export class AdminShopperController {
     @Body(new ZodValidationPipe(adminSetShopperShippingSchema))
     body: AdminSetShopperShippingInput,
   ) {
+    // Pull the per-method freight rates so the service can compute the
+    // system shipping cost (and snapshot the rate). Failure to load is
+    // not fatal — we fall back to an empty map, in which case rate=0
+    // and any auto-calc path errors out cleanly with a clear code.
+    const freightRates = await this.loadFreightRates();
     const updated = await this.requests.setShipping({
       requestId: id,
       input: body,
       actorId: user.sub,
+      freightRates,
     });
 
     // Post the freshly-updated breakdown into the chat thread so the buyer
@@ -701,6 +707,72 @@ export class AdminShopperController {
   // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Freight rates — per-method cents/lb. Read from configuration row
+  // `shopper_freight_rates`. Used by setShipping AND surfaced to the
+  // admin shipping form (live cost preview) via GET /freight-rates.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * GET /v1/admin/shopper/freight-rates
+   *
+   * Returns the current per-method rate map. The admin shipping form
+   * reads this to live-calculate the cost as the user types weights;
+   * the same map is used server-side at save time so frontend + backend
+   * agree on the number.
+   */
+  @Get("freight-rates")
+  async listFreightRates(): Promise<{
+    rates: Record<string, number>;
+    methods: ReadonlyArray<string>;
+  }> {
+    const rates = await this.loadFreightRates();
+    return {
+      rates,
+      // Hand back the canonical method list so the UI doesn't have to
+      // hardcode it. Order is the order they're displayed in.
+      methods: ["PLATFORM_FREIGHT", "BUYER_FORWARDER", "PICKUP"] as const,
+    };
+  }
+
+  private async loadFreightRates(): Promise<Record<string, number>> {
+    try {
+      const row = await this.prisma.configuration.findUnique({
+        where: { key: "shopper_freight_rates" },
+      });
+      if (!row) {
+        // Defaults match the migration 0017 seed values. If the row
+        // was deleted, surface sensible numbers rather than $0/lb
+        // across the board (which would let real shipments through
+        // free of charge).
+        return { PLATFORM_FREIGHT: 450, BUYER_FORWARDER: 200, PICKUP: 0 };
+      }
+      const value = row.value as unknown;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        this.logger.warn({ value }, "shopper_freight_rates: not an object, falling back");
+        return { PLATFORM_FREIGHT: 450, BUYER_FORWARDER: 200, PICKUP: 0 };
+      }
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(value)) {
+        const n = typeof v === "number" ? v : Number(v);
+        // Cap at $1,000/lb — way above any sane freight tier; protects
+        // against a typo turning a $4.50/lb rate into $450/lb.
+        if (Number.isFinite(n) && n >= 0 && n <= 100_000) {
+          out[k] = Math.round(n);
+        } else {
+          this.logger.warn({ method: k, value: v }, "shopper_freight_rates: skipping invalid entry");
+        }
+      }
+      return out;
+    } catch (err) {
+      this.logger.error({ err }, "shopper.freight_rates_load_failed");
+      // Don't fail the action — the service handles missing methods
+      // by treating the rate as 0, which fails noisily on the auto-
+      // calc path and silently no-ops on the override path.
+      return {};
+    }
+  }
 
   private assertFinanceRole(user: AuthenticatedUser): void {
     if (!FINANCE_ROLES.includes(user.role as (typeof FINANCE_ROLES)[number])) {

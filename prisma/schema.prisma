@@ -1016,6 +1016,12 @@ model ShopperRequest {
   // Money — reconciliation (after admin procures, knows actuals + shipping)
   itemsActualSubtotalCents    Int?                   @map("items_actual_subtotal_cents")
   shippingCostCents           Int?                   @map("shipping_cost_cents")
+  // Migration 0017 — freight rate snapshot + system-calculated cost. Lets
+  // the receipt show "weight × rate = calc · charged X" so the buyer sees
+  // exactly how the shipping number was reached. Both nullable to keep
+  // rows from before this migration valid.
+  freightRateCentsPerLb       Int?                   @map("freight_rate_cents_per_lb")
+  shippingCalculatedCents     Int?                   @map("shipping_calculated_cents")
   // Signed: positive = buyer owes additional, negative = admin refunds, zero = no action.
   followupAmountCents         Int?                   @map("followup_amount_cents")
   followupStripeSessionId     String?                @map("followup_stripe_session_id")
