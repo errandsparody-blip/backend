@@ -221,9 +221,16 @@ export class AdminShopperController {
       });
     }
 
-    // Optional admin note becomes a chat message (always, regardless of branch).
-    if (body.message && body.message.trim().length > 0) {
-      await this.postAdminNote(id, body.message.trim(), user.sub);
+    // The admin's optional note is held aside here — we don't post it as
+    // its own chat message anymore. Each branch below posts ONE combined
+    // chat message: the admin's note (if any) + the auto-generated text
+    // describing what just happened (with the Stripe link / refund
+    // confirmation). The thread thus becomes the canonical place to find
+    // the invoice — buyers don't have to dig through email.
+    const adminNote = body.message?.trim() ?? "";
+
+    function dollars(cents: number): string {
+      return `$${(cents / 100).toFixed(2)}`;
     }
 
     // Mint a fresh thread token for the email link. We can't recover plaintext
@@ -297,6 +304,25 @@ export class AdminShopperController {
         });
       }
 
+      // Post the invoice into the chat thread so the buyer sees it the
+      // moment they open the page — not only in email. The combined body
+      // includes any optional admin note up top, then the system-
+      // generated invoice text + Stripe link.
+      const invoiceLine =
+        `Final payment to release shipping: ${dollars(request.followupAmountCents)}.\n\n` +
+        `Pay securely (Stripe): ${session.url}\n\n` +
+        `As soon as this is paid we'll dispatch your package and email tracking.`;
+      const chatBody = adminNote ? `${adminNote}\n\n${invoiceLine}` : invoiceLine;
+      try {
+        await this.postAdminNote(id, chatBody, user.sub);
+      } catch (err) {
+        // Best-effort — the canonical record of the invoice is the
+        // Stripe session itself + the email we send below. A chat-post
+        // failure shouldn't block the response or rewind the Stripe
+        // session.
+        this.logger.warn({ err, requestId: id }, "shopper.followup.chat_post_failed");
+      }
+
       const tpl = shopperFollowupOwedTemplate({
         reference: request.reference,
         threadToken: fresh,
@@ -356,6 +382,18 @@ export class AdminShopperController {
         actorId: user.sub,
       });
 
+      // Refund confirmation in the chat. No URL to share here — Stripe
+      // refunds settle directly back to the buyer's card.
+      const refundLine =
+        `Refund issued: ${dollars(refundAmount)} back to your card.\n\n` +
+        `Most banks settle within 5–10 business days. Your package will ship as soon as the warehouse picks it up — no further action needed.`;
+      const chatBody = adminNote ? `${adminNote}\n\n${refundLine}` : refundLine;
+      try {
+        await this.postAdminNote(id, chatBody, user.sub);
+      } catch (err) {
+        this.logger.warn({ err, requestId: id }, "shopper.refund.chat_post_failed");
+      }
+
       const tpl = shopperRefundIssuedTemplate({
         reference: request.reference,
         threadToken: fresh,
@@ -374,6 +412,15 @@ export class AdminShopperController {
 
     // Zero delta — short-circuit straight to READY_TO_SHIP.
     const updated = await this.requests.markFollowupSkipped({ requestId: id, actorId: user.sub });
+    const skipLine =
+      `Reconciliation settled — actuals matched your intake estimate exactly. ` +
+      `No further payment needed. Your package will ship as soon as the warehouse picks it up.`;
+    const chatBody = adminNote ? `${adminNote}\n\n${skipLine}` : skipLine;
+    try {
+      await this.postAdminNote(id, chatBody, user.sub);
+    } catch (err) {
+      this.logger.warn({ err, requestId: id }, "shopper.skipped.chat_post_failed");
+    }
     return { branch: "skipped" as const, status: updated.status };
   }
 
