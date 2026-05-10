@@ -76,7 +76,13 @@ export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
 export const resetPasswordSchema = z.object({
   token: z.string().min(20),
   newPassword: passwordSchema,
-  mfaCode: totpCodeSchema.optional(),
+  // Accept both `undefined` (key omitted) and "" (front-end serialised empty
+  // input) as "no MFA code supplied". Without the literal-empty coercion,
+  // a stray "" submission would 400 with a misleading "must be 6 digits"
+  // message even when the account has no MFA enrolled.
+  mfaCode: totpCodeSchema
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
 });
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 
