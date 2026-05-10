@@ -972,6 +972,17 @@ enum ShopperShippingMethod {
 model ShopperRequest {
   id                          String                 @id @default(uuid()) @db.Uuid
 
+  // Migration 0015 — short, human-readable reference (SHP-000042). UNIQUE,
+  // generated from a Postgres sequence in application code at create time.
+  reference                   String                 @unique
+
+  // Migration 0015 — optional FK to the previous request the buyer is
+  // adding to. Self-relation; SET NULL on parent delete so an orphaned
+  // child stays in the system.
+  parentRequestId             String?                @map("parent_request_id") @db.Uuid
+  parentRequest               ShopperRequest?        @relation("ShopperRequestParent", fields: [parentRequestId], references: [id], onDelete: SetNull)
+  childRequests               ShopperRequest[]       @relation("ShopperRequestParent")
+
   // Buyer identity (no User row — magic-link only)
   buyerEmail                  String                 @map("buyer_email")
   buyerName                   String?                @map("buyer_name")
@@ -1037,6 +1048,7 @@ model ShopperRequest {
   @@index([status, createdAt])
   @@index([assignedAdminId, status])
   @@index([effectiveTaxState])
+  @@index([parentRequestId])
   @@map("shopper_requests")
 }
 

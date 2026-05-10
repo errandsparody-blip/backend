@@ -91,6 +91,7 @@ export class ShopperController {
     @Body(new ZodValidationPipe(createShopperRequestSchema)) body: CreateShopperRequestInput,
   ): Promise<{
     requestId: string;
+    reference: string;
     threadUrl: string;
     payUrl: string;
     intakeTotalCents: number;
@@ -161,7 +162,20 @@ export class ShopperController {
     await this.requests.attachIntakeSession(created.id, session.sessionId, session.paymentIntentId);
 
     // 5. Email the buyer the magic link + the Stripe Checkout URL.
+    // Look up parent reference (if any) so the email can show "addition
+    // to SHP-000041" instead of just a UUID. Best-effort — failure here
+    // shouldn't block the intake email; we just omit the parent context.
+    let parentReference: string | null = null;
+    if (created.parentRequestId) {
+      const parentRow = await this.requests
+        .getById(created.parentRequestId, { includeLines: false })
+        .catch(() => null);
+      parentReference = parentRow?.reference ?? null;
+    }
+
     const tpl = shopperIntakeReceivedTemplate({
+      reference: created.reference,
+      parentReference,
       threadToken: issued.plaintext,
       intakePayUrl: session.url,
       intakeTotalCents: created.intakeTotalCents,
@@ -179,6 +193,8 @@ export class ShopperController {
     // before the buyer pays. The intake-paid signal is separate.
     const ops = opsNewShopperRequestTemplate({
       requestId: created.id,
+      reference: created.reference,
+      parentReference,
       buyerEmail: created.buyerEmail,
       itemsCount: created.lines.length,
       intakeTotalCents: created.intakeTotalCents,
@@ -195,6 +211,7 @@ export class ShopperController {
 
     return {
       requestId: created.id,
+      reference: created.reference,
       threadUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(issued.plaintext)}`,
       payUrl: session.url,
       intakeTotalCents: created.intakeTotalCents,
@@ -216,8 +233,17 @@ export class ShopperController {
     const request = await this.requests.getById(resolved.requestId);
     const messageRows = await this.messages.listForRequest(resolved.requestId);
 
+    // Resolve the parent reference (UUID → SHP-XXXXX) for buyer display.
+    let parentReference: string | null = null;
+    if (request.parentRequestId) {
+      const parentRow = await this.requests
+        .getById(request.parentRequestId, { includeLines: false })
+        .catch(() => null);
+      parentReference = parentRow?.reference ?? null;
+    }
+
     return {
-      request: this.serializeBuyerRequest(request),
+      request: { ...this.serializeBuyerRequest(request), parentReference },
       messages: messageRows.map((m) => ({
         id: m.id,
         sender: m.sender,
@@ -253,6 +279,7 @@ export class ShopperController {
     const request = await this.requests.getById(resolved.requestId, { includeLines: false });
     const ops = opsBuyerMessageTemplate({
       requestId: resolved.requestId,
+      reference: request.reference,
       buyerEmail: request.buyerEmail,
       preview: body.body,
     });
@@ -445,6 +472,8 @@ export class ShopperController {
   private serializeBuyerRequest(row: Awaited<ReturnType<ShopperRequestService["getById"]>>) {
     return {
       id: row.id,
+      reference: row.reference,
+      parentRequestId: row.parentRequestId,
       status: row.status,
       buyerEmail: row.buyerEmail,
       buyerName: row.buyerName,

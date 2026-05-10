@@ -78,6 +78,10 @@ import { ShopperTokenService } from "./shopper-token.service";
 
 export interface RequestRow {
   id: string;
+  // Migration 0015 — short human-readable reference (SHP-000042). Generated
+  // from a Postgres sequence at create time.
+  reference: string;
+  parentRequestId: string | null;
   buyerEmail: string;
   buyerName: string | null;
   shippingAddress: Prisma.JsonValue | null;
@@ -258,13 +262,57 @@ export class ShopperRequestService {
     );
     const intakeTotalCents = itemsSubtotalCents + commissionCents + estimatedTaxCents;
 
+    // Validate the optional parent reference BEFORE we open the
+    // transaction. The parent must exist AND belong to the same buyer
+    // email. We do this strict check so anyone who happens to know a
+    // reference number (they appear in emails) can't link a fresh request
+    // to a stranger's prior order.
+    let parentRequestId: string | null = null;
+    if (input.parentReference) {
+      const parent = await (
+        this.prisma as unknown as {
+          shopperRequest: { findUnique: (args: unknown) => Promise<RequestRow | null> };
+        }
+      ).shopperRequest.findUnique({
+        where: { reference: input.parentReference },
+      });
+      if (!parent) {
+        throw new BadRequestException({
+          message: `Previous order ${input.parentReference} not found. Check the reference and try again.`,
+          code: "shopper_parent_not_found",
+        });
+      }
+      // Lowercased on both sides — the schema field is already lowercase.
+      if (parent.buyerEmail.toLowerCase() !== input.buyerEmail.toLowerCase()) {
+        // Don't leak whether the reference exists; same generic copy as
+        // the not-found case so an attacker can't email-enumerate.
+        throw new BadRequestException({
+          message: `Previous order ${input.parentReference} not found. Check the reference and try again.`,
+          code: "shopper_parent_not_found",
+        });
+      }
+      parentRequestId = parent.id;
+    }
+
     // Persist request + lines in a single transaction so we never end up
-    // with a half-built request if a line insert fails.
+    // with a half-built request if a line insert fails. The reference is
+    // pulled from the Postgres sequence in the same transaction so the
+    // value is unique by construction (sequences are MVCC-safe).
     const created = await this.prisma.$transaction(async (tx) => {
+      const refRows = (await tx.$queryRawUnsafe(
+        `SELECT 'SHP-' || lpad(nextval('shopper_reference_seq')::text, 6, '0') AS reference`,
+      )) as Array<{ reference: string }>;
+      const reference = refRows[0]?.reference;
+      if (!reference) {
+        throw new Error("Failed to allocate shopper reference (sequence missing).");
+      }
+
       const requestRow = await (
         tx as unknown as { shopperRequest: AnyPrismaShopperRequest }
       ).shopperRequest.create({
         data: {
+          reference,
+          parentRequestId,
           buyerEmail: input.buyerEmail,
           buyerName: input.buyerName ?? null,
           shippingAddress: input.shippingAddress
@@ -298,6 +346,8 @@ export class ShopperRequestService {
       resourceType: "shopper_request",
       resourceId: created.id,
       afterState: {
+        reference: created.reference,
+        parentRequestId: created.parentRequestId,
         buyerEmail: created.buyerEmail,
         itemsSubtotalCents,
         commissionCents,
@@ -995,6 +1045,7 @@ export class ShopperRequestService {
   private async notifyIntakePaid(row: RequestRow): Promise<void> {
     const issued = await this.tokens.issue(row.id);
     const tpl = shopperIntakePaidTemplate({
+      reference: row.reference,
       threadToken: issued.plaintext,
       intakeTotalCents: row.intakeTotalCents,
     });
@@ -1012,6 +1063,7 @@ export class ShopperRequestService {
     const issued = await this.tokens.issue(row.id);
     const amount = row.followupAmountCents ?? 0;
     const tpl = shopperFollowupPaidTemplate({
+      reference: row.reference,
       threadToken: issued.plaintext,
       amountCents: amount > 0 ? amount : 0,
     });
@@ -1027,7 +1079,10 @@ export class ShopperRequestService {
 
   private async notifyDelivered(row: RequestRow): Promise<void> {
     const issued = await this.tokens.issue(row.id);
-    const tpl = shopperDeliveredTemplate({ threadToken: issued.plaintext });
+    const tpl = shopperDeliveredTemplate({
+      reference: row.reference,
+      threadToken: issued.plaintext,
+    });
     await this.email.send({
       to: row.buyerEmail,
       subject: tpl.subject,
@@ -1044,6 +1099,7 @@ export class ShopperRequestService {
   ): Promise<void> {
     const issued = await this.tokens.issue(row.id);
     const tpl = shopperCancelledTemplate({
+      reference: row.reference,
       threadToken: issued.plaintext,
       reason: args.reason,
       refundedAmountCents: args.refundedAmountCents,

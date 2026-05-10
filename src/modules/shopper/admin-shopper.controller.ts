@@ -233,6 +233,7 @@ export class AdminShopperController {
       await this.requests.attachFollowupSession(id, session.sessionId, session.paymentIntentId);
 
       const tpl = shopperFollowupOwedTemplate({
+        reference: request.reference,
         threadToken: fresh,
         followupPayUrl: session.url,
         amountCents: request.followupAmountCents,
@@ -271,6 +272,7 @@ export class AdminShopperController {
       });
 
       const tpl = shopperRefundIssuedTemplate({
+        reference: request.reference,
         threadToken: fresh,
         amountCents: refundAmount,
       });
@@ -312,6 +314,7 @@ export class AdminShopperController {
     const fresh = (await this.tokens.issue(id)).plaintext;
     const request = await this.requests.getById(id, { includeLines: false });
     const tpl = shopperShippedTemplate({
+      reference: request.reference,
       threadToken: fresh,
       carrier: body.carrier,
       trackingNumber: body.trackingNumber,
@@ -482,6 +485,7 @@ export class AdminShopperController {
     const fresh = (await this.tokens.issue(id)).plaintext;
     const request = await this.requests.getById(id, { includeLines: false });
     const tpl = shopperNewMessageTemplate({
+      reference: request.reference,
       threadToken: fresh,
       preview: body.body,
     });

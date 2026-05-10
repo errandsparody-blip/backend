@@ -411,35 +411,74 @@ function shopperPayUrl(checkoutUrl: string): string {
   return checkoutUrl;
 }
 
+/**
+ * Prepend a shopper request's reference to a rendered email so it shows
+ * up in the subject ("[SHP-000042] …") and as a small label inside the
+ * body. Saves us repeating the same string-concat in every template.
+ *
+ * Why brackets in the subject? Mail clients group by subject prefix in
+ * threading, so [SHP-000042] also helps the buyer's inbox visually
+ * group all the emails about the same order.
+ */
+function withShopperReference(
+  rendered: RenderedEmail,
+  reference: string,
+  parentReference?: string | null,
+): RenderedEmail {
+  const refLineHtml = parentReference
+    ? `<div style="margin:0 0 16px 0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#777270;letter-spacing:1.4px;text-transform:uppercase;">Order ${escape(reference)} · addition to ${escape(parentReference)}</div>`
+    : `<div style="margin:0 0 16px 0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#777270;letter-spacing:1.4px;text-transform:uppercase;">Order ${escape(reference)}</div>`;
+  const refLineText = parentReference
+    ? `Order ${reference} · addition to ${parentReference}\n\n`
+    : `Order ${reference}\n\n`;
+  return {
+    subject: `[${reference}] ${rendered.subject}`,
+    // Inject the reference line right before the first <p> in the body
+    // by prepending — every template's body starts with content directly,
+    // not extra padding, so this lands at the top of the readable area.
+    html: rendered.html.replace(
+      /<td style="padding:0 32px 16px 32px;font-size:15px;line-height:1.6;color:#3A3A3A;">\s*/,
+      (m) => `${m}${refLineHtml}`,
+    ),
+    text: refLineText + rendered.text,
+  };
+}
+
 export function shopperIntakeReceivedTemplate(args: {
+  reference: string;
+  parentReference?: string | null;
   threadToken: string;
   intakePayUrl: string;
   intakeTotalCents: number;
 }): RenderedEmail {
   const total = `$${(args.intakeTotalCents / 100).toFixed(2)}`;
-  return {
+  const base: RenderedEmail = {
     subject: `Your USA Errands shopper request — ${total}`,
     html: shell({
       eyebrow: "[08] Shopper request",
       title: "Your request is in. One step to finish.",
       bodyHtml: `<p style="margin:0 0 12px 0;">Thanks for using USA Errands. To start procurement we need the upfront amount of <strong>${total}</strong>.</p>
-        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">After we buy your items we'll either send a small follow-up invoice for the actual cost difference + shipping, or refund the difference. Either way, you'll see it in this thread.</p>`,
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">After we buy your items we'll either send a small follow-up invoice for the actual cost difference + shipping, or refund the difference. Either way, you'll see it in this thread.</p>
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">Want to add more items later? Use the order reference above when you submit a new request and we'll link them.</p>`,
       cta: { label: `Pay ${total} securely`, href: shopperPayUrl(args.intakePayUrl) },
     }),
     text:
       `Your USA Errands shopper request — ${total}\n\n` +
       `Thanks for using USA Errands. To start procurement we need the upfront amount of ${total}.\n\n` +
       `Pay securely: ${args.intakePayUrl}\n\n` +
-      `Open your request thread anytime: ${shopperThreadUrl(args.threadToken)}`,
+      `Open your request thread anytime: ${shopperThreadUrl(args.threadToken)}\n\n` +
+      `To add more items later, submit a new request and reference this order number.`,
   };
+  return withShopperReference(base, args.reference, args.parentReference);
 }
 
 export function shopperIntakePaidTemplate(args: {
+  reference: string;
   threadToken: string;
   intakeTotalCents: number;
 }): RenderedEmail {
   const total = `$${(args.intakeTotalCents / 100).toFixed(2)}`;
-  return {
+  const base: RenderedEmail = {
     subject: `Payment received — ${total}`,
     html: shell({
       eyebrow: "[08] Payment received",
@@ -453,14 +492,16 @@ export function shopperIntakePaidTemplate(args: {
       `We've received your payment and are starting procurement now.\n\n` +
       `Open your thread: ${shopperThreadUrl(args.threadToken)}`,
   };
+  return withShopperReference(base, args.reference);
 }
 
 export function shopperNewMessageTemplate(args: {
+  reference: string;
   threadToken: string;
   preview: string;
 }): RenderedEmail {
   const trimmed = args.preview.length > 280 ? `${args.preview.slice(0, 280)}…` : args.preview;
-  return {
+  const base: RenderedEmail = {
     subject: "New message from USA Errands",
     html: shell({
       eyebrow: "[08] New message",
@@ -473,15 +514,17 @@ export function shopperNewMessageTemplate(args: {
       `${trimmed}\n\n` +
       `Reply in your thread: ${shopperThreadUrl(args.threadToken)}`,
   };
+  return withShopperReference(base, args.reference);
 }
 
 export function shopperFollowupOwedTemplate(args: {
+  reference: string;
   threadToken: string;
   followupPayUrl: string;
   amountCents: number;
 }): RenderedEmail {
   const amount = `$${(args.amountCents / 100).toFixed(2)}`;
-  return {
+  const base: RenderedEmail = {
     subject: `Adjustment + shipping invoice — ${amount}`,
     html: shell({
       eyebrow: "[08] Follow-up invoice",
@@ -495,14 +538,16 @@ export function shopperFollowupOwedTemplate(args: {
       `Pay securely: ${args.followupPayUrl}\n\n` +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
+  return withShopperReference(base, args.reference);
 }
 
 export function shopperRefundIssuedTemplate(args: {
+  reference: string;
   threadToken: string;
   amountCents: number;
 }): RenderedEmail {
   const amount = `$${(args.amountCents / 100).toFixed(2)}`;
-  return {
+  const base: RenderedEmail = {
     subject: `Refund issued — ${amount}`,
     html: shell({
       eyebrow: "[08] Refund issued",
@@ -516,14 +561,16 @@ export function shopperRefundIssuedTemplate(args: {
       `We've refunded ${amount} to your card. Most banks settle within 5–10 business days.\n\n` +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
+  return withShopperReference(base, args.reference);
 }
 
 export function shopperShippedTemplate(args: {
+  reference: string;
   threadToken: string;
   carrier: string;
   trackingNumber: string;
 }): RenderedEmail {
-  return {
+  const base: RenderedEmail = {
     subject: `Your shopper order shipped via ${args.carrier}`,
     html: shell({
       eyebrow: "[08] Shipped",
@@ -537,14 +584,16 @@ export function shopperShippedTemplate(args: {
       `Tracking: ${args.trackingNumber}\n\n` +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
+  return withShopperReference(base, args.reference);
 }
 
 export function shopperFollowupPaidTemplate(args: {
+  reference: string;
   threadToken: string;
   amountCents: number;
 }): RenderedEmail {
   const amount = `$${(args.amountCents / 100).toFixed(2)}`;
-  return {
+  const base: RenderedEmail = {
     subject: `Final payment received — ${amount}`,
     html: shell({
       eyebrow: "[08] Final payment received",
@@ -557,12 +606,14 @@ export function shopperFollowupPaidTemplate(args: {
       `Your package is being prepared for dispatch. Tracking lands in your thread shortly.\n\n` +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
+  return withShopperReference(base, args.reference);
 }
 
 export function shopperDeliveredTemplate(args: {
+  reference: string;
   threadToken: string;
 }): RenderedEmail {
-  return {
+  const base: RenderedEmail = {
     subject: "Your shopper order was delivered",
     html: shell({
       eyebrow: "[08] Delivered",
@@ -575,6 +626,7 @@ export function shopperDeliveredTemplate(args: {
       `If something&apos;s wrong, reply in your thread within 14 days.\n\n` +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
+  return withShopperReference(base, args.reference);
 }
 
 // ---------------------------------------------------------------------------
@@ -747,45 +799,56 @@ export function opsNewKycTemplate(args: {
 
 export function opsNewShopperRequestTemplate(args: {
   requestId: string;
+  reference: string;
+  parentReference?: string | null;
   buyerEmail: string;
   itemsCount: number;
   intakeTotalCents: number;
 }): RenderedEmail {
   const total = `$${(args.intakeTotalCents / 100).toFixed(2)}`;
+  const parentLine = args.parentReference
+    ? `<p style="margin:0 0 12px 0;color:#C99428;font-size:13px;">Addition to <strong>${escape(args.parentReference)}</strong> — same buyer, ship together if practical.</p>`
+    : "";
+  const parentText = args.parentReference ? `Addition to ${args.parentReference}.\n` : "";
   return {
-    subject: `[OPS] New shopper request — ${total} (${args.buyerEmail})`,
+    subject: `[OPS] [${args.reference}] New shopper request — ${total} (${args.buyerEmail})`,
     html: opsShell({
-      eyebrow: "[Ops] New shopper request",
+      eyebrow: `[Ops] ${args.reference}`,
       title: `${args.itemsCount} item(s) — ${total}`,
-      bodyHtml: `<p style="margin:0 0 12px 0;">From <strong>${escape(args.buyerEmail)}</strong>. Awaiting intake payment.</p>`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">From <strong>${escape(args.buyerEmail)}</strong>. Awaiting intake payment.</p>${parentLine}`,
       cta: { label: "Open request", href: `${cfg.WEB_PUBLIC_URL}/admin/shopper/${encodeURIComponent(args.requestId)}` },
     }),
-    text: `[OPS] New shopper request — ${total} from ${args.buyerEmail}.\n${cfg.WEB_PUBLIC_URL}/admin/shopper/${args.requestId}`,
+    text:
+      `[OPS] ${args.reference} — New shopper request — ${total} from ${args.buyerEmail}.\n` +
+      parentText +
+      `${cfg.WEB_PUBLIC_URL}/admin/shopper/${args.requestId}`,
   };
 }
 
 export function opsBuyerMessageTemplate(args: {
   requestId: string;
+  reference: string;
   buyerEmail: string;
   preview: string;
 }): RenderedEmail {
   const trimmed = args.preview.length > 160 ? `${args.preview.slice(0, 160)}…` : args.preview;
   return {
-    subject: `[OPS] New buyer message — ${args.buyerEmail}`,
+    subject: `[OPS] [${args.reference}] New buyer message — ${args.buyerEmail}`,
     html: opsShell({
-      eyebrow: "[Ops] Buyer message",
+      eyebrow: `[Ops] ${args.reference}`,
       title: `Reply needed`,
       bodyHtml: `<blockquote style="margin:0 0 12px 0;padding:8px 12px;background:#F1EFE9;border-left:3px solid #C99428;font-size:13px;">${escape(trimmed)}</blockquote>
         <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">From <strong>${escape(args.buyerEmail)}</strong>.</p>`,
       cta: { label: "Open thread", href: `${cfg.WEB_PUBLIC_URL}/admin/shopper/${encodeURIComponent(args.requestId)}` },
     }),
-    text: `[OPS] New buyer message from ${args.buyerEmail}: ${trimmed}\n${cfg.WEB_PUBLIC_URL}/admin/shopper/${args.requestId}`,
+    text: `[OPS] ${args.reference} — New buyer message from ${args.buyerEmail}: ${trimmed}\n${cfg.WEB_PUBLIC_URL}/admin/shopper/${args.requestId}`,
   };
 }
 
 // ---------------------------------------------------------------------------
 
 export function shopperCancelledTemplate(args: {
+  reference: string;
   threadToken: string;
   refundedAmountCents: number;
   reason: string;
@@ -793,7 +856,7 @@ export function shopperCancelledTemplate(args: {
   const refunded = args.refundedAmountCents > 0
     ? ` We&apos;ve refunded <strong>$${(args.refundedAmountCents / 100).toFixed(2)}</strong> to your card — most banks settle within 5–10 business days.`
     : "";
-  return {
+  const base: RenderedEmail = {
     subject:
       args.refundedAmountCents > 0
         ? `Request cancelled — $${(args.refundedAmountCents / 100).toFixed(2)} refunded`
@@ -814,4 +877,5 @@ export function shopperCancelledTemplate(args: {
       `Reason: ${args.reason}\n\n` +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
+  return withShopperReference(base, args.reference);
 }

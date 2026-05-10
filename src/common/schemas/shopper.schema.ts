@@ -105,6 +105,10 @@ const lineInputSchema = z.object({
   estimatedUnitPriceCents: cents(2_500_000, "Unit price"),
 });
 
+// Pattern for the human-readable reference. Stays loose enough to allow
+// future formats (year-prefixed, alphanumeric) without breaking old links.
+export const SHOPPER_REFERENCE_PATTERN = /^SHP-[A-Z0-9-]{3,32}$/;
+
 export const createShopperRequestSchema = z.object({
   buyerEmail: emailField,
   buyerName: z.string().trim().min(1).max(120).optional(),
@@ -116,6 +120,17 @@ export const createShopperRequestSchema = z.object({
   // Free-text overall note from the buyer. Lands as the first chat message
   // when present so the admin sees it without having to scroll the form data.
   initialMessage: z.string().trim().max(5000).optional(),
+  // Optional link to a previous order by the same buyer ("I forgot
+  // something, here's an addition to SHP-000041"). Server validates that
+  // the parent exists AND belongs to the same buyer email — otherwise
+  // anyone could harvest references and link to a stranger's order.
+  parentReference: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(SHOPPER_REFERENCE_PATTERN, "Reference looks like SHP-000042.")
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
 });
 export type CreateShopperRequestInput = z.infer<typeof createShopperRequestSchema>;
 
