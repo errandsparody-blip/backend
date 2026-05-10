@@ -108,8 +108,7 @@ const ConfigSchema = z.object({
     .string()
     .min(5)
     .regex(/^.+@.+\..+$/, "Must be a valid email or 'Name <email>' header.")
-    .default("USA Errands <noreply@usa-errands.com>"),
-  EMAIL_REPLY_TO: z.string().email().default("support@usa-errands.com"),
+    .default("USA Errands <noreply@usaerrands.com>"),
   // Comma-separated list of operations email addresses that receive admin
   // alerts (new PSN submitted, new shopper request, KYC submitted, buyer
   // message in shopper thread). Empty list = no admin emails (in-app
