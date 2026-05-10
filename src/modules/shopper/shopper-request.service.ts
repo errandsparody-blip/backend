@@ -291,6 +291,28 @@ export class ShopperRequestService {
           code: "shopper_parent_not_found",
         });
       }
+      // The whole point of the parent link is so the warehouse can
+      // ship the two orders together. Once the parent has shipped (or
+      // hit any terminal state) that's no longer possible — surfacing
+      // a clear error here is friendlier than letting the link succeed
+      // and then quietly being unable to act on it. The buyer can
+      // still place the order WITHOUT the link by removing the
+      // reference and re-submitting.
+      const parentTerminalStates: ShopperRequestStatus[] = [
+        "SHIPPED",
+        "DELIVERED",
+        "CANCELLED",
+        "REFUNDED",
+      ];
+      if (parentTerminalStates.includes(parent.status)) {
+        throw new BadRequestException({
+          message:
+            `Previous order ${input.parentReference} has already shipped (status: ${parent.status.replace(/_/g, " ").toLowerCase()}), so we can't combine this new order with it. ` +
+            `Submit this order on its own and we'll ship it separately.`,
+          code: "shopper_parent_already_shipped",
+          parentStatus: parent.status,
+        });
+      }
       parentRequestId = parent.id;
     }
 

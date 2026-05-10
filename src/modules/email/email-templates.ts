@@ -807,7 +807,7 @@ export function opsNewShopperRequestTemplate(args: {
 }): RenderedEmail {
   const total = `$${(args.intakeTotalCents / 100).toFixed(2)}`;
   const parentLine = args.parentReference
-    ? `<p style="margin:0 0 12px 0;color:#C99428;font-size:13px;">Addition to <strong>${escape(args.parentReference)}</strong> — same buyer, ship together if practical.</p>`
+    ? `<p style="margin:0 0 12px 0;color:#C99428;font-size:13px;">Addition to <strong>${escape(args.parentReference)}</strong> — same buyer, ship together if the parent order has not been shipped.</p>`
     : "";
   const parentText = args.parentReference ? `Addition to ${args.parentReference}.\n` : "";
   return {

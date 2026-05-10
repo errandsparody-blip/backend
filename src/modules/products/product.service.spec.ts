@@ -102,6 +102,15 @@ class FakePrisma {
       return r;
     },
   };
+
+  // The service queries `prisma.sku.count` to compute the `locked` flag
+  // on `get()` and `update()`. These IDOR tests don't exercise the lock
+  // path, so we stub it as zero — meaning every product is unlocked, and
+  // tests can continue to assert that updates land cleanly. A future spec
+  // dedicated to the lock behavior should override this to return >0.
+  sku = {
+    count: async (_args: unknown): Promise<number> => 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
