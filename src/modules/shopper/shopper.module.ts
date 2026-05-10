@@ -20,15 +20,27 @@ import { StripeModule } from "../integrations/stripe/stripe.module";
 import { AdminShopperController } from "./admin-shopper.controller";
 import { ShopperController } from "./shopper.controller";
 import { ShopperMessageService } from "./shopper-message.service";
+import { ShopperReceiptService } from "./shopper-receipt.service";
 import { ShopperRequestService } from "./shopper-request.service";
 import { ShopperTokenService } from "./shopper-token.service";
 
 @Module({
   // EmailModule is @Global so EmailService is available without explicit import.
+  // R2Module is @Global too — receipt service injects R2Service for SVG uploads.
   // forwardRef on StripeModule — see the matching note in stripe.module.ts.
   imports: [AuditModule, CryptoModule, forwardRef(() => StripeModule)],
   controllers: [ShopperController, AdminShopperController],
-  providers: [ShopperRequestService, ShopperMessageService, ShopperTokenService],
-  exports: [ShopperRequestService, ShopperMessageService, ShopperTokenService],
+  providers: [
+    ShopperRequestService,
+    ShopperMessageService,
+    ShopperTokenService,
+    ShopperReceiptService,
+  ],
+  exports: [
+    ShopperRequestService,
+    ShopperMessageService,
+    ShopperTokenService,
+    ShopperReceiptService,
+  ],
 })
 export class ShopperModule {}

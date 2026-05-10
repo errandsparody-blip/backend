@@ -74,6 +74,7 @@ import { R2Service } from "../integrations/r2/r2.service";
 import { StripeService } from "../integrations/stripe/stripe.service";
 
 import { ShopperMessageService } from "./shopper-message.service";
+import { ShopperReceiptService } from "./shopper-receipt.service";
 import { ShopperRequestService } from "./shopper-request.service";
 import { ShopperTokenService } from "./shopper-token.service";
 
@@ -92,6 +93,7 @@ export class AdminShopperController {
     private readonly email: EmailService,
     private readonly prisma: PrismaService,
     private readonly r2: R2Service,
+    private readonly receipts: ShopperReceiptService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -159,13 +161,34 @@ export class AdminShopperController {
 
   @Post(":id/shipping")
   @HttpCode(HttpStatus.OK)
-  setShipping(
+  async setShipping(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id", new ParseUUIDPipe()) id: string,
     @Body(new ZodValidationPipe(adminSetShopperShippingSchema))
     body: AdminSetShopperShippingInput,
   ) {
-    return this.requests.setShipping({ requestId: id, input: body, actorId: user.sub });
+    const updated = await this.requests.setShipping({
+      requestId: id,
+      input: body,
+      actorId: user.sub,
+    });
+
+    // Post the freshly-updated breakdown into the chat thread so the buyer
+    // can preview the numbers BEFORE we send the follow-up invoice. This is
+    // best-effort — a receipt failure must not undo the shipping save.
+    try {
+      const note =
+        "Updated breakdown — shipping cost, sales tax, and parcel details have been finalised. " +
+        "The follow-up invoice (or refund) will reflect the totals shown in the receipt below.";
+      await this.buildAndPostReceipt(id, user.sub, note);
+    } catch (err) {
+      this.logger.warn(
+        { err, requestId: id },
+        "shopper.shipping.receipt_post_failed",
+      );
+    }
+
+    return updated;
   }
 
   // ---------------------------------------------------------------------------
@@ -304,30 +327,27 @@ export class AdminShopperController {
         });
       }
 
-      // Post the invoice into the chat thread so the buyer sees it the
-      // moment they open the page — not only in email. The combined body
-      // includes any optional admin note up top, then the system-
-      // generated invoice text + Stripe link.
+      // Post the invoice + visual receipt into the chat thread so the buyer
+      // sees both the explanation and the breakdown the moment they open
+      // the page — not only in email. The combined body includes any
+      // optional admin note up top, then the system-generated invoice
+      // text + Stripe link, with the receipt image as an attachment.
       const invoiceLine =
         `Final payment to release shipping: ${dollars(request.followupAmountCents)}.\n\n` +
         `Pay securely (Stripe): ${session.url}\n\n` +
-        `As soon as this is paid we'll dispatch your package and email tracking.`;
+        `As soon as this is paid we'll dispatch your package and email tracking. ` +
+        `The receipt below shows how this number was calculated — items, sales tax, shipping, and the difference vs. your intake estimate.`;
       const chatBody = adminNote ? `${adminNote}\n\n${invoiceLine}` : invoiceLine;
-      try {
-        await this.postAdminNote(id, chatBody, user.sub);
-      } catch (err) {
-        // Best-effort — the canonical record of the invoice is the
-        // Stripe session itself + the email we send below. A chat-post
-        // failure shouldn't block the response or rewind the Stripe
-        // session.
-        this.logger.warn({ err, requestId: id }, "shopper.followup.chat_post_failed");
-      }
+      const receipt = await this.buildAndPostReceipt(id, user.sub, chatBody);
 
       const tpl = shopperFollowupOwedTemplate({
         reference: request.reference,
         threadToken: fresh,
         followupPayUrl: session.url,
         amountCents: request.followupAmountCents,
+        receiptHtml: receipt.html || undefined,
+        receiptText: receipt.text || undefined,
+        receiptImageUrl: receipt.imageUrl,
       });
       void this.email.send({
         to: request.buyerEmail,
@@ -382,22 +402,23 @@ export class AdminShopperController {
         actorId: user.sub,
       });
 
-      // Refund confirmation in the chat. No URL to share here — Stripe
-      // refunds settle directly back to the buyer's card.
+      // Refund confirmation + visual receipt. No URL to share here — Stripe
+      // refunds settle directly back to the buyer's card. The receipt
+      // attachment shows where the refund came from (actuals < estimate).
       const refundLine =
         `Refund issued: ${dollars(refundAmount)} back to your card.\n\n` +
-        `Most banks settle within 5–10 business days. Your package will ship as soon as the warehouse picks it up — no further action needed.`;
+        `Most banks settle within 5–10 business days. Your package will ship as soon as the warehouse picks it up — no further action needed. ` +
+        `The receipt below shows how this refund was calculated.`;
       const chatBody = adminNote ? `${adminNote}\n\n${refundLine}` : refundLine;
-      try {
-        await this.postAdminNote(id, chatBody, user.sub);
-      } catch (err) {
-        this.logger.warn({ err, requestId: id }, "shopper.refund.chat_post_failed");
-      }
+      const receipt = await this.buildAndPostReceipt(id, user.sub, chatBody);
 
       const tpl = shopperRefundIssuedTemplate({
         reference: request.reference,
         threadToken: fresh,
         amountCents: refundAmount,
+        receiptHtml: receipt.html || undefined,
+        receiptText: receipt.text || undefined,
+        receiptImageUrl: receipt.imageUrl,
       });
       void this.email.send({
         to: request.buyerEmail,
@@ -414,13 +435,10 @@ export class AdminShopperController {
     const updated = await this.requests.markFollowupSkipped({ requestId: id, actorId: user.sub });
     const skipLine =
       `Reconciliation settled — actuals matched your intake estimate exactly. ` +
-      `No further payment needed. Your package will ship as soon as the warehouse picks it up.`;
+      `No further payment needed. Your package will ship as soon as the warehouse picks it up. ` +
+      `The receipt below shows the full breakdown for your records.`;
     const chatBody = adminNote ? `${adminNote}\n\n${skipLine}` : skipLine;
-    try {
-      await this.postAdminNote(id, chatBody, user.sub);
-    } catch (err) {
-      this.logger.warn({ err, requestId: id }, "shopper.skipped.chat_post_failed");
-    }
+    await this.buildAndPostReceipt(id, user.sub, chatBody);
     return { branch: "skipped" as const, status: updated.status };
   }
 
@@ -442,14 +460,31 @@ export class AdminShopperController {
     });
 
     // Email the buyer with tracking. Token regenerated lazily — same logic
-    // as in sendFollowup; we don't store plaintext.
+    // as in sendFollowup; we don't store plaintext. Receipt is included so
+    // the buyer's last on-record email has the full breakdown attached.
     const fresh = (await this.tokens.issue(id)).plaintext;
     const request = await this.requests.getById(id, { includeLines: false });
+
+    let receipt: { imageUrl: string | null; html: string; text: string } = {
+      imageUrl: null,
+      html: "",
+      text: "",
+    };
+    try {
+      const r = await this.receipts.generate(id);
+      receipt = { imageUrl: r.imageUrl, html: r.html, text: r.text };
+    } catch (err) {
+      this.logger.warn({ err, requestId: id }, "shopper.ship.receipt_failed");
+    }
+
     const tpl = shopperShippedTemplate({
       reference: request.reference,
       threadToken: fresh,
       carrier: body.carrier,
       trackingNumber: body.trackingNumber,
+      receiptHtml: receipt.html || undefined,
+      receiptText: receipt.text || undefined,
+      receiptImageUrl: receipt.imageUrl,
     });
     void this.email.send({
       to: request.buyerEmail,
@@ -676,8 +711,47 @@ export class AdminShopperController {
     }
   }
 
-  private async postAdminNote(requestId: string, body: string, actorId: string): Promise<void> {
-    await this.messages.postFromAdmin({ requestId, senderUserId: actorId, body });
+  private async postAdminNote(
+    requestId: string,
+    body: string,
+    actorId: string,
+    attachmentUrls: string[] = [],
+  ): Promise<void> {
+    await this.messages.postFromAdmin({
+      requestId,
+      senderUserId: actorId,
+      body,
+      attachmentUrls: attachmentUrls.length > 0 ? attachmentUrls : undefined,
+    });
+  }
+
+  /**
+   * Generate the receipt, post it as a chat attachment with a system note,
+   * and return the rendered fragments so the caller can embed them in
+   * an email. Best-effort: receipt failures never break the action.
+   *
+   * The returned `imageUrl` may be null if R2 isn't configured. The
+   * `html` and `text` fragments are always populated.
+   */
+  private async buildAndPostReceipt(
+    requestId: string,
+    actorId: string,
+    note: string,
+  ): Promise<{ imageUrl: string | null; html: string; text: string }> {
+    try {
+      const rendered = await this.receipts.generate(requestId);
+      // Post the chat note + image attachment together so the thread
+      // shows the explanation and the visual receipt as one item.
+      const attachments = rendered.imageUrl ? [rendered.imageUrl] : [];
+      await this.postAdminNote(requestId, note, actorId, attachments);
+      return { imageUrl: rendered.imageUrl, html: rendered.html, text: rendered.text };
+    } catch (err) {
+      this.logger.warn(
+        { err, requestId },
+        "shopper.receipt.build_or_post_failed",
+      );
+      return { imageUrl: null, html: "", text: "" };
+    }
   }
 
   /**

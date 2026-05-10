@@ -1030,6 +1030,14 @@ model ShopperRequest {
   cancelIntakeRefundId        String?                @map("cancel_intake_refund_id")
   cancelFollowupRefundId      String?                @map("cancel_followup_refund_id")
 
+  // Migration 0016 — packed parcel dimensions + total weight, captured at
+  // pack time. Drives carrier rate accuracy and (eventually) EasyPost
+  // auto-quote. All nullable until admin enters them.
+  parcelLengthIn              Float?                 @map("parcel_length_in")
+  parcelWidthIn               Float?                 @map("parcel_width_in")
+  parcelHeightIn              Float?                 @map("parcel_height_in")
+  parcelWeightOz              Float?                 @map("parcel_weight_oz")
+
   // State
   status                      ShopperRequestStatus   @default(AWAITING_INTAKE_PAYMENT)
   assignedAdminId             String?                @map("assigned_admin_id") @db.Uuid
@@ -1064,6 +1072,10 @@ model ShopperRequestLine {
 
   estimatedUnitPriceCents  Int            @map("estimated_unit_price_cents")
   actualUnitPriceCents     Int?           @map("actual_unit_price_cents")
+
+  // Migration 0016 — actual weight per line, captured when items arrive.
+  // Float because warehouse scales report fractional ounces.
+  actualWeightOz           Float?         @map("actual_weight_oz")
 
   procurementStatus        String?        @map("procurement_status")
   procurementNotes         String?        @map("procurement_notes")

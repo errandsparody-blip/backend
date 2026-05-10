@@ -522,20 +522,38 @@ export function shopperFollowupOwedTemplate(args: {
   threadToken: string;
   followupPayUrl: string;
   amountCents: number;
+  /**
+   * Optional HTML/text breakdown produced by ShopperReceiptService.
+   * Embedded inline so buyers see how the number was reached without
+   * relying on an image src that some email clients (Gmail, Outlook
+   * desktop) refuse to render. The image link is also offered as a
+   * "view full receipt" button when supplied.
+   */
+  receiptHtml?: string;
+  receiptText?: string;
+  receiptImageUrl?: string | null;
 }): RenderedEmail {
   const amount = `$${(args.amountCents / 100).toFixed(2)}`;
+  const receiptBody = args.receiptHtml ?? "";
+  const receiptImgLink =
+    args.receiptImageUrl
+      ? `<p style="margin:8px 0 0 0;font-size:12px;color:#777270;">Prefer the visual version? <a href="${escape(args.receiptImageUrl)}" style="color:#777270;text-decoration:underline;">Open the receipt image</a> in your browser.</p>`
+      : "";
   const base: RenderedEmail = {
     subject: `Adjustment + shipping invoice — ${amount}`,
     html: shell({
       eyebrow: "[08] Follow-up invoice",
       title: "Final payment to release shipping",
       bodyHtml: `<p style="margin:0 0 12px 0;">We've finished procurement and confirmed shipping cost. The remaining balance is <strong>${amount}</strong>.</p>
-        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">As soon as this is paid we'll dispatch your package and email tracking.</p>`,
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">As soon as this is paid we'll dispatch your package and email tracking.</p>
+        ${receiptBody}
+        ${receiptImgLink}`,
       cta: { label: `Pay ${amount} securely`, href: shopperPayUrl(args.followupPayUrl) },
     }),
     text:
       `Adjustment + shipping invoice — ${amount}\n\n` +
       `Pay securely: ${args.followupPayUrl}\n\n` +
+      (args.receiptText ? `${args.receiptText}\n\n` : "") +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
   return withShopperReference(base, args.reference);
@@ -545,20 +563,31 @@ export function shopperRefundIssuedTemplate(args: {
   reference: string;
   threadToken: string;
   amountCents: number;
+  receiptHtml?: string;
+  receiptText?: string;
+  receiptImageUrl?: string | null;
 }): RenderedEmail {
   const amount = `$${(args.amountCents / 100).toFixed(2)}`;
+  const receiptBody = args.receiptHtml ?? "";
+  const receiptImgLink =
+    args.receiptImageUrl
+      ? `<p style="margin:8px 0 0 0;font-size:12px;color:#777270;">Prefer the visual version? <a href="${escape(args.receiptImageUrl)}" style="color:#777270;text-decoration:underline;">Open the receipt image</a> in your browser.</p>`
+      : "";
   const base: RenderedEmail = {
     subject: `Refund issued — ${amount}`,
     html: shell({
       eyebrow: "[08] Refund issued",
       title: `${amount} on its way back to your card`,
       bodyHtml: `<p style="margin:0 0 12px 0;">Actual costs came in under your estimate. We've refunded <strong>${amount}</strong> to the card you paid with — most banks settle within 5–10 business days.</p>
-        <p style="margin:0 0 12px 0;">Your package will ship as soon as the warehouse picks it up.</p>`,
+        <p style="margin:0 0 12px 0;">Your package will ship as soon as the warehouse picks it up.</p>
+        ${receiptBody}
+        ${receiptImgLink}`,
       cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
     }),
     text:
       `Refund issued — ${amount}\n\n` +
       `We've refunded ${amount} to your card. Most banks settle within 5–10 business days.\n\n` +
+      (args.receiptText ? `${args.receiptText}\n\n` : "") +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
   return withShopperReference(base, args.reference);
@@ -569,19 +598,30 @@ export function shopperShippedTemplate(args: {
   threadToken: string;
   carrier: string;
   trackingNumber: string;
+  receiptHtml?: string;
+  receiptText?: string;
+  receiptImageUrl?: string | null;
 }): RenderedEmail {
+  const receiptBody = args.receiptHtml ?? "";
+  const receiptImgLink =
+    args.receiptImageUrl
+      ? `<p style="margin:8px 0 0 0;font-size:12px;color:#777270;">Prefer the visual version? <a href="${escape(args.receiptImageUrl)}" style="color:#777270;text-decoration:underline;">Open the receipt image</a> in your browser.</p>`
+      : "";
   const base: RenderedEmail = {
     subject: `Your shopper order shipped via ${args.carrier}`,
     html: shell({
       eyebrow: "[08] Shipped",
       title: "Package handed to the carrier",
       bodyHtml: `<p style="margin:0 0 12px 0;">${escape(args.carrier)} picked up your package.</p>
-        <p style="margin:0 0 12px 0;font-family:'JetBrains Mono',monospace;font-size:14px;color:#0A0A0A;">${escape(args.trackingNumber)}</p>`,
+        <p style="margin:0 0 12px 0;font-family:'JetBrains Mono',monospace;font-size:14px;color:#0A0A0A;">${escape(args.trackingNumber)}</p>
+        ${receiptBody}
+        ${receiptImgLink}`,
       cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
     }),
     text:
       `Your shopper order shipped via ${args.carrier}\n\n` +
       `Tracking: ${args.trackingNumber}\n\n` +
+      (args.receiptText ? `${args.receiptText}\n\n` : "") +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
   return withShopperReference(base, args.reference);

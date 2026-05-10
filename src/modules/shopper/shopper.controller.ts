@@ -495,6 +495,11 @@ export class ShopperController {
       shippingCostCents: row.shippingCostCents,
       followupAmountCents: row.followupAmountCents,
       followupResolvedAt: row.followupResolvedAt,
+      // Migration 0016 — parcel info shown to buyer alongside shipping cost.
+      parcelLengthIn: row.parcelLengthIn,
+      parcelWidthIn: row.parcelWidthIn,
+      parcelHeightIn: row.parcelHeightIn,
+      parcelWeightOz: row.parcelWeightOz,
       createdAt: row.createdAt,
       lines: row.lines.map((line) => ({
         id: line.id,
@@ -504,6 +509,7 @@ export class ShopperController {
         quantity: line.quantity,
         estimatedUnitPriceCents: line.estimatedUnitPriceCents,
         actualUnitPriceCents: line.actualUnitPriceCents,
+        actualWeightOz: line.actualWeightOz,
         procurementStatus: line.procurementStatus,
       })),
     };

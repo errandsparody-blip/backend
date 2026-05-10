@@ -114,6 +114,11 @@ export interface RequestRow {
   // followupStripeRefundId so we never overwrite the negative-followup refund.
   cancelIntakeRefundId: string | null;
   cancelFollowupRefundId: string | null;
+  // Migration 0016 — packed parcel dimensions captured by warehouse staff.
+  parcelLengthIn: number | null;
+  parcelWidthIn: number | null;
+  parcelHeightIn: number | null;
+  parcelWeightOz: number | null;
   status: ShopperRequestStatus;
   assignedAdminId: string | null;
   internalNotes: string | null;
@@ -130,6 +135,8 @@ export interface LineRow {
   quantity: number;
   estimatedUnitPriceCents: number;
   actualUnitPriceCents: number | null;
+  // Migration 0016 — actual per-line weight in ounces, captured at receive.
+  actualWeightOz: number | null;
   procurementStatus: string | null;
   procurementNotes: string | null;
   createdAt: Date;
@@ -575,6 +582,9 @@ export class ShopperRequestService {
     if (args.input.productTitle !== undefined) {
       data.productTitle = args.input.productTitle;
     }
+    if (args.input.actualWeightOz !== undefined) {
+      data.actualWeightOz = args.input.actualWeightOz;
+    }
     const updated = await (
       this.prisma as unknown as { shopperRequestLine: AnyPrismaShopperRequestLine }
     ).shopperRequestLine.update({
@@ -589,6 +599,7 @@ export class ShopperRequestService {
       beforeState: {
         actualUnitPriceCents: line.actualUnitPriceCents,
         procurementStatus: line.procurementStatus,
+        actualWeightOz: line.actualWeightOz,
       },
       afterState: data as Prisma.InputJsonValue,
     });
@@ -624,10 +635,15 @@ export class ShopperRequestService {
       data.shippingMethod = args.input.shippingMethod;
     }
     // actualTaxCents is optional. Explicit null clears (rare but valid for
-    // a tax-free state); a number sets; undefined leaves untouched.
+    // a tax-free state); a number sets; undefined leaves untouched. Same
+    // semantics for parcel dimensions + parcel weight.
     if (args.input.actualTaxCents !== undefined) {
       data.actualTaxCents = args.input.actualTaxCents;
     }
+    if (args.input.parcelLengthIn !== undefined) data.parcelLengthIn = args.input.parcelLengthIn;
+    if (args.input.parcelWidthIn !== undefined) data.parcelWidthIn = args.input.parcelWidthIn;
+    if (args.input.parcelHeightIn !== undefined) data.parcelHeightIn = args.input.parcelHeightIn;
+    if (args.input.parcelWeightOz !== undefined) data.parcelWeightOz = args.input.parcelWeightOz;
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
     ).shopperRequest.update({

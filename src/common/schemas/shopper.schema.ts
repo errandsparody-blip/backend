@@ -217,6 +217,16 @@ export const adminUpdateShopperLineSchema = z.object({
   procurementStatus: z.enum(ShopperLineProcurementStatusValues).optional(),
   procurementNotes: z.string().trim().max(2000).optional(),
   productTitle: z.string().trim().max(200).optional(),
+  // Migration 0016 — actual per-line weight (oz). Capped at 5,000 lb
+  // (80,000 oz) — way above any realistic single-line weight, but
+  // protects against typos like "8000" being read as 8000 lb when the
+  // user meant 80.
+  actualWeightOz: z
+    .number()
+    .nonnegative("Weight cannot be negative.")
+    .max(80_000, "Weight too large.")
+    .nullable()
+    .optional(),
 });
 export type AdminUpdateShopperLineInput = z.infer<typeof adminUpdateShopperLineSchema>;
 
@@ -224,16 +234,31 @@ export type AdminUpdateShopperLineInput = z.infer<typeof adminUpdateShopperLineS
 // Admin: set shipping cost + method
 // ---------------------------------------------------------------------------
 
+// Parcel dimension cap (inches). 120" is the largest single dimension a
+// standard international carrier accepts; we cap at 200 to be lenient
+// while still rejecting obvious typos.
+const dim = () =>
+  z.number().nonnegative("Cannot be negative.").max(200, "Too large.");
+
 export const adminSetShopperShippingSchema = z.object({
   shippingCostCents: cents(500_000, "Shipping cost"),
   shippingMethod: z.enum(ShopperShippingMethodValues).optional(),
   // Actual U.S. sales tax the platform paid at procurement (cents). Optional
   // — admin can set it before, after, or alongside shipping. Reconciled
   // against estimatedTaxCents to compute the buyer follow-up.
-  // Cap matches itemsSubtotalCents max (lines × estimatedUnitPrice cap × qty
-  // cap is unbounded in principle, but per-line is 2.5M and the tax should
-  // never exceed items × 100% so we cap at the same items ceiling).
   actualTaxCents: cents(2_500_000, "Sales tax").nullable().optional(),
+  // Migration 0016 — packed parcel dimensions and total weight. All
+  // optional so admin can save shipping cost without them, then come
+  // back once the box is sealed and weighed.
+  parcelLengthIn: dim().nullable().optional(),
+  parcelWidthIn: dim().nullable().optional(),
+  parcelHeightIn: dim().nullable().optional(),
+  parcelWeightOz: z
+    .number()
+    .nonnegative("Cannot be negative.")
+    .max(80_000, "Weight too large.")
+    .nullable()
+    .optional(),
 });
 export type AdminSetShopperShippingInput = z.infer<typeof adminSetShopperShippingSchema>;
 

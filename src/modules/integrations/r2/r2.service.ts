@@ -23,7 +23,7 @@
  *   - Payload signing: "UNSIGNED-PAYLOAD" sentinel for browser PUTs.
  */
 
-import { Injectable, ServiceUnavailableException } from "@nestjs/common";
+import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 
 import { loadConfig } from "../../../common/config";
@@ -64,8 +64,25 @@ export interface PresignedUploadResult {
   expiresAt: number;
 }
 
+export interface PutObjectArgs {
+  /** Object key — generate via `generateKey` for hard-to-guess names. */
+  key: string;
+  /** MIME type. Bound into the signed request; client cannot change it. */
+  contentType: string;
+  /** Raw bytes to upload. UTF-8 strings are accepted via Buffer.from. */
+  body: Buffer | string;
+  /** Optional cache header for browsers; defaults to `public,max-age=31536000`. */
+  cacheControl?: string;
+}
+
+export interface PutObjectResult {
+  publicUrl: string;
+  key: string;
+}
+
 @Injectable()
 export class R2Service {
+  private readonly logger = new Logger(R2Service.name);
   private readonly cfg: R2Config | null;
 
   constructor() {
@@ -109,6 +126,113 @@ export class R2Service {
     const ext = extMatch ? `.${extMatch[1]!.toLowerCase()}` : "";
     const safePrefix = prefix.replace(/[^a-zA-Z0-9/_-]/g, "").replace(/^\/+|\/+$/g, "");
     return `${safePrefix}/${random}${ext}`;
+  }
+
+  /**
+   * Direct server-side PUT — used when WE generate the bytes (e.g.,
+   * server-rendered receipts) rather than handing a presigned URL to the
+   * browser.
+   *
+   * SigV4 algorithm is identical to `presignPut` except payload signing:
+   * we know the body, so we hash it and embed in the canonical request
+   * (`x-amz-content-sha256`) instead of using the UNSIGNED-PAYLOAD
+   * sentinel. R2 validates this matches.
+   *
+   * Failures throw `ServiceUnavailableException` with structured codes;
+   * callers can choose to swallow them (receipt is best-effort).
+   */
+  async putObject(args: PutObjectArgs): Promise<PutObjectResult> {
+    const cfg = this.requireConfig();
+
+    const bodyBuf = Buffer.isBuffer(args.body) ? args.body : Buffer.from(args.body, "utf8");
+    const payloadHash = sha256Hex(bodyBuf);
+
+    const host = `${cfg.accountId}.r2.cloudflarestorage.com`;
+    const canonicalPath =
+      "/" + cfg.bucket.replace(/^\/+|\/+$/g, "") + "/" + encodePathSegment(args.key);
+
+    const now = new Date();
+    const amzDate = isoBasic(now);
+    const dateStamp = amzDate.slice(0, 8);
+    const credentialScope = `${dateStamp}/${REGION}/${SERVICE}/aws4_request`;
+
+    const cacheControl = args.cacheControl ?? "public, max-age=31536000, immutable";
+
+    // Headers we'll send AND sign. R2 requires Host + the content hash in
+    // the SignedHeaders list when payload is signed.
+    const headers: Record<string, string> = {
+      host,
+      "content-type": args.contentType,
+      "content-length": String(bodyBuf.length),
+      "cache-control": cacheControl,
+      "x-amz-content-sha256": payloadHash,
+      "x-amz-date": amzDate,
+    };
+    const signedHeaders = Object.keys(headers).sort().join(";");
+
+    const canonicalHeaders =
+      Object.keys(headers)
+        .sort()
+        .map((k) => `${k}:${headers[k]!.trim()}\n`)
+        .join("");
+
+    const canonicalRequest = [
+      "PUT",
+      canonicalPath,
+      "", // no query string for direct PUT
+      canonicalHeaders,
+      signedHeaders,
+      payloadHash,
+    ].join("\n");
+
+    const stringToSign = [
+      ALGORITHM,
+      amzDate,
+      credentialScope,
+      sha256Hex(canonicalRequest),
+    ].join("\n");
+
+    const signingKey = deriveSigningKey(cfg.secretAccessKey, dateStamp, REGION, SERVICE);
+    const signature = hmacHex(signingKey, stringToSign);
+
+    const authorization =
+      `${ALGORITHM} Credential=${cfg.accessKeyId}/${credentialScope}, ` +
+      `SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+    const url = `https://${host}${canonicalPath}`;
+
+    // Use the global fetch (Node 20+ has it). No third-party HTTP client
+    // needed; we keep R2 dependency surface to the standard library.
+    const res = await fetch(url, {
+      method: "PUT",
+      headers: {
+        "Content-Type": args.contentType,
+        "Content-Length": String(bodyBuf.length),
+        "Cache-Control": cacheControl,
+        "x-amz-content-sha256": payloadHash,
+        "x-amz-date": amzDate,
+        Authorization: authorization,
+      },
+      body: bodyBuf,
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      this.logger.error(
+        { status: res.status, errBody: errBody.slice(0, 500), key: args.key },
+        "r2.putObject_failed",
+      );
+      throw new ServiceUnavailableException({
+        message: "Couldn't store the file. Try again in a moment.",
+        code: "r2_put_failed",
+        status: res.status,
+      });
+    }
+
+    return {
+      publicUrl: `${cfg.publicBaseUrl}/${args.key}`,
+      key: args.key,
+    };
   }
 
   /**
