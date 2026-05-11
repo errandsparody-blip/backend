@@ -251,6 +251,16 @@ export class ShippoService {
     // to 0.1 so logging matches what carriers see on the label.
     const weightOz = Math.round(req.parcel.weightOz * 10) / 10;
 
+    // Shippo's REST API requires positive dimensions. Our products allow
+    // null dimensions (weight-only listings), which the parcel aggregator
+    // emits as zeros. Substitute a 1-inch minimum so the carrier can still
+    // produce rates from weight; the resulting envelope is "smallest
+    // possible," which is the right semantic for a flat-pack / soft-good
+    // listing without measured dimensions.
+    const lengthIn = req.parcel.lengthIn > 0 ? req.parcel.lengthIn : 1;
+    const widthIn = req.parcel.widthIn > 0 ? req.parcel.widthIn : 1;
+    const heightIn = req.parcel.heightIn > 0 ? req.parcel.heightIn : 1;
+
     const body = {
       // Shippo creates the to_address + from_address inline as part of the
       // shipment payload. We pass them as objects rather than ID refs to
@@ -278,9 +288,9 @@ export class ShippoService {
       },
       parcels: [
         {
-          length: req.parcel.lengthIn.toString(),
-          width: req.parcel.widthIn.toString(),
-          height: req.parcel.heightIn.toString(),
+          length: lengthIn.toString(),
+          width: widthIn.toString(),
+          height: heightIn.toString(),
           distance_unit: "in",
           weight: weightOz.toString(),
           mass_unit: "oz",
@@ -790,10 +800,14 @@ export class ShippoService {
         message: "Parcel weight must be positive.",
       });
     }
-    if (req.parcel.lengthIn <= 0 || req.parcel.widthIn <= 0 || req.parcel.heightIn <= 0) {
+    // Dimensions are optional on the product side — vendors may not have
+    // measured them yet. Reject only NEGATIVE values (clear data error);
+    // zero/missing values are substituted with a 1-inch minimum below in
+    // getRatesLive so Shippo can still rate from weight alone.
+    if (req.parcel.lengthIn < 0 || req.parcel.widthIn < 0 || req.parcel.heightIn < 0) {
       throw new BadRequestException({
         code: "shippo_invalid_parcel",
-        message: "Parcel dimensions must be positive.",
+        message: "Parcel dimensions cannot be negative.",
       });
     }
     if (req.toAddress.country !== "US" || req.fromAddress.country !== "US") {
