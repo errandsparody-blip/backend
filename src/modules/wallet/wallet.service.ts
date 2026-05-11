@@ -35,7 +35,16 @@ export interface DebitArgs {
   amountCents: number;
   type: Extract<
     LedgerEntryType,
-    "ONBOARDING" | "STORAGE" | "FULFILLMENT" | "SHIPPING" | "RETURN" | "MANUAL_DEBIT"
+    | "ONBOARDING"
+    | "STORAGE"
+    | "FULFILLMENT"
+    | "SHIPPING"
+    | "RETURN"
+    | "MANUAL_DEBIT"
+    // Migration 0019 / 0020 — Phase 2 receiving holds. Admin places a Hold
+    // with an extra-charge amount; this debit fires when vendor's wallet
+    // covers the charge and the hold transitions to PAID.
+    | "RECEIVING_HOLD_FEE"
   >;
   description: string;
   referenceType?: string;
@@ -47,7 +56,9 @@ export interface DebitArgs {
 export interface CreditArgs {
   vendorId: string;
   amountCents: number;
-  type: Extract<LedgerEntryType, "DEPOSIT" | "MANUAL_CREDIT" | "REVERSAL">;
+  // REFUND added in migration 0019 — distinct from REVERSAL (which is for
+  // order cancellations); REFUND is for explicit money-back-to-vendor.
+  type: Extract<LedgerEntryType, "DEPOSIT" | "MANUAL_CREDIT" | "REVERSAL" | "REFUND">;
   description: string;
   referenceType?: string;
   referenceId?: string;

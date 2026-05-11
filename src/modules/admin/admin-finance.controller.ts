@@ -6,12 +6,52 @@
  */
 
 import { Controller, Get, Query } from "@nestjs/common";
-import { Role } from "@prisma/client";
+import { LedgerEntryType, Role } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { Roles } from "../../common/decorators/roles.decorator";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { PrismaService } from "../../common/prisma.service";
+
+// All ledger types the admin transactions filter accepts. Mirrors the
+// LedgerEntryType enum exactly; we re-declare the literal union here so
+// the Zod schema is statically typed against the generated client.
+const LEDGER_TYPES = [
+  "DEPOSIT",
+  "ONBOARDING",
+  "STORAGE",
+  "FULFILLMENT",
+  "SHIPPING",
+  "RETURN",
+  "MANUAL_CREDIT",
+  "MANUAL_DEBIT",
+  "REVERSAL",
+  "RECEIVING_HOLD_FEE",
+  "PARTNERSHIP_ITEM_COST",
+  "PURCHASE_FEE",
+  "REFUND",
+] as const;
+
+const listTransactionsSchema = z.object({
+  // Comma-separated list of ledger types. Empty = all.
+  type: z.preprocess(
+    (raw) => {
+      if (typeof raw !== "string" || raw.trim() === "") return undefined;
+      return raw
+        .split(",")
+        .map((v) => v.trim().toUpperCase())
+        .filter((v) => v !== "");
+    },
+    z.array(z.enum(LEDGER_TYPES)).optional(),
+  ),
+  // Optional subject filter — "vendor" shows only wallet rows, "shopper"
+  // shows only shopper-request rows. Default: both.
+  subject: z.enum(["vendor", "shopper", "both"]).optional(),
+  cursor: z.string().uuid().optional(),
+  limit: z.coerce.number().int().positive().max(200).optional(),
+});
+type ListTransactionsInput = z.infer<typeof listTransactionsSchema>;
 
 // Pre-parse the kycStatus query param: comma-separated list → string[].
 // `z.preprocess` keeps the schema's typed input/output equal so it slots into
@@ -150,6 +190,95 @@ export class AdminFinanceController {
       discrepancies,
       // Always include a sample of clean rows for observability.
       cleanSample: rows.filter((r) => r.deltaCents === 0).slice(0, 10),
+    };
+  }
+
+  /**
+   * Unified transactions — every dollar movement on the platform.
+   *
+   * Returns both vendor-wallet ledger entries (vendorId set) and shopper
+   * request rows (shopperRequestId set) interleaved by `createdAt`.
+   * Filterable by transaction type (?type=ONBOARDING,SHIPPING,…) and by
+   * subject (?subject=vendor|shopper|both).
+   *
+   * Per the product spec: "No vendor filter is needed in finance for now."
+   * If we add one later, it goes here as `?vendorId=<uuid>`.
+   */
+  @Get("finance/transactions")
+  async listTransactions(
+    @Query(new ZodValidationPipe(listTransactionsSchema)) q: ListTransactionsInput,
+  ) {
+    const limit = q.limit ?? 50;
+    // Build the WHERE as a loose record and cast at the call site. Migration
+    // 0019 made vendor_id nullable + added shopper_request_id; the generated
+    // Prisma client in this checkout still has the pre-migration shape until
+    // `prisma generate` is re-run (sandbox can't reach the Prisma engine
+    // CDN). Same cast pattern used in return.service.ts +
+    // shopper-request.service.ts.
+    const where: Record<string, unknown> = {};
+    if (q.type && q.type.length > 0) {
+      where.type = { in: q.type as LedgerEntryType[] };
+    }
+    if (q.subject === "vendor") {
+      where.vendorId = { not: null };
+    } else if (q.subject === "shopper") {
+      where.shopperRequestId = { not: null };
+    }
+    // subject === "both" or undefined: no extra filter.
+
+    const items = await this.prisma.ledgerEntry.findMany({
+      where: where as unknown as Prisma.LedgerEntryWhereInput,
+      take: limit + 1,
+      orderBy: { createdAt: "desc" },
+      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+      include: {
+        vendor: { select: { id: true, businessName: true } },
+        // Type cast — generated client may not yet include the shopperRequest
+        // relation until `prisma generate` is re-run post-migration. The
+        // runtime query is valid; this `as` makes the call compile against
+        // the stale type. See migration 0019.
+        ...({ shopperRequest: { select: { id: true, reference: true } } } as Record<
+          string,
+          unknown
+        >),
+      },
+    });
+
+    let nextCursor: string | null = null;
+    if (items.length > limit) {
+      const next = items.pop();
+      nextCursor = next?.id ?? null;
+    }
+
+    return {
+      items: items.map((e) => this.mapTransaction(e)),
+      nextCursor,
+    };
+  }
+
+  /** Shape a LedgerEntry row for the unified admin transactions view. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private mapTransaction(e: any) {
+    return {
+      id: e.id as string,
+      type: e.type as LedgerEntryType,
+      amountCents: e.amountCents as number,
+      description: e.description as string,
+      referenceType: (e.referenceType as string | null) ?? null,
+      referenceId: (e.referenceId as string | null) ?? null,
+      createdAt: e.createdAt as Date,
+      // Subject can be vendor, shopper request, or (theoretically) neither —
+      // the DB CHECK constraint rules out the last case. Frontend uses this
+      // to render the row's "scope" badge.
+      vendor: e.vendor
+        ? { id: e.vendor.id as string, businessName: e.vendor.businessName as string }
+        : null,
+      shopperRequest: e.shopperRequest
+        ? {
+            id: e.shopperRequest.id as string,
+            reference: e.shopperRequest.reference as string,
+          }
+        : null,
     };
   }
 }

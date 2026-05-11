@@ -74,6 +74,18 @@ enum PsnStatus {
   RECEIVED
   DISCREPANCY
   CANCELLED
+  // Migration 0020 — admin receiving expansion (Phase 2).
+  HOLD               // Admin flagged for additional payment before release.
+  REJECTED           // Admin refused the package outright. No inventory.
+  RETURN_REQUESTED   // Package being shipped back unopened to vendor.
+}
+
+// Migration 0020 — lifecycle of a Hold.
+enum PsnHoldStatus {
+  PENDING_PAYMENT
+  PAID
+  CANCELLED
+  AUTO_RETURNED
 }
 
 enum PackagingExceptionResolution {
@@ -337,15 +349,53 @@ model Psn {
   submittedAt         DateTime?  @map("submitted_at")
   receivedAt          DateTime?  @map("received_at")
 
+  // Migration 0020 — admin receiving expansion outcomes. Each PSN can only
+  // be rejected OR return-requested OR held — never combinations — so
+  // these reason columns are denormalised on the row rather than a
+  // separate table. Holds get their own table because they have lifecycle
+  // (PENDING_PAYMENT → PAID / CANCELLED / AUTO_RETURNED).
+  rejectedReason         String?    @map("rejected_reason")
+  rejectedAt             DateTime?  @map("rejected_at")
+  returnRequestedReason  String?    @map("return_requested_reason")
+  returnRequestedAt      DateTime?  @map("return_requested_at")
+  returnShippingCents    Int?       @map("return_shipping_cents")
+
   createdAt           DateTime   @default(now()) @map("created_at")
   updatedAt           DateTime   @updatedAt @map("updated_at")
 
   lines               PsnLine[]
   exceptions          PackagingException[]
+  holds               PsnHold[]
 
   @@index([vendorId, status])
   @@index([status, createdAt])
   @@map("psns")
+}
+
+// Migration 0020 — PSN hold lifecycle. Each hold is one cycle of
+// PENDING_PAYMENT → PAID (or CANCELLED / AUTO_RETURNED). A single PSN can
+// have at most one active (PENDING_PAYMENT) hold at a time; the unique
+// partial index is enforced at the service layer (Postgres lacks partial
+// uniques on Prisma).
+model PsnHold {
+  id                String        @id @default(uuid()) @db.Uuid
+  psnId             String        @map("psn_id") @db.Uuid
+  psn               Psn           @relation(fields: [psnId], references: [id], onDelete: Cascade)
+
+  extraChargeCents  Int           @map("extra_charge_cents")
+  reasonCode        String        @map("reason_code")
+  reasonNote        String        @map("reason_note")
+  status            PsnHoldStatus @default(PENDING_PAYMENT)
+
+  createdBy         String?       @map("created_by") @db.Uuid
+  createdAt         DateTime      @default(now()) @map("created_at")
+  paidAt            DateTime?     @map("paid_at")
+  releaseAfter      DateTime      @map("release_after")
+  ledgerEntryId     String?       @map("ledger_entry_id") @db.Uuid
+
+  @@index([psnId, status])
+  @@index([status, releaseAfter])
+  @@map("psn_holds")
 }
 
 model PsnLine {
@@ -524,22 +574,38 @@ enum LedgerEntryType {
   MANUAL_CREDIT
   MANUAL_DEBIT
   REVERSAL
+  // Migration 0019 — Phase 2 (receiving holds) + Shopper request
+  // transactions unified into the same ledger.
+  RECEIVING_HOLD_FEE
+  PARTNERSHIP_ITEM_COST
+  PURCHASE_FEE
+  REFUND
 }
 
 model LedgerEntry {
   id                String          @id @default(uuid()) @db.Uuid
-  vendorId          String          @map("vendor_id") @db.Uuid
-  vendor            Vendor          @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  // Vendor wallet entries: vendorId is set, balanceAfterCents is set.
+  // Shopper-request entries (migration 0019): vendorId is NULL,
+  // shopperRequestId is set, balanceAfterCents is NULL. A DB CHECK
+  // enforces exactly-one-subject per row.
+  vendorId          String?         @map("vendor_id") @db.Uuid
+  vendor            Vendor?         @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // Migration 0019 — shopper-side ledger entries reference a shopper_request
+  // instead of a vendor. ON DELETE RESTRICT keeps the audit trail intact.
+  shopperRequestId  String?         @map("shopper_request_id") @db.Uuid
+  shopperRequest    ShopperRequest? @relation("ShopperRequestLedger", fields: [shopperRequestId], references: [id], onDelete: Restrict)
 
   type              LedgerEntryType
   // Signed cents: positive for deposits/credits, negative for charges/debits.
   amountCents       Int             @map("amount_cents")
   // Materialized balance immediately AFTER this entry was applied.
-  balanceAfterCents Int             @map("balance_after_cents")
+  // NULL for shopper rows (no wallet, no running balance).
+  balanceAfterCents Int?            @map("balance_after_cents")
 
   description       String
 
-  // Origin: "psn", "stripe", "order", "return", etc.
+  // Origin: "psn", "stripe", "order", "return", "shopper_request", etc.
   referenceType     String?         @map("reference_type")
   referenceId       String?         @map("reference_id")
 
@@ -554,6 +620,7 @@ model LedgerEntry {
   @@index([vendorId, createdAt])
   @@index([type, createdAt])
   @@index([referenceType, referenceId])
+  @@index([shopperRequestId, createdAt])
   @@map("ledger_entries")
 }
 
@@ -1064,6 +1131,9 @@ model ShopperRequest {
   lines                       ShopperRequestLine[]
   messages                    ShopperMessage[]
   accessTokens                ShopperAccessToken[]
+  // Migration 0019 — every shopper request emits 2-3 ledger rows (items,
+  // commission, shipping) so admin Finance can show every dollar flow.
+  ledgerEntries               LedgerEntry[]          @relation("ShopperRequestLedger")
 
   @@index([buyerEmail, createdAt])
   @@index([status, createdAt])

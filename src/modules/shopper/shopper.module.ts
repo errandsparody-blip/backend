@@ -16,6 +16,7 @@ import { forwardRef, Module } from "@nestjs/common";
 import { CryptoModule } from "../../common/crypto.module";
 import { AuditModule } from "../audit/audit.module";
 import { StripeModule } from "../integrations/stripe/stripe.module";
+import { WalletModule } from "../wallet/wallet.module";
 
 import { AdminShopperController } from "./admin-shopper.controller";
 import { ShopperController } from "./shopper.controller";
@@ -28,7 +29,9 @@ import { ShopperTokenService } from "./shopper-token.service";
   // EmailModule is @Global so EmailService is available without explicit import.
   // R2Module is @Global too — receipt service injects R2Service for SVG uploads.
   // forwardRef on StripeModule — see the matching note in stripe.module.ts.
-  imports: [AuditModule, CryptoModule, forwardRef(() => StripeModule)],
+  // WalletModule exports ShopperLedgerService so we can record shopper-side
+  // ledger entries on intake paid (migration 0019).
+  imports: [AuditModule, CryptoModule, WalletModule, forwardRef(() => StripeModule)],
   controllers: [ShopperController, AdminShopperController],
   providers: [
     ShopperRequestService,

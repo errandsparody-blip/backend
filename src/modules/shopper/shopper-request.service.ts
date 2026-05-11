@@ -46,6 +46,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
@@ -68,6 +69,7 @@ import {
   shopperIntakePaidTemplate,
 } from "../email/email-templates";
 import { EmailService } from "../email/email.service";
+import { ShopperLedgerService } from "../wallet/shopper-ledger.service";
 
 import { ShopperTokenService } from "./shopper-token.service";
 
@@ -205,11 +207,14 @@ const COMMISSION_BPS_CAP = 10_000;
 
 @Injectable()
 export class ShopperRequestService {
+  private readonly logger = new Logger(ShopperRequestService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly email: EmailService,
     private readonly tokens: ShopperTokenService,
+    private readonly shopperLedger: ShopperLedgerService,
   ) {}
 
   // =========================================================================
@@ -531,6 +536,25 @@ export class ShopperRequestService {
       resourceId: args.requestId,
       afterState: { stripeIntentId: args.stripeIntentId },
     });
+
+    // Migration 0019 — record the unified-finance ledger entries for the
+    // items + commission on the intake-paid transition. The service is
+    // idempotent on its own keys so a webhook replay doesn't double-write.
+    // Best-effort: a failure here mustn't block the buyer's payment flow.
+    void this.shopperLedger
+      .recordIntakePaid({
+        shopperRequestId: updated.id,
+        reference: updated.reference,
+        itemsCents: updated.itemsSubtotalCents,
+        commissionCents: updated.commissionCents,
+        occurredAt: updated.intakePaidAt ?? new Date(),
+      })
+      .catch((err: unknown) => {
+        this.logger.error(
+          { err: (err as Error).message, requestId: updated.id },
+          "Failed to record shopper ledger entries on intake paid",
+        );
+      });
 
     // Buyer thank-you email — only on the actual transition (not on
     // duplicate webhook delivery for an already-PAID row). Idempotency

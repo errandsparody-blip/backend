@@ -48,3 +48,53 @@ export const completeReceivingSchema = z.object({
   lines: z.array(receiveLineSchema).min(1),
 });
 export type CompleteReceivingInput = z.infer<typeof completeReceivingSchema>;
+
+// ---------------------------------------------------------------------------
+// Phase 2 — admin receiving actions beyond Accept / Edit & Accept.
+// ---------------------------------------------------------------------------
+
+/**
+ * Stable reason codes for placing a Hold. Free-text explanation lives in
+ * reasonNote; the code is what we filter / report on. Keep aligned with the
+ * UI dropdown on the admin receive page.
+ */
+export const PSN_HOLD_REASON_CODES = [
+  "WRONG_TIER",        // Vendor declared SMALL, package is MEDIUM/LARGE/etc.
+  "PACKAGING_FEE",     // Non-standard packaging requires repackaging fee.
+  "DISCREPANCY_FEE",   // Item count mismatch handling fee.
+  "ADDITIONAL_HANDLING", // Oversize, fragile, hazardous, etc.
+  "OTHER",
+] as const;
+
+export const placeHoldSchema = z.object({
+  // Cents. Positive integer. 50¢ minimum so admin can't accidentally
+  // create a 1¢ hold with no operational meaning.
+  extraChargeCents: z
+    .number()
+    .int()
+    .min(50, "Hold charge must be at least $0.50.")
+    .max(5_000_000, "Hold charge cannot exceed $50,000."),
+  reasonCode: z.enum(PSN_HOLD_REASON_CODES),
+  // Plain text shown to the vendor on their dashboard banner + in email.
+  reasonNote: z.string().trim().min(10, "Explain the reason in at least 10 characters.").max(500),
+});
+export type PlaceHoldInput = z.infer<typeof placeHoldSchema>;
+
+export const rejectPsnSchema = z.object({
+  reason: z.string().trim().min(10, "Explain the rejection in at least 10 characters.").max(500),
+});
+export type RejectPsnInput = z.infer<typeof rejectPsnSchema>;
+
+export const requestPsnReturnSchema = z.object({
+  reason: z.string().trim().min(10, "Explain the return reason in at least 10 characters.").max(500),
+  // Estimated return shipping. Admin enters this from their carrier quote
+  // (or 0 if the vendor's storefront agreement waives it). Wallet debits
+  // this amount immediately so the package isn't shipped before the vendor
+  // is on the hook.
+  returnShippingCents: z
+    .number()
+    .int()
+    .min(0, "Return shipping cannot be negative.")
+    .max(10_000_000, "Return shipping cannot exceed $100,000."),
+});
+export type RequestPsnReturnInput = z.infer<typeof requestPsnReturnSchema>;

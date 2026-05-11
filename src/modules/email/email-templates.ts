@@ -664,7 +664,7 @@ export function shopperFollowupPaidTemplate(args: {
     html: shell({
       eyebrow: "[08] Final payment received",
       title: "All set — your package ships next.",
-      bodyHtml: `<p style="margin:0 0 12px 0;">Thanks — we&apos;ve received the final payment of <strong>${amount}</strong>. Your package is being prepared for dispatch and we&apos;ll email tracking the moment it leaves the warehouse.</p>`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">Thanks — we’ve received the final payment of <strong>${amount}</strong>. Your package is being prepared for dispatch and we’ll email tracking the moment it leaves the warehouse.</p>`,
       cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
     }),
     text:
@@ -684,12 +684,12 @@ export function shopperDeliveredTemplate(args: {
     html: shell({
       eyebrow: "[08] Delivered",
       title: "Delivered — thanks for using USA Errands.",
-      bodyHtml: `<p style="margin:0 0 12px 0;">The carrier marked your package delivered. If anything is wrong, reply in your thread within 14 days and we&apos;ll help you sort it.</p>`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">The carrier marked your package delivered. If anything is wrong, reply in your thread within 14 days and we’ll help you sort it.</p>`,
       cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
     }),
     text:
       `Your shopper order was delivered\n\n` +
-      `If something&apos;s wrong, reply in your thread within 14 days.\n\n` +
+      `If something’s wrong, reply in your thread within 14 days.\n\n` +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
   };
   return withShopperReference(base, args.reference);
@@ -709,10 +709,10 @@ export function psnSubmittedTemplate(args: {
     subject: `PSN ${args.psnId.slice(0, 8)} submitted — ${fee} debited`,
     html: shell({
       eyebrow: "[03] PSN submitted",
-      title: "We&apos;re ready for your inbound shipment",
+      title: "We’re ready for your inbound shipment",
       bodyHtml: `<p style="margin:0 0 12px 0;">Your Pre-Shipment Notice with <strong>${args.lineCount} ${args.lineCount === 1 ? "line" : "lines"}</strong> is in our queue.</p>
         <p style="margin:0 0 12px 0;">Onboarding fee debited from your wallet: <strong>${fee}</strong>.</p>
-        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">We&apos;ll email you again when the package is received and inventory is reflected on your dashboard.</p>`,
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">We’ll email you again when the package is received and inventory is reflected on your dashboard.</p>`,
       cta: { label: "View PSN", href: `${cfg.WEB_PUBLIC_URL}/psn/${encodeURIComponent(args.psnId)}` },
     }),
     text:
@@ -762,7 +762,7 @@ export function orderCreatedTemplate(args: {
     html: shell({
       eyebrow: "[04] Order created",
       title: "Order in fulfillment queue",
-      bodyHtml: `<p style="margin:0 0 12px 0;"><strong>${total}</strong> reserved from your wallet (new balance: ${balance}). We&apos;ll email tracking the moment it ships.</p>`,
+      bodyHtml: `<p style="margin:0 0 12px 0;"><strong>${total}</strong> reserved from your wallet (new balance: ${balance}). We’ll email tracking the moment it ships.</p>`,
       cta: { label: "View order", href: `${cfg.WEB_PUBLIC_URL}/orders/${encodeURIComponent(args.orderId)}` },
     }),
     text:
@@ -784,7 +784,7 @@ export function orderInsufficientFundsTemplate(args: {
     subject: `Order rejected — wallet short by ${short}`,
     html: shell({
       eyebrow: "[02] Wallet shortfall",
-      title: "Order couldn&apos;t be created — top up your wallet",
+      title: "Order couldn’t be created — top up your wallet",
       bodyHtml: `<p style="margin:0 0 12px 0;">An order failed to submit because your wallet balance (<strong>${bal}</strong>) is below the required <strong>${req}</strong>.</p>
         <p style="margin:0 0 12px 0;">Add at least <strong>${short}</strong> to your wallet and re-submit the order from your dashboard.</p>`,
       cta: { label: "Fund wallet", href: `${cfg.WEB_PUBLIC_URL}/wallet/fund` },
@@ -920,7 +920,7 @@ export function shopperCancelledTemplate(args: {
   reason: string;
 }): RenderedEmail {
   const refunded = args.refundedAmountCents > 0
-    ? ` We&apos;ve refunded <strong>$${(args.refundedAmountCents / 100).toFixed(2)}</strong> to your card — most banks settle within 5–10 business days.`
+    ? ` We’ve refunded <strong>$${(args.refundedAmountCents / 100).toFixed(2)}</strong> to your card — most banks settle within 5–10 business days.`
     : "";
   const base: RenderedEmail = {
     subject:

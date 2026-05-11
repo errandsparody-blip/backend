@@ -32,6 +32,7 @@ import {
   type UpdatePsnDraftInput,
 } from "../../common/schemas/psn.schema";
 
+import { AdminPsnService } from "./admin-psn.service";
 import { PsnService } from "./psn.service";
 
 @Controller({ path: "psns", version: "1" })
@@ -41,6 +42,11 @@ export class PsnController {
   constructor(
     private readonly psns: PsnService,
     private readonly idempotency: IdempotencyService,
+    // payHold runs the same transaction as admin's hold lifecycle methods,
+    // so the logic lives on AdminPsnService and the vendor controller
+    // delegates to it. Tenant scoping is enforced inside the method via
+    // vendorId comparison.
+    private readonly adminPsns: AdminPsnService,
   ) {}
 
   @Get()
@@ -63,6 +69,15 @@ export class PsnController {
   @Get(":id")
   get(@CurrentUser() user: AuthenticatedUser, @Param("id", new ParseUUIDPipe()) id: string) {
     return this.psns.get(user.vendorId!, id);
+  }
+
+  /** Phase 2 — fetch the active Hold for the vendor's banner + Pay CTA. */
+  @Get(":id/active-hold")
+  activeHold(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.adminPsns.activeHoldFor(id, user.vendorId!);
   }
 
   @Patch(":id")
@@ -122,5 +137,19 @@ export class PsnController {
   @HttpCode(HttpStatus.OK)
   cancel(@CurrentUser() user: AuthenticatedUser, @Param("id", new ParseUUIDPipe()) id: string) {
     return this.psns.cancel(user.vendorId!, user.sub, id);
+  }
+
+  /**
+   * Phase 2 — pay the extra-charge Hold placed by admin. Debits the
+   * vendor's wallet for the hold amount and transitions the PSN back to
+   * AWAITING_RECEIPT. Insufficient funds → frontend renders the topup CTA.
+   */
+  @Post(":id/pay-hold")
+  @HttpCode(HttpStatus.OK)
+  payHold(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.adminPsns.payHold(id, user.vendorId!, user.sub);
   }
 }
