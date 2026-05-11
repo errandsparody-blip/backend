@@ -13,7 +13,7 @@
  * The audit trail is two distinct ledger rows tied by referenceId = order.id.
  *
  * For v1 the "actual" weight comes from a synthetic ±5% jitter so the path is
- * exercised in dev/CI. In production this reads EasyPost's billed weight
+ * exercised in dev/CI. In production this reads Shippo's billed weight
  * delta from the rate object.
  *
  * Implementation Plan §6.6.4, §14.5.
@@ -159,7 +159,7 @@ export class ReassessmentJob {
 
   /**
    * v1 stub: synthetic delta as ±5% of the quoted carrier cost. In production
-   * this reads `tracker.weight` and `rate.billed_weight` from EasyPost and
+   * this reads weight + billed_weight from the Shippo transaction/tracker and
    * computes the dollar delta from the carrier's published rate sheet.
    */
   private async computeDeltaCents(_orderId: string, quotedCostCents: number): Promise<number> {

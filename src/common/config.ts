@@ -91,10 +91,46 @@ const ConfigSchema = z.object({
   SENTRY_DSN: z.string().optional(),
   SENTRY_ENV: z.string().default("development"),
 
-  // EasyPost — P3.9 + P5.5. When set, the EasyPost tracking webhook
-  // verifies HMAC against this secret. Optional in dev/test; required in
-  // production (enforced via the superRefine below).
-  EASYPOST_WEBHOOK_SECRET: z.string().optional(),
+  // Shippo — fulfillment carrier integration. Replaces the earlier EasyPost
+  // integration; chosen for the simpler test-token flow that doesn't gate
+  // sandbox use behind business verification.
+  //
+  // SHIPPO_API_KEY accepts two forms:
+  //   shippo_test_… — sandbox, no real postage, free
+  //   shippo_live_… — production, real labels, debits the Shippo wallet
+  // When unset, ShippoService runs in stub mode (synthetic rates + fake
+  // tracking numbers) so local dev works without an account.
+  SHIPPO_API_KEY: z
+    .string()
+    .regex(/^shippo_(live|test)_[A-Za-z0-9]{20,}$/, "Must be a valid Shippo API key (shippo_live_… or shippo_test_…).")
+    .optional(),
+  // Path-secret used as first-pass defense on the webhook endpoint. Shippo
+  // does not offer HMAC signing on webhooks (their model is "URL is the
+  // secret"), so we put the secret on the URL query string and additionally
+  // re-fetch the tracker from Shippo's API on every event to verify state
+  // independently of the payload.
+  SHIPPO_WEBHOOK_SECRET: z.string().optional(),
+  // Outbound HTTP timeout for Shippo REST calls. 8s default — Shippo's rate
+  // endpoint can take 3–5s while it polls carriers, but anything over 10s
+  // indicates a real problem.
+  SHIPPO_TIMEOUT_MS: z.coerce.number().int().positive().max(30_000).default(8_000),
+  // Warehouse origin address used as the "from" for outbound shipments. Hard-
+  // coded for v1 because we only operate one US warehouse; promote to a per-
+  // warehouse row when we add a second. State + postal code are required for
+  // rate calculation; the rest is only used on actual label purchase.
+  WAREHOUSE_FROM_NAME: z.string().min(1).default("USA Errands"),
+  WAREHOUSE_FROM_STREET1: z.string().min(1).default("1 Warehouse Way"),
+  WAREHOUSE_FROM_STREET2: z.string().optional(),
+  WAREHOUSE_FROM_CITY: z.string().min(1).default("Miami"),
+  WAREHOUSE_FROM_STATE: z
+    .string()
+    .regex(/^[A-Z]{2}$/, "Two-letter US state code.")
+    .default("FL"),
+  WAREHOUSE_FROM_ZIP: z
+    .string()
+    .regex(/^\d{5}(-\d{4})?$/, "US ZIP (5 or 9 digit).")
+    .default("33101"),
+  WAREHOUSE_FROM_PHONE: z.string().min(7).default("+13055551212"),
 
   // Email — Implementation Plan §6.8.
   // EMAIL_PROVIDER:
@@ -155,10 +191,21 @@ const ConfigSchema = z.object({
         message: "Required when EMAIL_PROVIDER=resend.",
       });
     }
-    if (cfg.NODE_ENV === "production" && !cfg.EASYPOST_WEBHOOK_SECRET) {
+    if (cfg.NODE_ENV === "production" && !cfg.SHIPPO_WEBHOOK_SECRET) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["EASYPOST_WEBHOOK_SECRET"],
+        path: ["SHIPPO_WEBHOOK_SECRET"],
+        message: "Required in production.",
+      });
+    }
+    if (cfg.NODE_ENV === "production" && !cfg.SHIPPO_API_KEY) {
+      // Shippo stub mode in production would mean we'd synthesize fake
+      // tracking numbers — which would silently break customer order flow
+      // (no real label, no shipment) without anyone noticing. Hard-fail at
+      // boot instead.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SHIPPO_API_KEY"],
         message: "Required in production.",
       });
     }

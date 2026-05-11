@@ -362,8 +362,8 @@ export function returnAuthorizedTemplate(args: {
   orderRef: string;
   trackingNumber: string | null;
   /**
-   * EasyPost-hosted PDF URL for the prepaid inbound shipping label.
-   * Optional because EasyPost may not have returned it yet at the
+   * Shippo-hosted PDF URL for the prepaid inbound shipping label.
+   * Optional because Shippo may not have returned it yet at the
    * moment of authorisation (the service swallows label-purchase
    * failures and an admin attaches it later). When present, render
    * a "Download return label" CTA so the vendor can forward it

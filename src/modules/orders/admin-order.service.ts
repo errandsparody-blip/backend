@@ -23,7 +23,7 @@ import type { Order, OrderStatus, PrismaClient } from "@prisma/client";
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import { orderShippedTemplate } from "../email/email-templates";
-import { EasyPostService } from "../integrations/easypost/easypost.service";
+import { ShippoService } from "../integrations/shippo/shippo.service";
 import { NotificationService } from "../notifications/notification.service";
 
 type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
@@ -53,7 +53,7 @@ export class AdminOrderService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
-    private readonly easypost: EasyPostService,
+    private readonly shippo: ShippoService,
     private readonly notifications: NotificationService,
   ) {}
 
@@ -118,7 +118,7 @@ export class AdminOrderService {
           code: "order_label_missing_rate",
         });
       }
-      const label = await this.easypost.purchaseLabel({
+      const label = await this.shippo.purchaseLabel({
         shipmentId: order.rateProviderRef,
         rateId: order.ratePurchasedRef,
         insuranceCents: order.insuranceFeeCents,

@@ -23,7 +23,7 @@ import { Test, type TestingModule } from "@nestjs/testing";
 
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
-import { EasyPostService } from "../integrations/easypost/easypost.service";
+import { ShippoService } from "../integrations/shippo/shippo.service";
 import { SmartyService } from "../integrations/smarty/smarty.service";
 import { WalletService } from "../wallet/wallet.service";
 
@@ -126,7 +126,7 @@ describe("OrderService — tenant isolation + address rejection", () => {
   let svc: OrderService;
   let prisma: FakePrisma;
   let smarty: { verifyUS: jest.Mock };
-  let easypost: { getRates: jest.Mock };
+  let shippo: { getRates: jest.Mock };
   let wallet: { debit: jest.Mock; credit: jest.Mock };
   let audit: { log: jest.Mock };
 
@@ -201,7 +201,7 @@ describe("OrderService — tenant isolation + address rejection", () => {
   beforeEach(async () => {
     prisma = new FakePrisma();
     smarty = { verifyUS: jest.fn(async () => ({ outcome: "ACCEPTED", normalized: validRecipient })) };
-    easypost = { getRates: jest.fn(async () => ({ shipmentId: "shp_x", rates: [] })) };
+    shippo = { getRates: jest.fn(async () => ({ shipmentId: "shp_x", rates: [] })) };
     wallet = { debit: jest.fn(), credit: jest.fn() };
     audit = { log: jest.fn() };
 
@@ -212,7 +212,7 @@ describe("OrderService — tenant isolation + address rejection", () => {
         { provide: AuditService, useValue: audit },
         { provide: WalletService, useValue: wallet },
         { provide: SmartyService, useValue: smarty },
-        { provide: EasyPostService, useValue: easypost },
+        { provide: ShippoService, useValue: shippo },
       ],
     }).compile();
     svc = moduleRef.get(OrderService);
@@ -253,7 +253,7 @@ describe("OrderService — tenant isolation + address rejection", () => {
         insuranceRequested: false,
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
-    expect(easypost.getRates).not.toHaveBeenCalled();
+    expect(shippo.getRates).not.toHaveBeenCalled();
     expect(prisma.orders).toHaveLength(0);
   });
 

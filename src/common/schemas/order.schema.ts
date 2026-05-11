@@ -107,7 +107,7 @@ export const createOrderSchema = z.object({
   recipient: recipientAddressSchema,
   lines: z.array(orderLineInputSchema).min(1).max(50),
   // Carrier service the vendor accepted from a prior quote. Free-text; the
-  // service maps it to an EasyPost rate.
+  // service maps it to a Shippo rate.
   carrierService: z.string().trim().min(2).max(60),
   insuranceRequested: z.boolean().default(false),
   // Soft cap so a typo can't bankrupt a vendor in one click.

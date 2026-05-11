@@ -40,6 +40,7 @@ import type {
   PrismaClient,
 } from "@prisma/client";
 
+import { loadConfig } from "../../common/config";
 import { loadFeeSchedule } from "../../common/fees";
 import {
   aggregateParcel,
@@ -55,7 +56,7 @@ import type {
   QuoteOrderInput,
 } from "../../common/schemas/order.schema";
 import { AuditService } from "../audit/audit.service";
-import { EasyPostService, type ShippingRate } from "../integrations/easypost/easypost.service";
+import { ShippoService, type ShippingRate } from "../integrations/shippo/shippo.service";
 import { SmartyService, type AddressValidationResult } from "../integrations/smarty/smarty.service";
 import { WalletService } from "../wallet/wallet.service";
 
@@ -102,8 +103,8 @@ export interface QuoteRateOption {
   estimatedDeliveryDays: number;
   shippingCostCents: number;
   fees: OrderFeeBreakdown;
-  rateProviderRef: string; // EasyPost shipment id (so the next /orders call can look up)
-  ratePurchasedRef: string; // EasyPost rate id
+  rateProviderRef: string; // Shippo shipment id (so the next /orders call can look up)
+  ratePurchasedRef: string; // Shippo rate id
 }
 
 export interface QuoteResult {
@@ -162,12 +163,20 @@ export interface PublicOrder {
 
 @Injectable()
 export class OrderService {
+  private readonly cfg = loadConfig();
+  /** Warehouse origin sourced from validated env config — no magic numbers. */
+  private readonly warehouseOrigin = {
+    state: this.cfg.WAREHOUSE_FROM_STATE,
+    postalCode: this.cfg.WAREHOUSE_FROM_ZIP,
+    country: "US",
+  } as const;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly wallet: WalletService,
     private readonly smarty: SmartyService,
-    private readonly easypost: EasyPostService,
+    private readonly shippo: ShippoService,
   ) {}
 
   // ===========================================================================
@@ -208,8 +217,8 @@ export class OrderService {
     const totalUnits = resolved.reduce((s, r) => s + r.input.quantity, 0);
 
     // 4. Carrier rates.
-    const rateResp = await this.easypost.getRates({
-      fromAddress: { state: "FL", postalCode: "33101", country: "US" }, // warehouse origin (config in P4)
+    const rateResp = await this.shippo.getRates({
+      fromAddress: this.warehouseOrigin,
       toAddress: {
         line1: input.recipient.shipAddressLine1,
         line2: input.recipient.shipAddressLine2,
@@ -316,8 +325,8 @@ export class OrderService {
       }),
     );
 
-    const rateResp = await this.easypost.getRates({
-      fromAddress: { state: "FL", postalCode: "33101", country: "US" },
+    const rateResp = await this.shippo.getRates({
+      fromAddress: this.warehouseOrigin,
       toAddress: {
         line1: input.recipient.shipAddressLine1,
         line2: input.recipient.shipAddressLine2,

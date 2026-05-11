@@ -1,18 +1,22 @@
 /**
- * EasyPost webhook integration test (P5.5).
+ * Shippo webhook integration test (replaces the earlier EasyPost e2e).
  *
  * Asserts:
- *   1. Signed `tracker` event with a status of "delivered" updates the order
- *      to DELIVERED + writes a CARRIER OrderEvent.
- *   2. Replaying the SAME event id is deduped via `webhook_events`
- *      unique(provider, event_id) — second call returns deduped:true,
- *      no extra OrderEvent.
- *   3. Unsigned payload is rejected (no order change, no event row).
- *   4. Tampered signature (correct shape, wrong digest) is rejected.
+ *   1. A `track_updated` event with status "DELIVERED" + correct path-secret
+ *      updates the order to DELIVERED + writes a CARRIER OrderEvent.
+ *   2. Replaying the same tracker:status:status_date tuple is deduped
+ *      via webhook_events unique(provider, event_id).
+ *   3. Missing path-secret is rejected (no order change, no event row).
+ *   4. Wrong path-secret is rejected.
  *
- * The contract: a forged tracking event cannot transition an order's status.
+ * Notes:
+ *   - In test mode SHIPPO_API_KEY is unset, so ShippoService runs in stub
+ *     mode and `getTracker` returns null — the controller falls back to
+ *     trusting the payload's claimed status (the documented test-mode
+ *     behaviour). The production callback-verification path is exercised
+ *     by manual smoke tests against Shippo's live API.
  *
- * Implementation Plan §6.6.3, §14.4 (defence in depth).
+ * Implementation Plan §6.6.3, §14.4 (defense in depth).
  */
 
 import { Test, type TestingModule } from "@nestjs/testing";
@@ -20,21 +24,17 @@ import type { INestApplication } from "@nestjs/common";
 import { ValidationPipe, VersioningType } from "@nestjs/common";
 import * as argon2 from "argon2";
 import cookieParser from "cookie-parser";
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import request from "supertest";
 
 import { AppModule } from "../src/app.module";
 import { PrismaService } from "../src/common/prisma.service";
 
-const TEST_EMAIL = "p5-easypost-e2e@usa-errands.test";
+const TEST_EMAIL = "p5-shippo-e2e@usa-errands.test";
 const TEST_PASSWORD = "X7uFJ4G3!aD2qzA9Pm";
-const WEBHOOK_SECRET = "ep_test_webhook_secret_v1";
+const WEBHOOK_SECRET = "shippo_test_webhook_secret_v1";
 
-function signBody(rawBody: string, secret: string): string {
-  return createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
-}
-
-describe("EasyPost webhook (e2e)", () => {
+describe("Shippo webhook (e2e)", () => {
   let app: INestApplication;
   let prisma: PrismaService;
   let server: ReturnType<INestApplication["getHttpServer"]>;
@@ -43,7 +43,7 @@ describe("EasyPost webhook (e2e)", () => {
   const trackingNumber = `9400${Date.now()}`;
 
   beforeAll(async () => {
-    process.env.EASYPOST_WEBHOOK_SECRET = WEBHOOK_SECRET;
+    process.env.SHIPPO_WEBHOOK_SECRET = WEBHOOK_SECRET;
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -58,11 +58,10 @@ describe("EasyPost webhook (e2e)", () => {
     server = app.getHttpServer();
     prisma = app.get(PrismaService);
 
-    // Idempotent cleanup.
     await prisma.user.deleteMany({ where: { email: TEST_EMAIL } });
     const vendor = await prisma.vendor.create({
       data: {
-        businessName: "EasyPost Webhook E2E",
+        businessName: "Shippo Webhook E2E",
         country: "NG",
         kycStatus: "APPROVED",
         status: "ACTIVE",
@@ -82,8 +81,6 @@ describe("EasyPost webhook (e2e)", () => {
       },
     });
 
-    // Seed an order that's already SHIPPED so the next forward step
-    // (IN_TRANSIT / DELIVERED) is the relevant transition.
     const product = await prisma.product.create({
       data: {
         vendorId,
@@ -163,32 +160,25 @@ describe("EasyPost webhook (e2e)", () => {
       await prisma.vendor.delete({ where: { id: vendorId } }).catch(() => undefined);
     }
     await prisma.user.deleteMany({ where: { email: TEST_EMAIL } });
-    await prisma.webhookEvent.deleteMany({ where: { provider: "easypost" } });
+    await prisma.webhookEvent.deleteMany({ where: { provider: "shippo" } });
     await app.close();
   });
 
   // ---------------------------------------------------------------------------
 
-  function deliveredEvent(eventId: string): unknown {
+  function deliveredEvent(trackerId: string, statusDate: string): object {
     return {
-      id: eventId,
-      description: "tracker.updated",
-      result: {
-        object: "Tracker",
-        tracking_code: trackingNumber,
-        status: "delivered",
-        status_detail: "delivered",
-        signed_by: "J. TEST",
-        tracking_details: [
-          {
-            object_id: "trkdtl_1",
-            status: "delivered",
-            status_detail: "delivered",
-            message: "Delivered, In/At Mailbox",
-            datetime: new Date().toISOString(),
-            tracking_location: { city: "MIAMI", state: "FL", country: "US" },
-          },
-        ],
+      event: "track_updated",
+      data: {
+        object_id: trackerId,
+        carrier: "usps",
+        tracking_number: trackingNumber,
+        tracking_status: {
+          status: "DELIVERED",
+          status_details: "Delivered, In/At Mailbox",
+          status_date: statusDate,
+          location: { city: "MIAMI", state: "FL", country: "US" },
+        },
       },
     };
   }
@@ -196,16 +186,14 @@ describe("EasyPost webhook (e2e)", () => {
   // ---------------------------------------------------------------------------
 
   it("signed delivered event flips the order to DELIVERED + writes one event", async () => {
-    const eventId = `evt_ep_${randomUUID()}`;
-    const event = deliveredEvent(eventId);
-    const raw = JSON.stringify(event);
-    const sig = signBody(raw, WEBHOOK_SECRET);
+    const trackerId = `track_${randomUUID()}`;
+    const statusDate = new Date().toISOString();
+    const event = deliveredEvent(trackerId, statusDate);
 
     await request(server)
-      .post("/v1/webhooks/easypost")
-      .set("X-Hmac-Signature", sig)
+      .post(`/v1/webhooks/shippo?secret=${WEBHOOK_SECRET}`)
       .set("Content-Type", "application/json")
-      .send(raw)
+      .send(event)
       .expect(200)
       .expect((r) => {
         expect(r.body.received).toBe(true);
@@ -221,12 +209,11 @@ describe("EasyPost webhook (e2e)", () => {
     });
     expect(events).toHaveLength(1);
 
-    // Replay with the same event id: deduped, no extra event row.
+    // Replay with the same trackerId + status + status_date: deduped.
     await request(server)
-      .post("/v1/webhooks/easypost")
-      .set("X-Hmac-Signature", sig)
+      .post(`/v1/webhooks/shippo?secret=${WEBHOOK_SECRET}`)
       .set("Content-Type", "application/json")
-      .send(raw)
+      .send(event)
       .expect(200)
       .expect((r) => {
         expect(r.body.deduped).toBe(true);
@@ -238,42 +225,38 @@ describe("EasyPost webhook (e2e)", () => {
     expect(eventsAfter).toHaveLength(1);
   }, 60_000);
 
-  it("unsigned payload is rejected", async () => {
-    const eventId = `evt_ep_unsigned_${randomUUID()}`;
-    const event = deliveredEvent(eventId);
-    const raw = JSON.stringify(event);
+  it("missing path-secret is rejected", async () => {
+    const trackerId = `track_${randomUUID()}`;
+    const statusDate = new Date().toISOString();
+    const event = deliveredEvent(trackerId, statusDate);
 
     await request(server)
-      .post("/v1/webhooks/easypost")
+      .post("/v1/webhooks/shippo")
       .set("Content-Type", "application/json")
-      .send(raw)
+      .send(event)
       .expect((res) => {
         expect(res.status).not.toBe(200);
       });
 
-    // No webhook_events row should have been written.
     const row = await prisma.webhookEvent.findFirst({
-      where: { provider: "easypost", eventId },
+      where: { provider: "shippo", eventId: { contains: trackerId } },
     });
     expect(row).toBeNull();
   }, 30_000);
 
-  it("tampered signature (wrong digest) is rejected", async () => {
-    const eventId = `evt_ep_tampered_${randomUUID()}`;
-    const event = deliveredEvent(eventId);
-    const raw = JSON.stringify(event);
-    const wrongSig = signBody(raw, "this_is_not_the_secret");
+  it("wrong path-secret is rejected", async () => {
+    const trackerId = `track_${randomUUID()}`;
+    const statusDate = new Date().toISOString();
+    const event = deliveredEvent(trackerId, statusDate);
 
     await request(server)
-      .post("/v1/webhooks/easypost")
-      .set("X-Hmac-Signature", wrongSig)
+      .post("/v1/webhooks/shippo?secret=wrong_secret")
       .set("Content-Type", "application/json")
-      .send(raw)
+      .send(event)
       .expect((res) => expect(res.status).not.toBe(200));
 
-    // No webhook_events row should have been written.
     const row = await prisma.webhookEvent.findFirst({
-      where: { provider: "easypost", eventId },
+      where: { provider: "shippo", eventId: { contains: trackerId } },
     });
     expect(row).toBeNull();
   }, 30_000);

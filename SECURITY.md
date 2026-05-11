@@ -24,7 +24,7 @@ end-customers. The headline attacker scenarios we defend against:
   (`common/order-fees.ts`, `common/fees.ts`); the `orders_total_matches_components`
   CHECK constraint enforces shipping + fulfillment + insurance == total at
   the DB level.
-- **Webhook forgery.** A signed-looking but tampered Stripe / KYC / EasyPost
+- **Webhook forgery.** A signed-looking but tampered Stripe / KYC / Shippo
   payload causing a wallet credit, KYC flip, or order status jump.
   Mitigation: HMAC verified on every webhook; replay-safe via
   `webhook_events` unique constraint; Stripe signature compared with
@@ -79,9 +79,10 @@ end-customers. The headline attacker scenarios we defend against:
   rate-limited to 600/min (P4.7).
 - **KYC**: HMAC verified (when `KYC_WEBHOOK_SECRET` is set); rate-limited to
   600/min (P4.7).
-- **EasyPost tracking**: HMAC verified (stub validator in v1; replace before
-  production); rate-limited to 600/min; will not downgrade an order's status
-  rank.
+- **Shippo tracking**: defense-in-depth — URL path-secret (`?secret=…`) for
+  first-pass rejection, plus API callback verification (re-fetch the tracker
+  from Shippo and trust the API response over the payload). Rate-limited to
+  600/min; will not downgrade an order's status rank.
 
 ### Append-only invariants (DB-enforced)
 - `audit_log_entries` (migration 0002): `RAISE EXCEPTION` on UPDATE/DELETE.
@@ -125,7 +126,7 @@ end-customers. The headline attacker scenarios we defend against:
 | ID | Severity | Description | Tracking |
 |----|----------|-------------|----------|
 | CSP-1 | low | Tighten `styleSrc` from `'unsafe-inline'` to nonce/hash | After web app migrates to a CSS-in-JS strategy with nonces |
-| EP-1 | medium | EasyPost webhook stub returns `true` — wire real HMAC before production | P3.9 follow-up |
+| SH-1 | low | Shippo doesn't sign webhooks — we mitigate with URL path-secret + API callback verification (re-fetch tracker via authenticated GET) | Compensating control, resolved |
 | Q-1 | low | Add Postgres connection-pool query timeout (current default = unlimited) | P4.7 hardening |
 | OBS-1 | medium | Sentry DSN is wired but breadcrumb scrubbing not enabled | Pre-prod |
 

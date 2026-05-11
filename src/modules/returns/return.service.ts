@@ -38,7 +38,7 @@ import type {
 } from "../../common/schemas/return.schema";
 import { AuditService } from "../audit/audit.service";
 import { returnAuthorizedTemplate, returnRefundedTemplate } from "../email/email-templates";
-import { EasyPostService } from "../integrations/easypost/easypost.service";
+import { ShippoService } from "../integrations/shippo/shippo.service";
 import { NotificationService } from "../notifications/notification.service";
 import { WalletService } from "../wallet/wallet.service";
 
@@ -50,7 +50,7 @@ export class ReturnService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly wallet: WalletService,
-    private readonly easypost: EasyPostService,
+    private readonly shippo: ShippoService,
     private readonly notifications: NotificationService,
   ) {}
 
@@ -152,7 +152,7 @@ export class ReturnService {
     // Inbound label is best-effort — if the carrier API fails, the RMA still
     // exists in AUTHORIZED state and an admin can attach the label later.
     try {
-      const label = await this.easypost.purchaseLabel({
+      const label = await this.shippo.purchaseLabel({
         shipmentId: order.rateProviderRef ?? `inbound_${created.id}`,
         rateId: order.ratePurchasedRef ?? `inbound_rate_${created.id}`,
       });
@@ -174,7 +174,7 @@ export class ReturnService {
     });
 
     // Notify vendor + send the RMA-authorized email. After-tx, best-effort.
-    // Pass the EasyPost-hosted label URL too so the email's CTA goes
+    // Pass the Shippo-hosted label URL too so the email's CTA goes
     // straight to the printable PDF — saves the vendor a portal hop
     // before forwarding it to their customer.
     const tpl = returnAuthorizedTemplate({

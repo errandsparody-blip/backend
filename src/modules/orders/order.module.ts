@@ -2,7 +2,7 @@ import { forwardRef, Module } from "@nestjs/common";
 
 import { IdempotencyModule } from "../../common/idempotency.module";
 import { AuditModule } from "../audit/audit.module";
-import { EasyPostModule } from "../integrations/easypost/easypost.module";
+import { ShippoModule } from "../integrations/shippo/shippo.module";
 import { SmartyModule } from "../integrations/smarty/smarty.module";
 import { ReturnModule } from "../returns/return.module";
 import { WalletModule } from "../wallet/wallet.module";
@@ -21,7 +21,7 @@ import { OrderService } from "./order.service";
     AuditModule,
     WalletModule,
     SmartyModule,
-    EasyPostModule,
+    ShippoModule,
     IdempotencyModule,
     forwardRef(() => ReturnModule),
   ],

@@ -1,0 +1,621 @@
+/**
+ * ShippoService — shipping rate / label / tracking adapter.
+ *
+ * Implementation Plan §6.6.2. Replaces the earlier EasyPost integration.
+ *
+ * Behaviour split by environment:
+ *
+ *   - SHIPPO_API_KEY set        → real REST client against api.goshippo.com
+ *   - SHIPPO_API_KEY unset      → deterministic stub (synthetic rates +
+ *                                 fake tracking numbers). Local dev only;
+ *                                 blocked in production by the config
+ *                                 superRefine.
+ *
+ * Why a self-built client rather than the `shippo` npm package?
+ *   - Native fetch + AbortController gives us a tight 8s timeout that the
+ *     SDK doesn't expose cleanly.
+ *   - One fewer 3rd-party in the supply chain — Snyk surface area shrinks.
+ *   - The REST shape is stable across minor versions of the API.
+ *
+ * Why Shippo over EasyPost: simpler test-token flow (no business
+ * verification required for sandbox), straightforward dashboard, and the
+ * REST surface area is friendlier for the operations we need (rates →
+ * transactions → tracking).
+ *
+ * Security non-negotiables (CLAUDE.md):
+ *   - API key never appears in logs (we log destination metadata only).
+ *   - Webhook secret first-pass check happens at the controller (path-
+ *     query token, constant-time compare). Defense-in-depth via
+ *     callback verification (`getTracker`) is the controller's job.
+ *   - 4xx errors do NOT retry (could double-charge); 5xx errors retry
+ *     twice with bounded jitter.
+ *   - Outbound timeouts bounded at 8s by default.
+ *   - PII (addresses) sent to Shippo over TLS, never logged here.
+ */
+
+import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
+import { timingSafeEqual } from "node:crypto";
+
+import { loadConfig } from "../../../common/config";
+
+// =============================================================================
+// Public types — kept identical to the previous EasyPost adapter so callers
+// (OrderService, AdminOrderService, ReturnService) don't need re-wiring.
+// All money is integer cents at this boundary.
+// =============================================================================
+
+export interface RateRequestParcel {
+  weightOz: number;
+  lengthIn: number;
+  widthIn: number;
+  heightIn: number;
+}
+
+export interface RateRequest {
+  fromAddress: { state: string; postalCode: string; country: string };
+  toAddress: {
+    line1: string;
+    line2?: string | undefined;
+    city: string;
+    state: string;
+    postalCode: string;
+    country: string;
+  };
+  parcel: RateRequestParcel;
+  /** Total declared value in cents — informs insurance / customs (US-only v1). */
+  declaredValueCents: number;
+  insuranceRequested: boolean;
+}
+
+export interface ShippingRate {
+  /** Provider rate id — used to purchase a label. */
+  rateId: string;
+  carrier: string;
+  service: string;
+  estimatedDeliveryDays: number;
+  costCents: number;
+}
+
+export interface RateResponse {
+  /** Provider shipment id — held on the Order so we can purchase later. */
+  shipmentId: string;
+  rates: ShippingRate[];
+}
+
+export interface PurchaseLabelRequest {
+  shipmentId: string;
+  rateId: string;
+  insuranceCents?: number;
+}
+
+export interface LabelResponse {
+  trackingNumber: string;
+  labelUrl: string;
+  carrier: string;
+  service: string;
+  costCents: number;
+}
+
+/**
+ * Verified tracker payload returned by `getTracker`. The webhook controller
+ * uses this as the authoritative source of truth — never trusting the
+ * incoming webhook body's claimed status.
+ */
+export interface TrackerSnapshot {
+  carrier: string;
+  trackingNumber: string;
+  /** Canonical Shippo status, lowercased: "pre_transit" / "transit" / "delivered" / "returned" / "failure" / "unknown". */
+  status: string;
+  statusDetail: string | null;
+  /** ISO 8601 string from the carrier, or null if not provided. */
+  statusDate: string | null;
+}
+
+// =============================================================================
+// Shippo REST response shapes — narrow types covering only the fields we
+// consume. Shippo adds new fields over time; keeping the surface small means
+// new fields never break our code.
+// =============================================================================
+
+interface ShRate {
+  object_id: string;
+  provider: string;
+  servicelevel?: { name?: string; token?: string };
+  amount: string; // USD string, e.g. "8.40"
+  currency?: string;
+  estimated_days?: number | null;
+}
+
+interface ShShipment {
+  object_id: string;
+  rates?: ShRate[];
+  messages?: Array<{ source?: string; code?: string; text?: string }>;
+}
+
+interface ShTransaction {
+  object_id: string;
+  /** "SUCCESS" | "QUEUED" | "ERROR" | "WAITING". */
+  status: string;
+  tracking_number?: string | null;
+  label_url?: string | null;
+  rate?: string | null; // rate object id (we resolve carrier/service from selected_rate when available)
+  selected_rate?: ShRate | null;
+  carrier?: string | null;
+  servicelevel?: { name?: string } | null;
+  messages?: Array<{ source?: string; code?: string; text?: string }>;
+}
+
+interface ShTrackingStatus {
+  status?: string;
+  status_details?: string | null;
+  status_date?: string | null;
+}
+
+interface ShTrack {
+  carrier?: string;
+  tracking_number?: string;
+  tracking_status?: ShTrackingStatus | null;
+}
+
+// =============================================================================
+
+@Injectable()
+export class ShippoService {
+  private readonly log = new Logger(ShippoService.name);
+  private readonly cfg = loadConfig();
+  private readonly baseUrl = "https://api.goshippo.com";
+  /**
+   * Pin the API version so Shippo can roll out breaking changes without
+   * silently changing our payload shape. 2018-02-08 is their long-lived
+   * stable major; bump deliberately when we've validated the new fields.
+   */
+  private readonly apiVersion = "2018-02-08";
+
+  /** True when SHIPPO_API_KEY is set. Used by diagnostics / tests. */
+  isLive(): boolean {
+    return Boolean(this.cfg.SHIPPO_API_KEY);
+  }
+
+  // ===========================================================================
+  // Rates
+  // ===========================================================================
+
+  async getRates(req: RateRequest): Promise<RateResponse> {
+    this.validateRateRequest(req);
+    return this.isLive() ? this.getRatesLive(req) : this.getRatesStub(req);
+  }
+
+  private async getRatesLive(req: RateRequest): Promise<RateResponse> {
+    // Shippo accepts weight in oz with up to 4-decimal precision; we round
+    // to 0.1 so logging matches what carriers see on the label.
+    const weightOz = Math.round(req.parcel.weightOz * 10) / 10;
+
+    const body = {
+      // Shippo creates the to_address + from_address inline as part of the
+      // shipment payload. We pass them as objects rather than ID refs to
+      // avoid the extra round-trip needed to pre-create address records.
+      address_from: {
+        name: this.cfg.WAREHOUSE_FROM_NAME,
+        street1: this.cfg.WAREHOUSE_FROM_STREET1,
+        street2: this.cfg.WAREHOUSE_FROM_STREET2 ?? "",
+        city: this.cfg.WAREHOUSE_FROM_CITY,
+        state: this.cfg.WAREHOUSE_FROM_STATE,
+        zip: this.cfg.WAREHOUSE_FROM_ZIP,
+        country: "US",
+        phone: this.cfg.WAREHOUSE_FROM_PHONE,
+      },
+      address_to: {
+        // Shippo derives the recipient name from address fields if missing;
+        // we don't have a free-text name on the request type at this layer.
+        name: "Recipient",
+        street1: req.toAddress.line1,
+        street2: req.toAddress.line2 ?? "",
+        city: req.toAddress.city,
+        state: req.toAddress.state,
+        zip: req.toAddress.postalCode,
+        country: req.toAddress.country,
+      },
+      parcels: [
+        {
+          length: req.parcel.lengthIn.toString(),
+          width: req.parcel.widthIn.toString(),
+          height: req.parcel.heightIn.toString(),
+          distance_unit: "in",
+          weight: weightOz.toString(),
+          mass_unit: "oz",
+        },
+      ],
+      async: false,
+    };
+
+    const ship = await this.request<ShShipment>("POST", "/shipments/", body);
+    if (!ship.rates || ship.rates.length === 0) {
+      const reasons = (ship.messages ?? [])
+        .filter((m) => m.text)
+        .map((m) => `${m.source ?? "?"}: ${m.text ?? ""}`)
+        .slice(0, 4)
+        .join(" / ");
+      throw new BadRequestException({
+        code: "shippo_no_rates",
+        message: `No shipping rates returned${reasons ? ` — ${reasons}` : ""}.`,
+      });
+    }
+
+    const rates: ShippingRate[] = ship.rates.map((r) => ({
+      rateId: r.object_id,
+      carrier: r.provider,
+      service: r.servicelevel?.name ?? r.servicelevel?.token ?? "Standard",
+      estimatedDeliveryDays: this.normalizeDeliveryDays(r.estimated_days),
+      costCents: this.dollarsToCents(r.amount),
+    }));
+
+    this.log.debug({
+      msg: "getRates",
+      shipmentId: ship.object_id,
+      toState: req.toAddress.state,
+      toZipPrefix: req.toAddress.postalCode.slice(0, 3),
+      count: rates.length,
+    });
+
+    return { shipmentId: ship.object_id, rates };
+  }
+
+  // ---------------------------------------------------------------------------
+
+  private getRatesStub(req: RateRequest): Promise<RateResponse> {
+    const lbs = req.parcel.weightOz / 16;
+    const dimWeight = (req.parcel.lengthIn * req.parcel.widthIn * req.parcel.heightIn) / 139;
+    const billingWeight = Math.max(lbs, dimWeight);
+
+    const baseUSPS = Math.ceil(750 + billingWeight * 95);
+    const baseUPS = Math.ceil(900 + billingWeight * 130);
+    const baseFedEx = Math.ceil(950 + billingWeight * 145);
+
+    const shipmentId = `shp_stub_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const rates: ShippingRate[] = [
+      {
+        rateId: `rate_stub_usps_priority_${shipmentId}`,
+        carrier: "USPS",
+        service: "Priority Mail",
+        estimatedDeliveryDays: 3,
+        costCents: baseUSPS,
+      },
+      {
+        rateId: `rate_stub_ups_ground_${shipmentId}`,
+        carrier: "UPS",
+        service: "Ground",
+        estimatedDeliveryDays: 4,
+        costCents: baseUPS,
+      },
+      {
+        rateId: `rate_stub_fedex_home_${shipmentId}`,
+        carrier: "FedEx",
+        service: "Home Delivery",
+        estimatedDeliveryDays: 5,
+        costCents: baseFedEx,
+      },
+    ];
+
+    this.log.debug({
+      msg: "getRates (stub)",
+      toZipPrefix: req.toAddress.postalCode.slice(0, 3),
+      billingWeight,
+      count: rates.length,
+    });
+    return Promise.resolve({ shipmentId, rates });
+  }
+
+  // ===========================================================================
+  // Purchase a label
+  // ===========================================================================
+
+  async purchaseLabel(req: PurchaseLabelRequest): Promise<LabelResponse> {
+    if (!req.shipmentId || !req.rateId) {
+      throw new BadRequestException({
+        code: "shippo_invalid_purchase",
+        message: "shipmentId and rateId are required to purchase a label.",
+      });
+    }
+    return this.isLive() ? this.purchaseLabelLive(req) : this.purchaseLabelStub(req);
+  }
+
+  private async purchaseLabelLive(req: PurchaseLabelRequest): Promise<LabelResponse> {
+    // Shippo's `transactions` endpoint takes the rate id and creates the
+    // label synchronously when `async: false`. There's no shipment-level
+    // idempotency the way EasyPost provided — we rely on our own webhook
+    // dedup + the order's `ratePurchasedRef` to guarantee one charge.
+    const body: Record<string, unknown> = {
+      rate: req.rateId,
+      label_file_type: "PDF",
+      async: false,
+    };
+    // Shippo's insurance API takes an object with amount + currency. Only
+    // include when the caller asked for it AND the amount is non-trivial.
+    if (req.insuranceCents && req.insuranceCents > 0) {
+      body.insurance = {
+        amount: (req.insuranceCents / 100).toFixed(2),
+        currency: "USD",
+        provider: "FEDEX", // ignored when carrier mismatches; safe sentinel
+      };
+    }
+
+    const tx = await this.request<ShTransaction>("POST", "/transactions/", body);
+    if (tx.status !== "SUCCESS") {
+      const reasons = (tx.messages ?? [])
+        .filter((m) => m.text)
+        .map((m) => `${m.source ?? "?"}: ${m.text ?? ""}`)
+        .slice(0, 4)
+        .join(" / ");
+      this.log.error({
+        msg: "purchaseLabel — non-SUCCESS status",
+        status: tx.status,
+        txId: tx.object_id,
+      });
+      throw new ServiceUnavailableException({
+        code: "shippo_purchase_failed",
+        message: reasons || `Label purchase failed (status: ${tx.status}).`,
+      });
+    }
+
+    const tracking = tx.tracking_number;
+    const labelUrl = tx.label_url;
+    if (!tracking || !labelUrl) {
+      this.log.error({
+        msg: "purchaseLabel — incomplete response",
+        txId: tx.object_id,
+        hasTracking: Boolean(tracking),
+        hasLabel: Boolean(labelUrl),
+      });
+      throw new ServiceUnavailableException({
+        code: "shippo_purchase_incomplete",
+        message: "Carrier purchase succeeded but tracking or label was missing.",
+      });
+    }
+
+    return {
+      trackingNumber: tracking,
+      labelUrl,
+      carrier: tx.selected_rate?.provider ?? tx.carrier ?? "Unknown",
+      service:
+        tx.selected_rate?.servicelevel?.name ??
+        tx.servicelevel?.name ??
+        "Standard",
+      costCents: tx.selected_rate ? this.dollarsToCents(tx.selected_rate.amount) : 0,
+    };
+  }
+
+  private purchaseLabelStub(req: PurchaseLabelRequest): Promise<LabelResponse> {
+    const tracking = `9400${Math.floor(Math.random() * 1e16)
+      .toString()
+      .padStart(16, "0")}`;
+    return Promise.resolve({
+      trackingNumber: tracking,
+      labelUrl: `https://stub.shippo.local/labels/${req.shipmentId}.pdf`,
+      carrier: req.rateId.includes("usps")
+        ? "USPS"
+        : req.rateId.includes("ups")
+          ? "UPS"
+          : "FedEx",
+      service: "Stub Service",
+      costCents: 0,
+    });
+  }
+
+  // ===========================================================================
+  // Tracker — used by the webhook handler for API callback verification.
+  //
+  // Shippo doesn't HMAC-sign webhooks. To defend against forged events we
+  // make an authenticated GET against /tracks/{carrier}/{tracking_number}
+  // and treat the API response as authoritative. Returns null if Shippo
+  // doesn't know the tracker — in that case the controller drops the event.
+  // ===========================================================================
+
+  async getTracker(carrier: string, trackingNumber: string): Promise<TrackerSnapshot | null> {
+    if (!this.isLive()) {
+      // In stub mode we fully trust the (test-only) webhook payload — there's
+      // no real API to call back against. Tests can override this method.
+      return null;
+    }
+    if (!carrier || !trackingNumber) return null;
+
+    try {
+      const t = await this.request<ShTrack>(
+        "GET",
+        `/tracks/${encodeURIComponent(carrier)}/${encodeURIComponent(trackingNumber)}`,
+      );
+      const status = t.tracking_status?.status?.toLowerCase() ?? "unknown";
+      return {
+        carrier: t.carrier ?? carrier,
+        trackingNumber: t.tracking_number ?? trackingNumber,
+        status,
+        statusDetail: t.tracking_status?.status_details ?? null,
+        statusDate: t.tracking_status?.status_date ?? null,
+      };
+    } catch (err) {
+      // A 404 means Shippo doesn't recognise the tracker — likely a forged
+      // event. We surface this as `null` so the controller can drop the
+      // event quietly without raising a 5xx (which would make Shippo retry).
+      if (err instanceof BadRequestException) {
+        const code = (err.getResponse() as { code?: string }).code;
+        if (code === "shippo_not_found") return null;
+      }
+      throw err;
+    }
+  }
+
+  // ===========================================================================
+  // Webhook path-secret verification.
+  //
+  // Shippo doesn't HMAC-sign webhooks. The dashboard configuration puts our
+  // secret on the URL as a query parameter; the controller pulls it out of
+  // the request and asks us to compare. Constant-time so a forged secret
+  // can't be discovered via side-channel timing.
+  //
+  // Behaviour matrix:
+  //   - production              — secret REQUIRED at boot (config asserts).
+  //   - dev/test, no secret set — accept the request (ergonomic), log a warn.
+  //   - dev/test, secret set    — verify like prod (so tests can exercise it).
+  // ===========================================================================
+
+  verifyWebhookSecret(presented: string | undefined): boolean {
+    const expected = this.cfg.SHIPPO_WEBHOOK_SECRET;
+    if (!expected) {
+      this.log.warn(
+        "SHIPPO_WEBHOOK_SECRET not set — accepting webhook unverified (dev only)",
+      );
+      return true;
+    }
+    if (!presented || typeof presented !== "string") return false;
+    const a = Buffer.from(presented);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  }
+
+  // ===========================================================================
+  // Internals
+  // ===========================================================================
+
+  /**
+   * Common HTTP path. Shippo authenticates with a custom header scheme:
+   *   Authorization: ShippoToken <token>
+   * (NOT "Bearer", NOT Basic). The API version pin protects us from breaking
+   * changes Shippo rolls out under newer versions.
+   */
+  private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+    const apiKey = this.cfg.SHIPPO_API_KEY;
+    if (!apiKey) {
+      throw new ServiceUnavailableException({
+        code: "shippo_not_configured",
+        message: "Shippo integration is not configured.",
+      });
+    }
+
+    const url = `${this.baseUrl}${path}`;
+    const headers: Record<string, string> = {
+      Authorization: `ShippoToken ${apiKey}`,
+      "Shippo-API-Version": this.apiVersion,
+      Accept: "application/json",
+      "User-Agent": "usa-errands-api/1.0 (+https://myusaerrands.com)",
+    };
+    const init: RequestInit = { method, headers };
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+
+    const MAX_ATTEMPTS = 3;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.cfg.SHIPPO_TIMEOUT_MS);
+      try {
+        const res = await fetch(url, { ...init, signal: controller.signal });
+        const text = await res.text();
+        const json = text ? this.safeParse(text) : {};
+
+        if (res.ok) {
+          return json as T;
+        }
+
+        // 404 — surfaced separately so getTracker can downgrade to null.
+        if (res.status === 404) {
+          throw new BadRequestException({
+            code: "shippo_not_found",
+            message: "Resource not found.",
+          });
+        }
+
+        // Other 4xx: do not retry. Map to a structured error.
+        if (res.status >= 400 && res.status < 500) {
+          throw this.mapErrorResponse(res.status, json);
+        }
+
+        lastError = new Error(`Shippo ${method} ${path} → ${res.status} ${res.statusText}`);
+      } catch (err) {
+        if (err instanceof BadRequestException || err instanceof ServiceUnavailableException) {
+          throw err;
+        }
+        lastError = err;
+      } finally {
+        clearTimeout(timer);
+      }
+
+      if (attempt < MAX_ATTEMPTS) {
+        const backoffMs = attempt * 250 + Math.floor(Math.random() * 200);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+      }
+    }
+
+    this.log.error({ err: (lastError as Error)?.message, path }, "Shippo request failed");
+    throw new ServiceUnavailableException({
+      code: "shippo_unavailable",
+      message: "Shipping provider is temporarily unavailable. Please try again.",
+    });
+  }
+
+  private mapErrorResponse(status: number, body: unknown): BadRequestException {
+    // Shippo returns error details under various shapes — `detail`, `message`,
+    // or a top-level array. Probe in order.
+    const b = body as Record<string, unknown> | undefined;
+    const message =
+      (b && typeof b["detail"] === "string" && (b["detail"] as string)) ||
+      (b && typeof b["message"] === "string" && (b["message"] as string)) ||
+      `Shippo rejected the request (HTTP ${status}).`;
+    return new BadRequestException({ code: "shippo_bad_request", message });
+  }
+
+  private safeParse(text: string): unknown {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return { detail: text.slice(0, 400) };
+    }
+  }
+
+  private validateRateRequest(req: RateRequest): void {
+    if (req.parcel.weightOz <= 0) {
+      throw new BadRequestException({
+        code: "shippo_invalid_weight",
+        message: "Parcel weight must be positive.",
+      });
+    }
+    if (req.parcel.lengthIn <= 0 || req.parcel.widthIn <= 0 || req.parcel.heightIn <= 0) {
+      throw new BadRequestException({
+        code: "shippo_invalid_parcel",
+        message: "Parcel dimensions must be positive.",
+      });
+    }
+    if (req.toAddress.country !== "US" || req.fromAddress.country !== "US") {
+      throw new BadRequestException({
+        code: "shippo_intl_unsupported",
+        message: "v1 supports US domestic shipping only.",
+      });
+    }
+  }
+
+  /**
+   * Shippo returns rates as USD strings like "8.40". Convert to integer
+   * cents without float arithmetic — "8.41" can't be represented exactly as
+   * a JS number.
+   */
+  private dollarsToCents(dollars: string): number {
+    const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(dollars.trim());
+    if (!m) {
+      throw new ServiceUnavailableException({
+        code: "shippo_bad_rate",
+        message: `Unparseable rate from Shippo: "${dollars}"`,
+      });
+    }
+    const whole = parseInt(m[1] ?? "0", 10);
+    const fracStr = (m[2] ?? "").padEnd(2, "0");
+    const frac = parseInt(fracStr, 10);
+    return whole * 100 + frac;
+  }
+
+  private normalizeDeliveryDays(value: number | null | undefined): number {
+    // Carriers don't always return a delivery estimate. Fall back to 5
+    // (USPS Ground average) rather than throwing.
+    return Math.max(1, Math.min(14, value ?? 5));
+  }
+}
