@@ -144,7 +144,7 @@ const ConfigSchema = z.object({
   // the final URL by appending the object key. No trailing slash.
   R2_PUBLIC_BASE_URL: z
     .string()
-    .url("Must be a full URL like https://attachments.usa-errands.com")
+    .url("Must be a full URL like https://attachments.myusaerrands.com")
     .optional(),
 })
   .superRefine((cfg, ctx) => {

@@ -357,22 +357,48 @@ export function teamInviteTemplate(args: { businessName: string; inviterEmail: s
 // Returns
 // ---------------------------------------------------------------------------
 
-export function returnAuthorizedTemplate(args: { rmaCode: string; orderRef: string; trackingNumber: string | null }): RenderedEmail {
+export function returnAuthorizedTemplate(args: {
+  rmaCode: string;
+  orderRef: string;
+  trackingNumber: string | null;
+  /**
+   * EasyPost-hosted PDF URL for the prepaid inbound shipping label.
+   * Optional because EasyPost may not have returned it yet at the
+   * moment of authorisation (the service swallows label-purchase
+   * failures and an admin attaches it later). When present, render
+   * a "Download return label" CTA so the vendor can forward it
+   * straight to their customer without opening the portal.
+   */
+  inboundLabelUrl?: string | null;
+}): RenderedEmail {
+  // Two CTAs would clutter the shell. Prefer the label link when we
+  // have it (it's the action the vendor will take next), fall back
+  // to "Track return" otherwise.
+  const cta = args.inboundLabelUrl
+    ? { label: "Download return label", href: args.inboundLabelUrl }
+    : { label: "Track return", href: `${cfg.WEB_PUBLIC_URL}/returns` };
+
+  // Always also render an inline link to the portal so the vendor
+  // can drill into the RMA detail (cancel, photos, status timeline).
+  const portalLine = `<p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">Manage this RMA in the <a href="${cfg.WEB_PUBLIC_URL}/returns" style="color:#9C9892;text-decoration:underline;">vendor portal</a>.</p>`;
+
   return {
     subject: `Return ${args.rmaCode} authorised`,
     html: shell({
       eyebrow: "[06] Return authorised",
       title: `RMA ${args.rmaCode} is open`,
-      bodyHtml: `<p style="margin:0 0 12px 0;">A return against order <strong>${escape(args.orderRef)}</strong> is now authorised.</p>
+      bodyHtml: `<p style="margin:0 0 12px 0;">A return against order <strong>${escape(args.orderRef)}</strong> is now authorised. Forward the prepaid shipping label below to your customer so they can drop the box at any carrier location.</p>
         ${args.trackingNumber ? `<p style="margin:0 0 12px 0;">Inbound tracking: <span style="font-family:'JetBrains Mono',monospace;">${escape(args.trackingNumber)}</span></p>` : ""}
-        <p style="margin:0 0 12px 0;">When the package arrives at our warehouse we'll inspect and refund the agreed amount to your wallet.</p>`,
-      cta: { label: "Track return", href: `${cfg.WEB_PUBLIC_URL}/returns` },
+        <p style="margin:0 0 12px 0;">When the package arrives at our warehouse we'll inspect and refund the agreed amount to your wallet.</p>
+        ${portalLine}`,
+      cta,
     }),
     text:
       `Return ${args.rmaCode} authorised\n\n` +
-      `A return against order ${args.orderRef} is now authorised.\n` +
+      `A return against order ${args.orderRef} is now authorised. Forward the prepaid label to your customer:\n` +
+      (args.inboundLabelUrl ? `Label: ${args.inboundLabelUrl}\n` : "(label will be attached shortly — check the portal)\n") +
       (args.trackingNumber ? `Inbound tracking: ${args.trackingNumber}\n` : "") +
-      `\nTrack: ${cfg.WEB_PUBLIC_URL}/returns`,
+      `\nManage in portal: ${cfg.WEB_PUBLIC_URL}/returns`,
   };
 }
 

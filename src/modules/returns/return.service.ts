@@ -174,10 +174,14 @@ export class ReturnService {
     });
 
     // Notify vendor + send the RMA-authorized email. After-tx, best-effort.
+    // Pass the EasyPost-hosted label URL too so the email's CTA goes
+    // straight to the printable PDF — saves the vendor a portal hop
+    // before forwarding it to their customer.
     const tpl = returnAuthorizedTemplate({
       rmaCode: finalRet.rmaCode,
       orderRef: order.externalReference ?? order.id.slice(0, 8),
       trackingNumber: finalRet.inboundTracking,
+      inboundLabelUrl: finalRet.inboundLabelUrl,
     });
     await this.notifications.emit({
       vendorId,
