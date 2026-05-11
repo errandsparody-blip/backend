@@ -3,19 +3,28 @@
  *
  * Implementation Plan §6.6.1.
  *
- * v1: STUB. The shape is final; we plug in the SmartyStreets US Street API
- * later by swapping the body of `verifyUS()`. Until then, the stub does
- * format-only validation and returns ACCEPTED for plausibly-shaped US
- * addresses, NEEDS_VERIFICATION for thin/odd ones, and REJECTED for blank.
+ * v2: real validation via Shippo's `POST /addresses/` (USPS-CASS certified
+ * database). The class name is preserved for backward compatibility with
+ * OrderService + tests; internally we delegate to ShippoService so we have
+ * a single carrier integration to maintain.
  *
- * The contract:
+ * The original v1 stub did format-only checks. That stub passed garbage
+ * like `line1: "ADE", city: "airport"` because USPS isn't consulted at
+ * the format layer — the address only fails at label-purchase time, after
+ * the vendor has been charged. That failure mode wasted ledger entries
+ * and required manual cleanup. The Shippo-backed implementation catches
+ * the bad address BEFORE wallet debit.
+ *
+ * Contract (unchanged for backward compatibility):
  *   ACCEPTED            — shippable; carrier will accept it.
- *   NEEDS_VERIFICATION  — looks usable but Smarty wants a confirmation step;
- *                          UI should surface a "did you mean…" prompt.
+ *   NEEDS_VERIFICATION  — looks usable but provider wants a confirmation
+ *                          step; UI should surface a "did you mean…?" prompt.
  *   REJECTED            — clearly bad; service refuses to create the order.
  */
 
 import { Injectable, Logger } from "@nestjs/common";
+
+import { ShippoService, type AddressValidationOutcome } from "../shippo/shippo.service";
 
 export type SmartyOutcome = "ACCEPTED" | "NEEDS_VERIFICATION" | "REJECTED";
 
@@ -38,57 +47,61 @@ export interface AddressValidationResult {
   providerRef?: string;
 }
 
-const US_STATES = new Set([
-  "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD",
-  "MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC",
-  "SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC","PR","VI","GU","AS","MP",
-]);
-
-const US_ZIP_RE = /^\d{5}(-\d{4})?$/;
-
 @Injectable()
 export class SmartyService {
   private readonly log = new Logger(SmartyService.name);
 
+  constructor(private readonly shippo: ShippoService) {}
+
+  /**
+   * Verify a US recipient address. Delegates to Shippo's address-validation
+   * endpoint and maps its tri-state outcome into the (already-consumed)
+   * AddressValidationResult contract.
+   */
   async verifyUS(addr: AddressInput): Promise<AddressValidationResult> {
-    // Defence-in-depth normalization (the schema layer already trimmed).
-    const line1 = addr.line1.trim();
-    const city = addr.city.trim();
-    const state = addr.state.trim().toUpperCase();
-    const postalCode = addr.postalCode.trim().toUpperCase();
-    const country = addr.country.trim().toUpperCase();
+    const sh = await this.shippo.validateAddress({
+      line1: addr.line1,
+      line2: addr.line2,
+      city: addr.city,
+      state: addr.state,
+      postalCode: addr.postalCode,
+      country: addr.country,
+    });
 
-    if (country !== "US") {
-      // Out-of-scope for v1 (we only ship domestic USA in P3).
-      return {
-        outcome: "REJECTED",
-        detail: "International shipping is not supported in v1.",
-      };
-    }
-    if (!line1 || !city) {
-      return { outcome: "REJECTED", detail: "Missing street or city." };
-    }
-    if (!US_STATES.has(state)) {
-      return { outcome: "REJECTED", detail: `Unknown US state code: ${state}` };
-    }
-    if (!US_ZIP_RE.test(postalCode)) {
-      return { outcome: "REJECTED", detail: "ZIP must be 5 digits or ZIP+4." };
-    }
+    return this.mapOutcome(sh);
+  }
 
-    // Heuristic: PO boxes need verification (some carriers refuse them).
-    if (/\bP\.?\s*O\.?\s*BOX\b/i.test(line1)) {
-      return {
-        outcome: "NEEDS_VERIFICATION",
-        detail: "PO Box detected. Some services (e.g. UPS) will refuse delivery.",
-        normalized: { ...addr, state, postalCode },
-      };
-    }
+  private mapOutcome(sh: AddressValidationOutcome): AddressValidationResult {
+    const outcome: SmartyOutcome =
+      sh.outcome === "valid"
+        ? "ACCEPTED"
+        : sh.outcome === "needs_verification"
+          ? "NEEDS_VERIFICATION"
+          : "REJECTED";
 
-    // Stubbed canonicalization: pad ZIP to ZIP+4 placeholder for telemetry.
-    return {
-      outcome: "ACCEPTED",
-      normalized: { ...addr, state, postalCode },
-      providerRef: `smarty-stub-${Date.now()}`,
+    const result: AddressValidationResult = {
+      outcome,
+      detail: sh.detail ?? undefined,
+      providerRef: sh.providerRef ?? undefined,
     };
+    if (sh.corrected) {
+      result.normalized = {
+        line1: sh.corrected.line1,
+        line2: sh.corrected.line2,
+        city: sh.corrected.city,
+        state: sh.corrected.state,
+        postalCode: sh.corrected.postalCode,
+        country: sh.corrected.country,
+      };
+    }
+
+    if (outcome !== "ACCEPTED") {
+      this.log.debug({
+        msg: "address validation outcome",
+        outcome,
+        detail: result.detail,
+      });
+    }
+    return result;
   }
 }

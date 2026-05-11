@@ -111,6 +111,39 @@ export interface TrackerSnapshot {
   statusDate: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Address validation
+// ---------------------------------------------------------------------------
+
+export interface AddressValidationRequest {
+  line1: string;
+  line2?: string | undefined;
+  city: string;
+  state: string;
+  postalCode: string;
+  country: string;
+}
+
+export interface AddressValidationOutcome {
+  /**
+   * "valid" — USPS/carrier database confirmed deliverable.
+   * "needs_verification" — plausible but Shippo wants the vendor to confirm
+   *                        (e.g. PO box, rural route, ambiguous unit).
+   * "invalid" — USPS does not recognise this address.
+   */
+  outcome: "valid" | "needs_verification" | "invalid";
+  /** Free-form provider note for the audit log + UI. */
+  detail: string | null;
+  /**
+   * USPS-canonical form of the address (e.g. fixed casing, ZIP+4 added).
+   * Returned even when outcome is "needs_verification" so the UI can show
+   * a "Did you mean…?" prompt.
+   */
+  corrected: AddressValidationRequest | null;
+  /** Shippo's address object id — useful for support tickets. */
+  providerRef: string | null;
+}
+
 // =============================================================================
 // Shippo REST response shapes — narrow types covering only the fields we
 // consume. Shippo adds new fields over time; keeping the surface small means
@@ -155,6 +188,34 @@ interface ShTrack {
   carrier?: string;
   tracking_number?: string;
   tracking_status?: ShTrackingStatus | null;
+}
+
+interface ShAddressValidationMessage {
+  source?: string;
+  code?: string;
+  type?: string;
+  text?: string;
+}
+
+interface ShAddressValidationResults {
+  is_valid?: boolean;
+  messages?: ShAddressValidationMessage[];
+}
+
+interface ShAddress {
+  object_id?: string;
+  /** "VALID" | "INVALID" | "UNKNOWN" — Shippo's canonical status. */
+  object_state?: string;
+  is_complete?: boolean;
+  validation_results?: ShAddressValidationResults | null;
+  /** USPS-canonical address (returned in the same response when valid). */
+  name?: string | null;
+  street1?: string;
+  street2?: string | null;
+  city?: string;
+  state?: string;
+  zip?: string;
+  country?: string;
 }
 
 // =============================================================================
@@ -441,6 +502,155 @@ export class ShippoService {
       }
       throw err;
     }
+  }
+
+  // ===========================================================================
+  // Address validation
+  //
+  // Shippo exposes `POST /addresses/` with `validate: true` — same USPS-CASS
+  // certified database carriers use later. Catching invalid addresses HERE
+  // prevents the worst failure mode in fulfillment: vendor pays, order is
+  // ALLOCATED, label can't be purchased because USPS rejects the address.
+  //
+  // Three outcomes:
+  //   - valid              — proceed to order creation.
+  //   - needs_verification — UI surfaces a "Did you mean…?" prompt.
+  //   - invalid            — block order creation with a structured error.
+  // ===========================================================================
+
+  async validateAddress(req: AddressValidationRequest): Promise<AddressValidationOutcome> {
+    // Cheap pre-checks that don't burn an API call. Out-of-scope, blank, etc.
+    if (req.country.trim().toUpperCase() !== "US") {
+      return {
+        outcome: "invalid",
+        detail: "International shipping is not supported in v1.",
+        corrected: null,
+        providerRef: null,
+      };
+    }
+    if (!req.line1?.trim() || !req.city?.trim() || !req.state?.trim() || !req.postalCode?.trim()) {
+      return {
+        outcome: "invalid",
+        detail: "Address is missing street, city, state, or ZIP.",
+        corrected: null,
+        providerRef: null,
+      };
+    }
+    return this.isLive() ? this.validateAddressLive(req) : this.validateAddressStub(req);
+  }
+
+  private async validateAddressLive(req: AddressValidationRequest): Promise<AddressValidationOutcome> {
+    const body = {
+      // Shippo's address endpoint requires a non-empty name to validate; we
+      // pass a placeholder if the caller didn't supply one (the recipient
+      // name is gathered separately on our side).
+      name: "Recipient",
+      street1: req.line1.trim(),
+      street2: req.line2?.trim() ?? "",
+      city: req.city.trim(),
+      state: req.state.trim().toUpperCase(),
+      zip: req.postalCode.trim().toUpperCase(),
+      country: req.country.trim().toUpperCase(),
+      validate: true,
+    };
+
+    let resp: ShAddress;
+    try {
+      resp = await this.request<ShAddress>("POST", "/addresses/", body);
+    } catch (err) {
+      // A 4xx from Shippo's address endpoint usually means malformed input
+      // — surface that to the caller as `invalid` rather than letting the
+      // BadRequestException escape and 4xx the vendor's whole order form.
+      if (err instanceof BadRequestException) {
+        const r = err.getResponse() as { message?: string };
+        return {
+          outcome: "invalid",
+          detail: r.message ?? "Address rejected by validator.",
+          corrected: null,
+          providerRef: null,
+        };
+      }
+      throw err;
+    }
+
+    const isValid = resp.validation_results?.is_valid === true;
+    // Shippo's `messages` array carries the validation reasons. Hoist the
+    // first text-bearing message for our UI; the full list is logged.
+    const messageText = (resp.validation_results?.messages ?? [])
+      .map((m) => m.text)
+      .filter((t): t is string => Boolean(t))
+      .slice(0, 4)
+      .join(" / ");
+
+    // The corrected/canonical form Shippo emits is in the same response.
+    // We always return it — UI can show "did you mean…" or auto-apply.
+    const corrected: AddressValidationRequest = {
+      line1: resp.street1 ?? req.line1,
+      line2: resp.street2 ?? req.line2,
+      city: resp.city ?? req.city,
+      state: (resp.state ?? req.state).toUpperCase(),
+      postalCode: (resp.zip ?? req.postalCode).toUpperCase(),
+      country: (resp.country ?? req.country).toUpperCase(),
+    };
+
+    if (!isValid) {
+      return {
+        outcome: "invalid",
+        detail: messageText || "USPS does not recognise this address.",
+        corrected,
+        providerRef: resp.object_id ?? null,
+      };
+    }
+
+    // Shippo flags some "VALID but warn me" cases by setting is_valid=true
+    // alongside a non-empty messages array (typical for PO boxes, rural
+    // routes, missing apartment numbers). Surface those as
+    // needs_verification so the UI can prompt before the vendor pays.
+    const hasWarnings = (resp.validation_results?.messages ?? []).length > 0;
+    if (hasWarnings) {
+      return {
+        outcome: "needs_verification",
+        detail: messageText || "Address is valid but requires confirmation.",
+        corrected,
+        providerRef: resp.object_id ?? null,
+      };
+    }
+
+    return {
+      outcome: "valid",
+      detail: null,
+      corrected,
+      providerRef: resp.object_id ?? null,
+    };
+  }
+
+  private validateAddressStub(req: AddressValidationRequest): Promise<AddressValidationOutcome> {
+    // Dev stub — preserves enough heuristic checks that local tests don't
+    // accidentally exercise the "invalid" path with valid-shaped input.
+    // PO box detection runs here because some carriers refuse them and the
+    // PRD calls it out as a soft-warn class.
+    if (/\bP\.?\s*O\.?\s*BOX\b/i.test(req.line1)) {
+      return Promise.resolve({
+        outcome: "needs_verification",
+        detail: "PO Box detected. Some services (e.g. UPS) refuse delivery.",
+        corrected: {
+          ...req,
+          state: req.state.toUpperCase(),
+          postalCode: req.postalCode.toUpperCase(),
+        },
+        providerRef: `stub-${Date.now()}`,
+      });
+    }
+    return Promise.resolve({
+      outcome: "valid",
+      detail: null,
+      corrected: {
+        ...req,
+        state: req.state.toUpperCase(),
+        postalCode: req.postalCode.toUpperCase(),
+      },
+      providerRef: `stub-${Date.now()}`,
+    });
   }
 
   // ===========================================================================

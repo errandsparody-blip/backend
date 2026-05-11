@@ -180,6 +180,56 @@ export class OrderService {
   ) {}
 
   // ===========================================================================
+  // VALIDATE ADDRESS — called by the order-new form before submit so vendors
+  // see USPS rejection inline, not after wallet debit. No DB write.
+  // ===========================================================================
+
+  async validateAddress(input: {
+    shipAddressLine1: string;
+    shipAddressLine2?: string | undefined;
+    shipCity: string;
+    shipState: string;
+    shipPostalCode: string;
+    shipCountry: string;
+  }): Promise<{
+    outcome: "ACCEPTED" | "NEEDS_VERIFICATION" | "REJECTED";
+    detail?: string | undefined;
+    suggested?:
+      | {
+          line1: string;
+          line2?: string | undefined;
+          city: string;
+          state: string;
+          postalCode: string;
+          country: string;
+        }
+      | undefined;
+  }> {
+    const result = await this.smarty.verifyUS({
+      line1: input.shipAddressLine1,
+      line2: input.shipAddressLine2,
+      city: input.shipCity,
+      state: input.shipState,
+      postalCode: input.shipPostalCode,
+      country: input.shipCountry,
+    });
+    return {
+      outcome: result.outcome,
+      detail: result.detail,
+      suggested: result.normalized
+        ? {
+            line1: result.normalized.line1,
+            line2: result.normalized.line2,
+            city: result.normalized.city,
+            state: result.normalized.state,
+            postalCode: result.normalized.postalCode,
+            country: result.normalized.country,
+          }
+        : undefined,
+    };
+  }
+
+  // ===========================================================================
   // QUOTE — pure read, no DB writes (besides the address validation cache).
   // ===========================================================================
 

@@ -41,10 +41,12 @@ import {
   createOrderSchema,
   listOrdersSchema,
   quoteOrderSchema,
+  validateAddressSchema,
   type CancelOrderInput,
   type CreateOrderInput,
   type ListOrdersInput,
   type QuoteOrderInput,
+  type ValidateAddressInput,
 } from "../../common/schemas/order.schema";
 
 import { ReturnService } from "../returns/return.service";
@@ -60,6 +62,23 @@ export class OrderController {
     private readonly idempotency: IdempotencyService,
     private readonly returns: ReturnService,
   ) {}
+
+  // ---------------------------------------------------------------------------
+  // Validate address — pre-flight check before the vendor pays. Lets the
+  // order-new form catch USPS rejections inline instead of failing at the
+  // ship step after the wallet has been debited. No DB write.
+  //
+  // Rate-limited tighter than quote because the form will fire this on every
+  // address-field blur (debounced client-side).
+  // ---------------------------------------------------------------------------
+  @Post("validate-address")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  validateAddress(
+    @Body(new ZodValidationPipe(validateAddressSchema)) body: ValidateAddressInput,
+  ) {
+    return this.orders.validateAddress(body);
+  }
 
   // ---------------------------------------------------------------------------
   // Quote — no DB write, no idempotency required.

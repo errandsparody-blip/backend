@@ -25,6 +25,7 @@ import { AuditService } from "../audit/audit.service";
 import { orderShippedTemplate } from "../email/email-templates";
 import { ShippoService } from "../integrations/shippo/shippo.service";
 import { NotificationService } from "../notifications/notification.service";
+import { WalletService } from "../wallet/wallet.service";
 
 type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction" | "$use" | "$extends">;
 
@@ -55,7 +56,156 @@ export class AdminOrderService {
     private readonly audit: AuditService,
     private readonly shippo: ShippoService,
     private readonly notifications: NotificationService,
+    private readonly wallet: WalletService,
   ) {}
+
+  // ---------------------------------------------------------------------------
+  // Force-cancel — admin escape hatch for stuck orders.
+  //
+  // The normal vendor-side cancel is tenant-scoped and limited to
+  // DRAFT/SUBMITTED/ALLOCATED. Admins need a wider net for orders that get
+  // stranded — most commonly: an order in ALLOCATED whose label can't be
+  // purchased because the recipient's address is invalid at the carrier.
+  // Until address validation catches everything pre-debit, admins need a
+  // way to release inventory + refund the wallet in one click.
+  //
+  // What it does:
+  //   - releases all line reservations back to inventory
+  //   - refunds the full totalChargedCents to the vendor's wallet
+  //   - sets status = CANCELLED with a clear `cancel_reason`
+  //   - writes audit + order event entries tagged as ADMIN-originated
+  //
+  // What it refuses:
+  //   - orders past LABEL_PURCHASED (label already bought = real carrier
+  //     debit; needs the return flow, not cancel)
+  //   - orders already CANCELLED / RETURNED / DELIVERED (idempotent no-op
+  //     would be confusing; ConflictException makes the state explicit)
+  // ---------------------------------------------------------------------------
+  async forceCancel(
+    id: string,
+    actorId: string,
+    reason: string,
+  ): Promise<Order> {
+    const FORCE_CANCELLABLE: OrderStatus[] = [
+      "DRAFT",
+      "SUBMITTED",
+      "ALLOCATED",
+      "LABEL_PURCHASED",
+    ];
+
+    return this.prisma.$transaction(async (tx): Promise<{ updated: Order; before: { status: OrderStatus; totalChargedCents: number } }> => {
+      // SELECT ... FOR UPDATE to prevent racing transitions.
+      const lockedRows = await tx.$queryRaw<
+        Array<{ id: string; vendor_id: string; status: OrderStatus; total_charged_cents: number }>
+      >(
+        Prisma.sql`
+          SELECT id, vendor_id, status, total_charged_cents
+          FROM orders
+          WHERE id = ${id}::uuid
+          FOR UPDATE
+        `,
+      );
+      const locked = lockedRows[0];
+      if (!locked) throw new NotFoundException();
+      if (!FORCE_CANCELLABLE.includes(locked.status)) {
+        throw new ConflictException({
+          message: `Order in status ${locked.status} cannot be force-cancelled. Use the return flow for delivered orders.`,
+          code: "order_force_cancel_blocked",
+        });
+      }
+
+      const before = await tx.order.findUniqueOrThrow({
+        where: { id },
+        include: { lines: true },
+      });
+
+      // Release inventory reservations.
+      for (const line of before.lines) {
+        await tx.sku.update({
+          where: { id: line.skuId },
+          data: {
+            quantityAvailable: { increment: line.quantity },
+            quantityReserved: { decrement: line.quantity },
+          },
+        });
+        await tx.inventoryMovement.create({
+          data: {
+            vendorId: before.vendorId,
+            skuId: line.skuId,
+            type: "RELEASE",
+            deltaAvailable: line.quantity,
+            deltaReserved: -line.quantity,
+            referenceType: "order",
+            referenceId: id,
+            actorId,
+            reason: `admin-force-cancel: ${reason}`,
+          },
+        });
+        await tx.orderLine.update({
+          where: { id: line.id },
+          data: { allocationStatus: "CANCELLED" },
+        });
+      }
+
+      // Refund the wallet for whatever was charged. Type REVERSAL keeps the
+      // ledger trail clean — same path the vendor self-cancel uses.
+      if (before.totalChargedCents > 0) {
+        await this.wallet.credit(
+          {
+            vendorId: before.vendorId,
+            amountCents: before.totalChargedCents,
+            type: "REVERSAL",
+            description: `Admin force-cancel of order ${id.slice(0, 8)}: ${reason}`,
+            referenceType: "order",
+            referenceId: id,
+            actorId,
+          },
+          tx as unknown as Parameters<typeof this.wallet.credit>[1],
+        );
+      }
+
+      const updated = await tx.order.update({
+        where: { id },
+        data: {
+          status: "CANCELLED",
+          // OTHER is the catch-all in the schema enum — we put the human
+          // explanation in cancelNote, prefixed so it's grep-able for
+          // support workflows.
+          cancelReason: "OTHER",
+          cancelNote: `ADMIN_FORCE_CANCEL: ${reason}`,
+          cancelledAt: new Date(),
+        },
+      });
+
+      await tx.orderEvent.create({
+        data: {
+          orderId: id,
+          type: "order.force_cancelled",
+          description: `Force-cancelled by admin: ${reason}`,
+          source: "ADMIN",
+          actorId,
+        },
+      });
+
+      return {
+        updated,
+        before: { status: before.status, totalChargedCents: before.totalChargedCents },
+      };
+    }).then(async ({ updated, before }) => {
+      // Audit log lives outside the transaction (its own service handles
+      // its own persistence). Best-effort — failing the audit shouldn't
+      // un-refund the vendor.
+      await this.audit.log({
+        actorId,
+        action: "order.force_cancelled",
+        resourceType: "order",
+        resourceId: id,
+        beforeState: { status: before.status, totalChargedCents: before.totalChargedCents },
+        afterState: { status: "CANCELLED", reason },
+      }).catch(() => undefined);
+      return updated;
+    });
+  }
 
   // ---------------------------------------------------------------------------
   // Read — operator queue

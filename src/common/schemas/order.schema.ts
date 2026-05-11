@@ -14,9 +14,6 @@ import { z } from "zod";
 // Helpers
 // ---------------------------------------------------------------------------
 
-const trimmed = (max: number) =>
-  z.string().trim().min(1).max(max);
-
 // US state — 2 letters, uppercased. Domestic-only check is enforced inside the
 // service when shipCountry === "US".
 const usStateLike = z
@@ -34,14 +31,6 @@ const iso2 = z
   .toUpperCase()
   .regex(/^[A-Z]{2}$/, "Use a 2-letter ISO country code, e.g. US.");
 
-// Phone: E.164-ish (digits + optional leading +). Ten to fifteen chars.
-const phoneE164 = z
-  .string()
-  .trim()
-  .regex(/^\+?[0-9]{10,15}$/, "Phone must be 10–15 digits, optional leading +.")
-  .optional()
-  .or(z.literal("").transform(() => undefined));
-
 const emailNullable = z
   .string()
   .trim()
@@ -55,18 +44,81 @@ const emailNullable = z
 // Address (recipient) — used by quote + create
 // ---------------------------------------------------------------------------
 
+// Stricter line1 — at least 4 characters AND contain a space, so single-token
+// garbage like "ADE" / "airport" can't slip through the format layer. A real
+// street address always has a number + name, separated by a space.
+const streetLine = z
+  .string()
+  .trim()
+  .min(4, "Street is too short.")
+  .max(120)
+  .refine((s) => /\s/.test(s), "Street must include a number and a street name.");
+
+// Stricter phone — require exactly 10 US digits (optionally with +1 prefix or
+// formatting noise like dashes/parens/spaces). Rejects sequential-digit
+// placeholders like "1234567890" via a separate refine because some users
+// genuinely have nice round phone numbers; we filter the obvious garbage.
+const phoneUS10 = z
+  .string()
+  .trim()
+  .transform((s) => s.replace(/[^\d+]/g, "")) // strip formatting
+  .pipe(
+    z.string().regex(/^(\+?1)?\d{10}$/, "US phone must be 10 digits."),
+  )
+  .refine((s) => {
+    const digits = s.replace(/[^\d]/g, "").slice(-10);
+    // Reject 5 or more consecutive identical digits, and the classic
+    // ascending/descending sequences. Anything past that is a vendor
+    // typing real garbage.
+    if (/(\d)\1{4,}/.test(digits)) return false;
+    if (/01234567|12345678|23456789|98765432|87654321/.test(digits)) return false;
+    return true;
+  }, "Phone number looks like a placeholder.")
+  .optional()
+  .or(z.literal("").transform(() => undefined));
+
 export const recipientAddressSchema = z.object({
-  recipientName: trimmed(120),
-  recipientPhone: phoneE164,
+  recipientName: z
+    .string()
+    .trim()
+    .min(2, "Recipient name is too short.")
+    .max(120)
+    .refine((s) => /\s|[A-Za-z]{3,}/.test(s), "Use a real name (first + last)."),
+  recipientPhone: phoneUS10,
   recipientEmail: emailNullable,
-  shipAddressLine1: trimmed(120),
+  shipAddressLine1: streetLine,
   shipAddressLine2: z.string().trim().max(120).optional().or(z.literal("").transform(() => undefined)),
-  shipCity: trimmed(80),
+  shipCity: z
+    .string()
+    .trim()
+    .min(2, "City is too short.")
+    .max(80)
+    // Reject single-token nonsense like "airport" by requiring at least one
+    // letter; the runtime carrier check would catch this too but a clean
+    // client-side rejection beats a $0.50 wasted API call.
+    .regex(/[A-Za-z]/, "City must contain letters."),
   shipState: usStateLike,
   shipPostalCode: postalCode,
   shipCountry: iso2.default("US"),
 });
 export type RecipientAddress = z.infer<typeof recipientAddressSchema>;
+
+// ---------------------------------------------------------------------------
+// Address-only validation — used by the order-new form to pre-check before
+// the vendor finishes the order. No DB write, no idempotency. Same shape
+// as the recipient address minus the name/phone/email (those don't change
+// USPS deliverability).
+// ---------------------------------------------------------------------------
+
+export const validateAddressSchema = z.object({
+  shipAddressLine1: streetLine,
+  shipAddressLine2: z.string().trim().max(120).optional().or(z.literal("").transform(() => undefined)),
+  shipCity: z.string().trim().min(2).max(80),
+  shipState: usStateLike,
+  shipPostalCode: postalCode,
+  shipCountry: iso2.default("US"),
+});
+export type ValidateAddressInput = z.infer<typeof validateAddressSchema>;
 
 // ---------------------------------------------------------------------------
 // Order line input

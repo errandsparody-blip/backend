@@ -12,7 +12,7 @@
  * Roles: WAREHOUSE_OPERATOR, FINANCE_ADMIN, SUPER_ADMIN.
  */
 
-import { Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
 import { Role } from "@prisma/client";
 import { z } from "zod";
 
@@ -22,6 +22,13 @@ import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 
 import { AdminOrderService } from "./admin-order.service";
+
+const forceCancelSchema = z.object({
+  // 5..280: short enough to surface in audit log UI, long enough for a real
+  // explanation ("USPS rejected address; vendor confirmed typo, refunding").
+  reason: z.string().trim().min(5, "Reason required.").max(280),
+});
+type ForceCancelInput = z.infer<typeof forceCancelSchema>;
 
 const listSchema = z.object({
   status: z
@@ -87,5 +94,26 @@ export class AdminOrderController {
   @HttpCode(HttpStatus.OK)
   ship(@CurrentUser() user: AuthenticatedUser, @Param("id", new ParseUUIDPipe()) id: string) {
     return this.orders.ship(id, user.sub);
+  }
+
+  /**
+   * Force-cancel a stuck order. Releases inventory + refunds the wallet in
+   * one transaction. Used when a label can't be purchased (e.g. invalid
+   * recipient address at the carrier) and the order would otherwise sit
+   * indefinitely in ALLOCATED / LABEL_PURCHASED state.
+   *
+   * The vendor's normal cancel flow handles DRAFT / SUBMITTED / ALLOCATED;
+   * this admin endpoint additionally covers LABEL_PURCHASED. Anything past
+   * that (PICKING and beyond) requires the return flow because real-world
+   * activity has happened.
+   */
+  @Post(":id/force-cancel")
+  @HttpCode(HttpStatus.OK)
+  forceCancel(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(forceCancelSchema)) body: ForceCancelInput,
+  ) {
+    return this.orders.forceCancel(id, user.sub, body.reason);
   }
 }
