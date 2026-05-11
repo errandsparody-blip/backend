@@ -445,15 +445,49 @@ export class ShippoService {
       });
     }
 
+    // Shippo's `transactions` response in API v2018-02-08 returns `rate`
+    // as a string ID, not an expanded object — so `selected_rate` and
+    // top-level `carrier` are both undefined here. Without expanding, we'd
+    // fall back to "Unknown" and the vendor's shipped-order email would
+    // read "Unknown picked it up". Fetch the rate explicitly to get the
+    // real carrier + service + amount.
+    //
+    // Best-effort: if the rate lookup fails (rate id rotated, transient
+    // 5xx, etc.) we still return the label — better to ship with imperfect
+    // carrier metadata than fail the whole transaction.
+    let rateExpanded: ShRate | undefined;
+    try {
+      rateExpanded = await this.request<ShRate>(
+        "GET",
+        `/rates/${encodeURIComponent(req.rateId)}`,
+      );
+    } catch (err) {
+      this.log.warn({
+        msg: "purchaseLabel — rate expansion failed; falling back to transaction fields",
+        rateId: req.rateId,
+        err: (err as Error)?.message,
+      });
+    }
+
     return {
       trackingNumber: tracking,
       labelUrl,
-      carrier: tx.selected_rate?.provider ?? tx.carrier ?? "Unknown",
+      carrier:
+        rateExpanded?.provider ??
+        tx.selected_rate?.provider ??
+        tx.carrier ??
+        "Unknown",
       service:
+        rateExpanded?.servicelevel?.name ??
+        rateExpanded?.servicelevel?.token ??
         tx.selected_rate?.servicelevel?.name ??
         tx.servicelevel?.name ??
         "Standard",
-      costCents: tx.selected_rate ? this.dollarsToCents(tx.selected_rate.amount) : 0,
+      costCents: rateExpanded
+        ? this.dollarsToCents(rateExpanded.amount)
+        : tx.selected_rate
+          ? this.dollarsToCents(tx.selected_rate.amount)
+          : 0,
     };
   }
 

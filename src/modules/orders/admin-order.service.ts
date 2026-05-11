@@ -274,12 +274,22 @@ export class AdminOrderService {
         insuranceCents: order.insuranceFeeCents,
       });
 
+      // Defensive: the order already has `carrier` + `carrierService` set
+      // from the chosen quote at create time. If the Shippo client falls
+      // back to "Unknown" (transient rate-lookup failure post-purchase),
+      // keep the pre-existing values rather than overwriting good data.
+      const useLabelCarrier = label.carrier && label.carrier !== "Unknown";
+      const effectiveCarrier = useLabelCarrier ? label.carrier : order.carrier;
+      const effectiveCarrierService = useLabelCarrier
+        ? `${label.carrier} ${label.service}`
+        : order.carrierService;
+
       const updated = await tx.order.update({
         where: { id },
         data: {
           status: "LABEL_PURCHASED",
-          carrier: label.carrier,
-          carrierService: `${label.carrier} ${label.service}`,
+          ...(effectiveCarrier ? { carrier: effectiveCarrier } : {}),
+          ...(effectiveCarrierService ? { carrierService: effectiveCarrierService } : {}),
           trackingNumber: label.trackingNumber,
           labelUrl: label.labelUrl,
           labelPurchasedAt: new Date(),
@@ -290,7 +300,7 @@ export class AdminOrderService {
         data: {
           orderId: id,
           type: "carrier.label_purchased",
-          description: `Label purchased: ${label.trackingNumber} (${label.carrier})`,
+          description: `Label purchased: ${label.trackingNumber} (${effectiveCarrier ?? "carrier"})`,
           source: "ADMIN",
           actorId,
           metadata: { trackingNumber: label.trackingNumber, labelUrl: label.labelUrl },
