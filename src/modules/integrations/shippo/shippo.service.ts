@@ -274,6 +274,8 @@ export class ShippoService {
         zip: this.cfg.WAREHOUSE_FROM_ZIP,
         country: "US",
         phone: this.cfg.WAREHOUSE_FROM_PHONE,
+        // USPS rejects label purchase without sender email. See config.ts.
+        email: this.cfg.WAREHOUSE_FROM_EMAIL,
       },
       address_to: {
         // Shippo derives the recipient name from address fields if missing;

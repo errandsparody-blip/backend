@@ -131,6 +131,15 @@ const ConfigSchema = z.object({
     .regex(/^\d{5}(-\d{4})?$/, "US ZIP (5 or 9 digit).")
     .default("33101"),
   WAREHOUSE_FROM_PHONE: z.string().min(7).default("+13055551212"),
+  // USPS requires the sender's email on every shipment record (used for
+  // delivery exception notifications + return-to-sender alerts). Without
+  // it, Shippo's `POST /transactions/` 503s with "address_from.email
+  // must not be empty." Default to the platform's noreply alias which
+  // is operationally monitored.
+  WAREHOUSE_FROM_EMAIL: z
+    .string()
+    .regex(/^[^@\s]+@[^@\s]+\.[^@\s]+$/, "Must be a plain email address.")
+    .default("ops@myusaerrands.com"),
 
   // Email — Implementation Plan §6.8.
   // EMAIL_PROVIDER:
