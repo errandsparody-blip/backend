@@ -72,6 +72,25 @@ export class ReturnService {
       });
     }
 
+    // Migration 0018 — enforce the configurable return window. Vendors
+    // can't open an RMA against an order delivered more than N days
+    // ago. Mirrors the public-facing 30-day FBA-style policy. The
+    // window is stored as a configuration row so admins can tune it
+    // without a deploy.
+    const windowDays = await this.loadReturnWindowDays();
+    if (order.deliveredAt) {
+      const ageMs = Date.now() - order.deliveredAt.getTime();
+      const ageDays = ageMs / (1000 * 60 * 60 * 24);
+      if (ageDays > windowDays) {
+        throw new ConflictException({
+          message: `This order was delivered ${Math.floor(ageDays)} days ago. Returns must be opened within ${windowDays} days of delivery.`,
+          code: "return_outside_window",
+          windowDays,
+          deliveredAt: order.deliveredAt.toISOString(),
+        });
+      }
+    }
+
     // Validate every requested line: must belong to the order, requestedQty ≤ ordered qty.
     const linesById = new Map(order.lines.map((l) => [l.id, l]));
     for (const r of input.lines) {
@@ -93,6 +112,10 @@ export class ReturnService {
     const rmaCode = this.generateRmaCode();
 
     // Create return + lines + inbound label in a single transaction.
+    // The `attachmentUrls` field exists in the DB (migration 0018) but
+    // not in the stale generated Prisma client checked into the repo.
+    // Cast through `unknown` to bypass — Railway's `prisma generate`
+    // step on the next deploy aligns the two.
     const created = await this.prisma.$transaction(async (tx) => {
       const ret = await tx.return.create({
         data: {
@@ -103,6 +126,8 @@ export class ReturnService {
           reason: input.reason,
           createdBy: actorId,
           authorizedAt: new Date(),
+          // Migration 0018 — vendor-supplied photo evidence.
+          ...({ attachmentUrls: input.attachmentUrls ?? [] } as Record<string, unknown>),
           lines: {
             create: input.lines.map((l) => ({
               orderLineId: l.orderLineId,
@@ -110,7 +135,7 @@ export class ReturnService {
               requestedQty: l.requestedQty,
             })),
           },
-        },
+        } as unknown as Prisma.ReturnCreateInput,
         include: { lines: true },
       });
       return ret;
@@ -455,5 +480,36 @@ export class ReturnService {
     const row = rows[0];
     if (!row) throw new NotFoundException();
     return row;
+  }
+
+  /**
+   * Read the configurable return-window cutoff in days from the
+   * configuration table. Defaults to 30 (matches FBA / Amazon norms)
+   * if the row is absent or the value isn't a positive integer.
+   *
+   * Public so the order controller can compute `returnableUntil` on
+   * the order GET response without re-implementing the lookup.
+   */
+  async getReturnWindowDays(): Promise<number> {
+    return this.loadReturnWindowDays();
+  }
+
+  private async loadReturnWindowDays(): Promise<number> {
+    const FALLBACK = 30;
+    const MAX = 365;
+    try {
+      const row = await this.prisma.configuration.findUnique({
+        where: { key: "returns_window_days" },
+      });
+      if (!row) return FALLBACK;
+      const value = row.value as unknown;
+      const days = typeof value === "number" ? value : Number(value);
+      if (!Number.isInteger(days) || days < 1 || days > MAX) return FALLBACK;
+      return days;
+    } catch {
+      // Defensive: a config-table outage shouldn't block returns.
+      // Fall back to the safer 30-day default.
+      return FALLBACK;
+    }
   }
 }

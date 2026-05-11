@@ -835,6 +835,13 @@ model Return {
 
   inspectorNotes    String?       @map("inspector_notes")
 
+  // Migration 0018 — vendor-supplied evidence at RMA creation. Photos
+  // of damage, screenshots of customer messages, etc. Stored as R2
+  // public URLs (uploaded via the same presigned-PUT flow as the
+  // shopper attachments). Inspector reviews these on the admin detail
+  // page so "defective / arrived damaged" claims have proof attached.
+  attachmentUrls    String[]      @default([]) @map("attachment_urls")
+
   requestedAt       DateTime      @default(now()) @map("requested_at")
   authorizedAt      DateTime?     @map("authorized_at")
   receivedAt        DateTime?     @map("received_at")

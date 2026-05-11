@@ -44,6 +44,15 @@ export const createReturnSchema = z.object({
   orderId: z.string().uuid(),
   reason: z.enum(RETURN_REASON),
   lines: z.array(createReturnLineSchema).min(1).max(50),
+  // Migration 0018 — optional photo / screenshot evidence the vendor
+  // attaches at RMA-creation time. Capped at 5 to keep R2 + the
+  // inspector UI sane. Each URL is a public R2 link returned by the
+  // presigned-PUT flow exposed at POST /returns/uploads.
+  attachmentUrls: z
+    .array(z.string().url().max(2048))
+    .max(5, "Up to 5 attachments per RMA.")
+    .optional()
+    .default([]),
 });
 export type CreateReturnInput = z.infer<typeof createReturnSchema>;
 
@@ -53,6 +62,45 @@ export const listReturnsSchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(50),
 });
 export type ListReturnsInput = z.infer<typeof listReturnsSchema>;
+
+// ---------------------------------------------------------------------------
+// Vendor — presign attachment upload (photo evidence at RMA creation)
+// ---------------------------------------------------------------------------
+//
+// Same MIME allow-list + 25 MB cap as the shopper attachments. Excluding
+// HTML / SVG so an attacker can't get an XSS-capable file hosted on the
+// same origin as the buyer-facing pages.
+
+export const RETURN_UPLOAD_ALLOWED_MIME = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/heic",
+  "application/pdf",
+] as const;
+
+export const RETURN_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+
+export const presignReturnUploadSchema = z.object({
+  filename: z
+    .string()
+    .trim()
+    .min(1, "Filename required.")
+    .max(200, "Filename too long.")
+    // Disallow path separators / control chars / shell metas.
+    .regex(/^[^\\/<>:"|?*]+$/, "Filename contains invalid characters."),
+  contentType: z.enum(RETURN_UPLOAD_ALLOWED_MIME),
+  contentLengthBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(
+      RETURN_UPLOAD_MAX_BYTES,
+      `File too large — max ${RETURN_UPLOAD_MAX_BYTES / (1024 * 1024)} MB.`,
+    ),
+});
+export type PresignReturnUploadInput = z.infer<typeof presignReturnUploadSchema>;
 
 // ---------------------------------------------------------------------------
 // Admin — receive + inspect
