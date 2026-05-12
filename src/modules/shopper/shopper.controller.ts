@@ -253,6 +253,7 @@ export class ShopperController {
           html: ops.html,
           text: ops.text,
           idempotencyKey: `ops:shopper:new:${created.id}`,
+          href: `/admin/shopper/${created.id}`,
         })
         .catch(() => undefined);
 
@@ -314,6 +315,10 @@ export class ShopperController {
         html: wireOps.html,
         text: wireOps.text,
         idempotencyKey: `ops:shopper:new:${created.id}`,
+        href: `/admin/shopper/${created.id}`,
+        // Wire-track requests need an operator's eyes — bump to WARNING
+        // so the badge reads as actionable, not informational.
+        severity: "WARNING",
       })
       .catch(() => undefined);
 
@@ -427,6 +432,7 @@ export class ShopperController {
         text: ops.text,
         // Per-message dedupe — a webhook replay won't double-alert.
         idempotencyKey: `ops:shopper:msg:${message.id}`,
+        href: `/admin/shopper/${resolved.requestId}`,
       })
       .catch(() => undefined);
 
@@ -549,6 +555,8 @@ export class ShopperController {
         html: `<p>Buyer <strong>${this.escapeHtml(updated.buyerEmail)}</strong> uploaded ID for ${this.escapeHtml(updated.reference)}. Review at the admin shopper page.</p>`,
         text: `Buyer ${updated.buyerEmail} uploaded ID for ${updated.reference}. Review in admin.`,
         idempotencyKey: `ops:shopper:id_submitted:${updated.id}`,
+        href: `/admin/shopper/${updated.id}`,
+        severity: "WARNING",
       })
       .catch(() => undefined);
 
@@ -629,6 +637,8 @@ export class ShopperController {
         html: `<p>Buyer <strong>${this.escapeHtml(updated.buyerEmail)}</strong> submitted wire-transfer proof for ${this.escapeHtml(updated.reference)}.</p>`,
         text: `Buyer ${updated.buyerEmail} submitted wire-transfer proof for ${updated.reference}.`,
         idempotencyKey: `ops:shopper:wire_submitted:${updated.id}`,
+        href: `/admin/shopper/${updated.id}`,
+        severity: "WARNING",
       })
       .catch(() => undefined);
 

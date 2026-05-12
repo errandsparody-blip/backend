@@ -303,6 +303,8 @@ export class PsnService {
           html: ops.html,
           text: ops.text,
           idempotencyKey: `ops:psn:${id}`,
+          // Admin click → straight to the receiving page for this PSN.
+          href: `/admin/psn/${id}/receive`,
         })
         .catch(() => undefined);
     }

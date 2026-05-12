@@ -266,13 +266,21 @@ export class VendorService {
     });
     void this.opsAlerts
       .send({
-        type: "ops.kyc.submitted",
+        // Type is `ops.vendor.kyc_submitted` (not `ops.kyc.*`) so that
+        // after the in-app fanout strips the `ops.` prefix, the leading
+        // segment is `vendor` and the notification buckets into the
+        // admin sidebar's "Vendors" tab badge. A bare `kyc` category
+        // would have no matching tab.
+        type: "ops.vendor.kyc_submitted",
         subject: ops.subject,
         html: ops.html,
         text: ops.text,
         // Re-submissions should re-alert; key includes the kycSubmittedAt
         // timestamp so each fresh submission produces a distinct dedupe key.
         idempotencyKey: `ops:kyc:${vendorId}:${Date.now()}`,
+        // Admin click → vendor detail page with the KYC review actions.
+        href: `/admin/vendors/${vendorId}`,
+        severity: "WARNING",
       })
       .catch(() => undefined);
 
