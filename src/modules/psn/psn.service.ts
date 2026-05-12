@@ -56,6 +56,9 @@ export interface PublicPsn {
     receivedQty: number;
     acceptedQty: number;
     damagedQty: number;
+    // Migration 0024 — exposed to the vendor so they see the same
+    // missing count the admin recorded during receiving.
+    missingQty: number;
     notes: string | null;
   }>;
 }
@@ -358,6 +361,9 @@ export class PsnService {
   private toPublic(p: Psn & { lines: Array<{
     id: string; productId: string; skuId: string | null;
     declaredQty: number; receivedQty: number; acceptedQty: number; damagedQty: number;
+    // missingQty is on the Prisma row from migration 0024. We cast it
+    // through Record<string, unknown> so the type compiles against the
+    // stale generated client; the value is real on the wire.
     notes: string | null;
   }> }): PublicPsn {
     return {
@@ -382,6 +388,12 @@ export class PsnService {
         receivedQty: l.receivedQty,
         acceptedQty: l.acceptedQty,
         damagedQty: l.damagedQty,
+        // Migration 0024 — surface the missing count the admin recorded
+        // at receive time. Falls back to 0 on rows that pre-date the
+        // column being populated.
+        missingQty: Number(
+          (l as unknown as Record<string, unknown>).missingQty ?? 0,
+        ),
         notes: l.notes,
       })),
     };
