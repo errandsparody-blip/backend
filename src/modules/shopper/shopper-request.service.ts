@@ -575,6 +575,36 @@ export class ShopperRequestService {
     });
   }
 
+  /**
+   * Admin confirms the items have physically landed at the warehouse.
+   * AWAITING_DELIVERY → READY_TO_SHIP. We don't auto-fire this on a
+   * tracking webhook because most procurement happens via consumer
+   * accounts (USPS to PO box, Amazon to warehouse, etc.) where we have
+   * no programmatic tracking. Admin is the source of truth.
+   */
+  async markDeliveredToWarehouse(args: {
+    requestId: string;
+    actorId: string;
+  }): Promise<RequestRow> {
+    const before = await this.getById(args.requestId, { includeLines: false });
+    // Accept either AWAITING_DELIVERY (the new happy-path) or PROCURING
+    // (so admin can fast-forward without touching every line first when
+    // they personally walked the items in).
+    const allowed = ["AWAITING_DELIVERY", "PROCURING"] as ReadonlyArray<string>;
+    if (!allowed.includes(before.status as string)) {
+      throw new ConflictException({
+        message: "Items can only be marked delivered to warehouse during procurement.",
+        code: "shopper_warehouse_delivery_invalid_state",
+        status: before.status,
+      });
+    }
+    return this.transition(args.requestId, {
+      to: "READY_TO_SHIP",
+      actorId: args.actorId,
+      action: "shopper.warehouse.delivered",
+    });
+  }
+
   // =========================================================================
   // Per-line reconciliation (admin)
   // =========================================================================
@@ -631,7 +661,66 @@ export class ShopperRequestService {
       },
       afterState: data as Prisma.InputJsonValue,
     });
+
+    // Migration 0021 — auto-transition PROCURING → AWAITING_DELIVERY once
+    // every line has reached a terminal procurement state (purchased or
+    // unavailable). This is the trigger that fires the buyer-facing
+    // notification "your items have been purchased."
+    //
+    // The procurement-status enum is lowercase on the wire (Zod schema
+    // serialises it that way for buyer-facing UI). Best-effort: if the
+    // transition fails for any reason, the line update itself still
+    // succeeded — admin can manually retry by saving another line.
+    if (args.input.procurementStatus === "purchased" || args.input.procurementStatus === "unavailable") {
+      void this.maybeAutoTransitionToAwaitingDelivery(args.requestId, args.actorId).catch(
+        (err: unknown) => {
+          this.logger.warn(
+            { err: (err as Error).message, requestId: args.requestId },
+            "Auto-transition to AWAITING_DELIVERY failed; admin can retry by saving another line.",
+          );
+        },
+      );
+    }
+
     return updated;
+  }
+
+  /**
+   * Check whether every line on a PROCURING request is in a terminal
+   * state (purchased or unavailable) and, if so, transition the request
+   * to AWAITING_DELIVERY. Safe to call any time — refuses to transition
+   * unless preconditions hold.
+   */
+  private async maybeAutoTransitionToAwaitingDelivery(
+    requestId: string,
+    actorId: string,
+  ): Promise<void> {
+    const row = await this.getById(requestId, { includeLines: true });
+    if (row.status !== "PROCURING") return;
+    const lines = (row as unknown as { lines?: Array<{ procurementStatus: string }> }).lines ?? [];
+    if (lines.length === 0) return;
+    const allTerminal = lines.every(
+      (l) => l.procurementStatus === "purchased" || l.procurementStatus === "unavailable",
+    );
+    if (!allTerminal) return;
+
+    await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: requestId },
+      // Cast the status string — the generated Prisma client may not yet
+      // include AWAITING_DELIVERY until `prisma generate` is re-run.
+      data: { status: "AWAITING_DELIVERY" as unknown as never },
+    });
+
+    await this.audit.log({
+      actorId,
+      action: "shopper.status.awaiting_delivery",
+      resourceType: "shopper_request",
+      resourceId: requestId,
+      beforeState: { status: "PROCURING" },
+      afterState: { status: "AWAITING_DELIVERY", trigger: "all_lines_terminal" },
+    });
   }
 
   // =========================================================================
@@ -655,9 +744,19 @@ export class ShopperRequestService {
     freightRates: Record<string, number>;
   }): Promise<RequestRow> {
     const before = await this.getById(args.requestId, { includeLines: false });
-    if (before.status !== "PROCURING" && before.status !== "AWAITING_RECONCILIATION") {
+    // Migration 0021 — AWAITING_DELIVERY is the new home for the shipping
+    // panel (after admin marks all lines PURCHASED, the request lands
+    // there). PROCURING + AWAITING_RECONCILIATION remain accepted for
+    // backward compatibility with in-flight requests created before the
+    // redesign.
+    const ALLOWED_STATES = [
+      "PROCURING",
+      "AWAITING_RECONCILIATION",
+      "AWAITING_DELIVERY",
+    ] as ReadonlyArray<string>;
+    if (!ALLOWED_STATES.includes(before.status as string)) {
       throw new ConflictException({
-        message: "Shipping cost can only be set during procurement.",
+        message: "Shipping cost can only be set during procurement or while awaiting delivery.",
         code: "shopper_shipping_invalid_state",
         status: before.status,
       });
@@ -730,6 +829,12 @@ export class ShopperRequestService {
     if (args.input.parcelWidthIn !== undefined) data.parcelWidthIn = args.input.parcelWidthIn;
     if (args.input.parcelHeightIn !== undefined) data.parcelHeightIn = args.input.parcelHeightIn;
     if (args.input.parcelWeightOz !== undefined) data.parcelWeightOz = args.input.parcelWeightOz;
+    // Migration 0021 — admin can update destination from the shipping
+    // panel. We persist as JSON (Prisma `Json` column) so the receipt and
+    // label can both read it back without an extra join.
+    if (args.input.shippingAddress !== undefined) {
+      data.shippingAddress = args.input.shippingAddress as Prisma.InputJsonValue;
+    }
 
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }

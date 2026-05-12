@@ -100,6 +100,13 @@ export interface ReceiptBreakdown {
   /** Carrier + tracking (null until shipped). */
   carrier: string | null;
   trackingNumber: string | null;
+
+  /**
+   * Phase 2 shopper redesign — buyer-visible destination address. Built
+   * from `request.shippingAddress` JSON, formatted as an array of lines.
+   * Null when no address has been set yet.
+   */
+  destinationAddressLines: string[] | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +153,43 @@ export function buildReceiptBreakdown(
     followupAmountCents: request.followupAmountCents,
     carrier: request.carrier,
     trackingNumber: request.trackingNumber,
+    destinationAddressLines: formatShippingAddress(request.shippingAddress),
   };
+}
+
+/**
+ * Format the shipping_address JSON column as a printable list of lines.
+ * Returns null when the column is empty / not yet set / unparseable —
+ * which renders as "address pending" downstream.
+ *
+ * The JSON shape (set by the buyer at intake or by admin during shipping
+ * finalization) is loose by design — we accept either snake_case or
+ * camelCase, and pick the fields that exist. The output is purely visual.
+ */
+function formatShippingAddress(addr: unknown): string[] | null {
+  if (!addr || typeof addr !== "object") return null;
+  const a = addr as Record<string, unknown>;
+  const get = (k: string): string | null => {
+    const v = a[k];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    return null;
+  };
+  const name = get("recipientName") ?? get("recipient_name") ?? get("name");
+  const street1 = get("shipAddressLine1") ?? get("street1") ?? get("line1") ?? get("address1");
+  const street2 = get("shipAddressLine2") ?? get("street2") ?? get("line2") ?? get("address2");
+  const city = get("shipCity") ?? get("city");
+  const state = get("shipState") ?? get("state");
+  const postal = get("shipPostalCode") ?? get("postalCode") ?? get("postal_code") ?? get("zip");
+  const country = get("shipCountry") ?? get("country");
+
+  const lines: string[] = [];
+  if (name) lines.push(name);
+  if (street1) lines.push(street2 ? `${street1}, ${street2}` : street1);
+  const cityStateZip = [city, state, postal].filter(Boolean).join(" ");
+  if (cityStateZip) lines.push(cityStateZip);
+  if (country && country.toUpperCase() !== "US") lines.push(country);
+
+  return lines.length > 0 ? lines : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +498,20 @@ export function buildReceiptHtmlBlock(d: ReceiptBreakdown): string {
         </tr>`
       : "";
 
+  // Phase 2 shopper redesign — destination address. Always rendered when
+  // we have one, even before the carrier ships. Buyer can verify their
+  // address matches what they intended without leaving the chat.
+  const destinationHtml = d.destinationAddressLines && d.destinationAddressLines.length > 0
+    ? `<tr>
+        <td colspan="2" style="padding:14px 12px 6px 12px;font-size:11px;color:#9C9892;text-transform:uppercase;letter-spacing:1.4px;border-top:1px solid #E2DFD7;">Ship to</td>
+      </tr>
+      <tr>
+        <td colspan="2" style="padding:4px 12px 12px 12px;font-size:13px;color:#3A3A3A;line-height:1.5;">
+          ${d.destinationAddressLines.map((l) => escapeXml(l)).join("<br />")}
+        </td>
+      </tr>`
+    : "";
+
   const trackingHtml =
     d.carrier && d.trackingNumber
       ? `<tr>
@@ -485,6 +542,7 @@ export function buildReceiptHtmlBlock(d: ReceiptBreakdown): string {
       <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;">
         ${sumRowsHtml}
         ${parcelHtml}
+        ${destinationHtml}
         ${trackingHtml}
         <tr>
           <td style="padding:14px 12px;font-size:13px;color:#0A0A0A;font-weight:600;border-top:2px solid #0A0A0A;">Total charged to date</td>
@@ -545,6 +603,14 @@ export function buildReceiptText(d: ReceiptBreakdown): string {
     out.push("------");
     out.push(`  Dimensions      ${formatDims(d)}`);
     out.push(`  Total weight    ${formatWeightOz(d.parcelWeightOz)}`);
+  }
+  if (d.destinationAddressLines && d.destinationAddressLines.length > 0) {
+    out.push("");
+    out.push("SHIP TO");
+    out.push("-------");
+    for (const line of d.destinationAddressLines) {
+      out.push(`  ${line}`);
+    }
   }
   if (d.carrier && d.trackingNumber) {
     out.push("");

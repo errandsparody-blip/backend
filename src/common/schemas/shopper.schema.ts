@@ -20,6 +20,10 @@ export const ShopperRequestStatusValues = [
   "AWAITING_INTAKE_PAYMENT",
   "PAID",
   "PROCURING",
+  // Migration 0021 — Phase 2 shopper redesign. Items have been purchased
+  // and we're waiting for them to physically land at the warehouse before
+  // shipping onward to the buyer.
+  "AWAITING_DELIVERY",
   "AWAITING_RECONCILIATION",
   "READY_TO_SHIP",
   "SHIPPED",
@@ -270,6 +274,10 @@ export const adminSetShopperShippingSchema = z.object({
     .max(80_000, "Weight too large.")
     .nullable()
     .optional(),
+  // Migration 0021 — admin can update the destination address from the
+  // shipping panel. We accept the same shape used at intake, plus a `null`
+  // shortcut to clear (rarely needed; mostly here for symmetry).
+  shippingAddress: shopperShippingAddressSchema.nullable().optional(),
 }).refine(
   (v) => v.useCalculated === true || typeof v.shippingCostCents === "number",
   {

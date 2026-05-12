@@ -1,18 +1,19 @@
 /**
  * Admin Shopper controller — operator + finance endpoints.
  *
- *   GET    /v1/admin/shopper                          — queue / list
- *   GET    /v1/admin/shopper/:id                      — full detail (incl. messages)
- *   POST   /v1/admin/shopper/:id/start                — PAID → PROCURING
- *   PATCH  /v1/admin/shopper/:id/lines/:lineId        — set actuals + status
- *   POST   /v1/admin/shopper/:id/shipping             — set shipping cost + method
- *   POST   /v1/admin/shopper/:id/finalize             — compute follow-up + transition
- *   POST   /v1/admin/shopper/:id/followup/send        — issue Checkout (positive) /
- *                                                      Refund (negative) / skip (zero)
- *   POST   /v1/admin/shopper/:id/ship                 — attach carrier + tracking
- *   POST   /v1/admin/shopper/:id/cancel               — cancel ± refund
- *   POST   /v1/admin/shopper/:id/messages             — admin posts to thread
- *   POST   /v1/admin/shopper/:id/read                 — admin marks buyer messages read
+ *   GET    /v1/admin/shopper                              — queue / list
+ *   GET    /v1/admin/shopper/:id                          — full detail (incl. messages)
+ *   POST   /v1/admin/shopper/:id/start                    — PAID → PROCURING
+ *   PATCH  /v1/admin/shopper/:id/lines/:lineId            — set procurement status + notes
+ *   POST   /v1/admin/shopper/:id/shipping                 — set method + parcel + dest
+ *   POST   /v1/admin/shopper/:id/delivered-to-warehouse   — AWAITING_DELIVERY → READY_TO_SHIP
+ *   POST   /v1/admin/shopper/:id/finalize                 — legacy reconciliation flow (kept
+ *                                                          for in-flight pre-redesign rows)
+ *   POST   /v1/admin/shopper/:id/followup/send            — legacy: issue Checkout/Refund
+ *   POST   /v1/admin/shopper/:id/ship                     — attach carrier + tracking
+ *   POST   /v1/admin/shopper/:id/cancel                   — cancel ± refund
+ *   POST   /v1/admin/shopper/:id/messages                 — admin posts to thread
+ *   POST   /v1/admin/shopper/:id/read                     — admin marks buyer messages read
  *
  * Roles:
  *   - WAREHOUSE_OPERATOR / FINANCE_ADMIN / SUPER_ADMIN — most actions.
@@ -141,6 +142,23 @@ export class AdminShopperController {
     @Param("id", new ParseUUIDPipe()) id: string,
   ) {
     return this.requests.startProcurement({ requestId: id, actorId: user.sub });
+  }
+
+  /**
+   * Migration 0021 — admin confirms the items have landed at the warehouse
+   * and the request can move to READY_TO_SHIP. No body required; the action
+   * is idempotent at the transition level (a second call would 409).
+   */
+  @Post(":id/delivered-to-warehouse")
+  @HttpCode(HttpStatus.OK)
+  deliveredToWarehouse(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.requests.markDeliveredToWarehouse({
+      requestId: id,
+      actorId: user.sub,
+    });
   }
 
   @Patch(":id/lines/:lineId")

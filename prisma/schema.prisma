@@ -1024,6 +1024,12 @@ enum ShopperRequestStatus {
   AWAITING_INTAKE_PAYMENT
   PAID
   PROCURING
+  // Migration 0021 — admin marked all lines as PURCHASED / UNAVAILABLE.
+  // Items are bought, waiting for them to arrive at the warehouse before
+  // they can ship onward. Replaces the AWAITING_RECONCILIATION + followup-
+  // payment flow which has been retired (estimates are now the price; if
+  // actuals differ, admin cancels and asks buyer to rebook).
+  AWAITING_DELIVERY
   AWAITING_RECONCILIATION
   READY_TO_SHIP
   SHIPPED
