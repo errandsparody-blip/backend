@@ -76,7 +76,69 @@ CREATE INDEX "ledger_entries_shopper_request_id_created_at_idx"
   ON "ledger_entries" ("shopper_request_id", "created_at");
 
 -- ---------------------------------------------------------------------------
--- 6. Backfill. For every shopper request that was successfully paid at
+-- 6. Rebuild the `ledger_sign_invariant` CHECK constraint.
+--
+-- The original constraint (migration 0005) only knew the 9 vendor-wallet
+-- enum values and enforced their sign convention (DEPOSIT > 0, ONBOARDING
+-- < 0, etc.). Phase 3b adds shopper-side entries whose sign convention
+-- diverges from the vendor convention on the same enum values — most
+-- notably SHIPPING, which is a debit (< 0) for vendors but a credit
+-- (> 0) for shoppers (the buyer paying us for shipping).
+--
+-- The new constraint branches on which subject column is populated:
+--
+--   * vendor_id IS NOT NULL  → vendor wallet rules (unchanged + the new
+--                              RECEIVING_HOLD_FEE debit added in Phase 2).
+--   * shopper_request_id IS NOT NULL → shopper request rules:
+--                              POSITIVE = revenue, NEGATIVE = costs/refunds.
+--
+-- Adding a check constraint validates ALL existing rows. The pre-0019
+-- rows are all vendor-side and continue to satisfy the vendor branch
+-- (it's a superset of the original constraint), so the validation pass
+-- never has to scan anything but the existing well-typed rows.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE "ledger_entries"
+  DROP CONSTRAINT IF EXISTS ledger_sign_invariant;
+
+ALTER TABLE "ledger_entries"
+  ADD CONSTRAINT ledger_sign_invariant CHECK (
+    -- Vendor-side wallet entries. Sign convention: credits positive,
+    -- debits negative (same as the original 0005 constraint, plus the
+    -- new RECEIVING_HOLD_FEE that debits the vendor wallet when admin
+    -- places a hold).
+    (vendor_id IS NOT NULL AND (
+      (type = 'DEPOSIT'           AND amount_cents > 0) OR
+      (type = 'MANUAL_CREDIT'     AND amount_cents > 0) OR
+      (type = 'ONBOARDING'        AND amount_cents < 0) OR
+      (type = 'STORAGE'           AND amount_cents < 0) OR
+      (type = 'FULFILLMENT'       AND amount_cents < 0) OR
+      (type = 'SHIPPING'          AND amount_cents < 0) OR
+      (type = 'RETURN'            AND amount_cents < 0) OR
+      (type = 'MANUAL_DEBIT'      AND amount_cents < 0) OR
+      (type = 'RECEIVING_HOLD_FEE' AND amount_cents < 0) OR
+      -- REVERSAL can swing either way: a reversed charge becomes a
+      -- credit; a reversed deposit becomes a debit. The constraint
+      -- intentionally doesn't pin its sign.
+      (type = 'REVERSAL')
+    ))
+    OR
+    -- Shopper-request entries. Sign convention:
+    --   POSITIVE = money flowed INTO the platform (revenue / income).
+    --   NEGATIVE = money flowed OUT (refunds, supplier costs we paid).
+    (shopper_request_id IS NOT NULL AND (
+      (type = 'PARTNERSHIP_ITEM_COST' AND amount_cents >= 0) OR
+      (type = 'PURCHASE_FEE'          AND amount_cents >= 0) OR
+      (type = 'SHIPPING'              AND amount_cents >= 0) OR
+      -- REFUND is the only shopper category that's strictly negative.
+      -- The back-fill below doesn't write any of these; future code
+      -- in ShopperLedgerService inserts them on Stripe refund events.
+      (type = 'REFUND'                AND amount_cents <= 0)
+    ))
+  );
+
+-- ---------------------------------------------------------------------------
+-- 7. Backfill. For every shopper request that was successfully paid at
 -- intake, write three ledger rows: PARTNERSHIP_ITEM_COST (items),
 -- PURCHASE_FEE (our commission), and SHIPPING (if the actual shipping
 -- cost is known). The enum values these rows reference were committed
