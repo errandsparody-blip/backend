@@ -24,6 +24,21 @@ const optionalDimension = dimensionSchema.nullable().optional();
 // lives in for monthly storage billing. Different from PSN box mix.
 const storageTierSchema = z.enum(["SMALL", "MEDIUM", "LARGE", "X_LARGE", "PALLET"]);
 
+// Optional product image URL. Must be a fully-qualified http(s) URL — we
+// don't accept raw paths so a typo can't poison the buyer-visible view.
+// Capped at 2048 chars (de-facto browser URL limit). An empty string from
+// the form normalises to `null`, which clears the image. `null` and
+// `undefined` both round-trip as "no image set".
+const imageUrlField = z
+  .string()
+  .trim()
+  .url("Must be a fully-qualified URL.")
+  .max(2048, "URL is too long.")
+  .refine((u) => /^https?:\/\//i.test(u), "Only http/https URLs are accepted.")
+  .nullable()
+  .optional()
+  .or(z.literal("").transform(() => null));
+
 export const createProductSchema = z.object({
   code: productCodeSchema,
   name: z.string().min(2).max(120),
@@ -36,6 +51,7 @@ export const createProductSchema = z.object({
   widthIn: optionalDimension,
   heightIn: optionalDimension,
   storageTier: storageTierSchema.default("SMALL"),
+  imageUrl: imageUrlField,
 });
 export type CreateProductInput = z.infer<typeof createProductSchema>;
 

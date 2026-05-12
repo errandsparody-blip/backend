@@ -38,14 +38,21 @@ export interface PublicProduct {
   widthIn: number | null;
   heightIn: number | null;
   storageTier: "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET";
+  /**
+   * Migration 0022 — optional product image (URL into our R2 bucket).
+   * `null` when the vendor hasn't uploaded an image. NEVER locked — image
+   * is purely cosmetic and editing it never affects shipping, customs,
+   * or storage billing, so we keep it editable even after stock arrives.
+   */
+  imageUrl: string | null;
   status: string;
   createdAt: Date;
   updatedAt: Date;
   /**
    * True once any SKU exists for this product (i.e. stock has been
-   * received). Locks all fields except `status`. Computed at read time;
-   * the frontend uses it to render the form as read-only and to surface
-   * the "archive + recreate" hint.
+   * received). Locks all fields except `status` and `imageUrl`. Computed
+   * at read time; the frontend uses it to render the form as read-only
+   * and to surface the "archive + recreate" hint.
    */
   locked: boolean;
 }
@@ -83,6 +90,10 @@ export class ProductService {
         ...(input.widthIn != null ? { widthIn: input.widthIn } : {}),
         ...(input.heightIn != null ? { heightIn: input.heightIn } : {}),
         storageTier: input.storageTier,
+        // Migration 0022 — optional product image. Cast keeps the call
+        // compiling against the stale generated client until Railway
+        // re-runs `prisma generate` on next deploy.
+        ...(input.imageUrl != null ? { imageUrl: input.imageUrl } : {}),
       };
       const product = await this.prisma.product.create({
         data: data as Prisma.ProductUncheckedCreateInput,
@@ -181,6 +192,11 @@ export class ProductService {
     const skuCount = await this.prisma.sku.count({
       where: { productId: id, vendorId },
     });
+    // NOTE: `imageUrl` is deliberately NOT in this list. Images are
+    // cosmetic — they don't affect shipping rates, customs, storage
+    // billing, or pick lists. Letting vendors refresh a stale or
+    // low-quality image even after stock has arrived is a UX win with
+    // zero compliance cost.
     const lockableFields: Array<keyof UpdateProductInput> = [
       "name",
       "variant",
@@ -233,7 +249,11 @@ export class ProductService {
         ...(patch.heightIn != null ? { heightIn: patch.heightIn } : {}),
         ...(patch.storageTier !== undefined ? { storageTier: patch.storageTier } : {}),
         ...(patch.status !== undefined ? { status: patch.status } : {}),
-      },
+        // Image: explicitly accept `null` so a vendor can clear an
+        // existing image (e.g. they uploaded the wrong one). The Zod
+        // layer above normalised "" → null already.
+        ...(patch.imageUrl !== undefined ? { imageUrl: patch.imageUrl } : {}),
+      } as Prisma.ProductUncheckedUpdateInput,
     });
 
     await this.audit.log({
@@ -274,6 +294,11 @@ export class ProductService {
       storageTier:
         ((p as unknown as { storageTier?: PublicProduct["storageTier"] }).storageTier ??
           "SMALL") as PublicProduct["storageTier"],
+      // Stale-client guard: pre-`prisma generate` builds don't have the
+      // `imageUrl` field on the model type. We still want the runtime
+      // value (the column exists in the DB after migration 0022).
+      imageUrl:
+        (p as unknown as { imageUrl?: string | null }).imageUrl ?? null,
       status: p.status,
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,

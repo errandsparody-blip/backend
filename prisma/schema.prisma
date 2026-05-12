@@ -272,6 +272,11 @@ model Product {
   // working without forcing a backfill.
   storageTier     StorageTier @default(SMALL) @map("storage_tier")
 
+  // Migration 0022 — optional product image. URL points at our R2 bucket;
+  // upload flow mirrors shopper attachments (presigned PUT). Nullable so
+  // existing products keep working without backfill.
+  imageUrl        String?  @map("image_url")
+
   status          String   @default("ACTIVE")  // ACTIVE | ARCHIVED
 
   createdAt       DateTime @default(now()) @map("created_at")
