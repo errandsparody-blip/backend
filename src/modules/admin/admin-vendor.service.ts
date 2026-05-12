@@ -387,10 +387,17 @@ export class AdminVendorService {
         },
         _count: { _all: true },
       }),
-      // Outstanding receiving holds (Phase 2 admin workflow). Each unresolved
-      // hold is a vendor liability we surface so finance can chase it.
-      // Cast through `unknown` because the generated Prisma client may not
-      // yet know about psnHold (migration 0020 added it).
+      // Outstanding receiving holds (Phase 2 admin workflow). The PsnHold
+      // model uses `status: PsnHoldStatus` (PENDING_PAYMENT / PAID /
+      // CANCELLED / AUTO_RETURNED) — "outstanding" means status =
+      // PENDING_PAYMENT. The `paidAt` timestamp captures when the wallet
+      // debit cleared (null until then).
+      //
+      // The cast through `unknown` rides out a stale generated Prisma
+      // client; the field names below MUST match the live schema or this
+      // call 500s. Validated against schema.prisma:
+      //   id, psnId, extraChargeCents, reasonCode, reasonNote, status,
+      //   createdAt, releaseAfter, paidAt, ledgerEntryId
       (this.prisma as unknown as {
         psnHold: {
           findMany: (args: unknown) => Promise<
@@ -400,32 +407,52 @@ export class AdminVendorService {
               extraChargeCents: number;
               reasonCode: string;
               reasonNote: string;
+              status: string;
               createdAt: Date;
               releaseAfter: Date;
-              resolvedAt: Date | null;
-              vendorPaidAt: Date | null;
+              paidAt: Date | null;
             }>
           >;
         };
-      }).psnHold.findMany({
-        where: {
-          psn: { vendorId },
-          resolvedAt: null,
-        },
-        orderBy: { createdAt: "desc" },
-        take: 10,
-        select: {
-          id: true,
-          psnId: true,
-          extraChargeCents: true,
-          reasonCode: true,
-          reasonNote: true,
-          createdAt: true,
-          releaseAfter: true,
-          resolvedAt: true,
-          vendorPaidAt: true,
-        },
-      }),
+      }).psnHold
+        .findMany({
+          where: {
+            psn: { vendorId },
+            status: "PENDING_PAYMENT",
+          },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+          select: {
+            id: true,
+            psnId: true,
+            extraChargeCents: true,
+            reasonCode: true,
+            reasonNote: true,
+            status: true,
+            createdAt: true,
+            releaseAfter: true,
+            paidAt: true,
+          },
+        })
+        // Defensive — psnHold ships in migration 0020 but if a future
+        // schema change drifts the column names, we don't want it to
+        // 500 the entire overview endpoint. Return an empty list and
+        // log so the rest of the page still renders.
+        .catch((err: unknown) => {
+          // eslint-disable-next-line no-console
+          console.warn("[admin-vendor.overview] psnHold query failed:", err);
+          return [] as Array<{
+            id: string;
+            psnId: string;
+            extraChargeCents: number;
+            reasonCode: string;
+            reasonNote: string;
+            status: string;
+            createdAt: Date;
+            releaseAfter: Date;
+            paidAt: Date | null;
+          }>;
+        }),
     ]);
 
     // 3. Fold ledger group-by into a typed bucket map so the frontend doesn't
@@ -580,7 +607,12 @@ export class AdminVendorService {
         reasonNote: h.reasonNote,
         createdAt: h.createdAt.toISOString(),
         releaseAfter: h.releaseAfter.toISOString(),
-        vendorPaidAt: h.vendorPaidAt?.toISOString() ?? null,
+        // PsnHold has a `paidAt` column (null while the hold is
+        // PENDING_PAYMENT). We surface it under `vendorPaidAt` on the
+        // wire so the frontend doesn't have to know the underlying
+        // column name — matches the rest of this payload's "the
+        // *vendor* side of it" framing.
+        vendorPaidAt: h.paidAt?.toISOString() ?? null,
       })),
     };
   }
