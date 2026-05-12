@@ -142,6 +142,9 @@ model User {
   // NULL on the way out.
   shopperIdVerified       ShopperRequest[] @relation("ShopperIdVerifier")
   shopperWireConfirmed    ShopperRequest[] @relation("ShopperWireConfirmer")
+  // Migration 0024 — PSN chat. Vendor users + admins both sit on this
+  // back-relation; the sender's role disambiguates them in the UI.
+  psnMessages             PsnMessage[]     @relation("PsnMessageSender")
 
   @@index([role])
   @@index([vendorId])
@@ -376,10 +379,42 @@ model Psn {
   lines               PsnLine[]
   exceptions          PackagingException[]
   holds               PsnHold[]
+  // Migration 0024 — per-PSN chat thread for vendor ↔ admin coordination.
+  messages            PsnMessage[]
 
   @@index([vendorId, status])
   @@index([status, createdAt])
   @@map("psns")
+}
+
+// Migration 0024 — sender of a PsnMessage.
+enum PsnMessageSender {
+  VENDOR
+  ADMIN
+}
+
+// Migration 0024 — per-PSN chat row. Mirrors the ShopperMessage shape
+// down at line 1246 so consumers (mark-read, list, post) can lift the
+// same logic without bespoke per-feature differences.
+model PsnMessage {
+  id              String           @id @default(uuid()) @db.Uuid
+  psnId           String           @map("psn_id") @db.Uuid
+  psn             Psn              @relation(fields: [psnId], references: [id], onDelete: Cascade)
+
+  sender          PsnMessageSender
+  senderUserId    String?          @map("sender_user_id") @db.Uuid
+  senderUser      User?            @relation("PsnMessageSender", fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  body            String
+  attachmentUrls  String[]         @map("attachment_urls")
+
+  readByVendorAt  DateTime?        @map("read_by_vendor_at")
+  readByAdminAt   DateTime?        @map("read_by_admin_at")
+
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  @@index([psnId, createdAt])
+  @@map("psn_messages")
 }
 
 // Migration 0020 — PSN hold lifecycle. Each hold is one cycle of
@@ -424,6 +459,9 @@ model PsnLine {
   receivedQty   Int      @default(0) @map("received_qty")
   acceptedQty   Int      @default(0) @map("accepted_qty")
   damagedQty    Int      @default(0) @map("damaged_qty")
+  // Migration 0024 — items declared but not in the box (lost / mispacked).
+  // Distinct from damagedQty because the financial story is different.
+  missingQty    Int      @default(0) @map("missing_quantity")
 
   notes         String?
 

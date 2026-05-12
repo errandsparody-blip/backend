@@ -26,13 +26,16 @@ import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import {
   createPsnSchema,
   listPsnsSchema,
+  postPsnMessageSchema,
   updatePsnDraftSchema,
   type CreatePsnInput,
   type ListPsnsInput,
+  type PostPsnMessageInput,
   type UpdatePsnDraftInput,
 } from "../../common/schemas/psn.schema";
 
 import { AdminPsnService } from "./admin-psn.service";
+import { PsnMessageService } from "./psn-message.service";
 import { PsnService } from "./psn.service";
 
 @Controller({ path: "psns", version: "1" })
@@ -47,6 +50,7 @@ export class PsnController {
     // delegates to it. Tenant scoping is enforced inside the method via
     // vendorId comparison.
     private readonly adminPsns: AdminPsnService,
+    private readonly messages: PsnMessageService,
   ) {}
 
   @Get()
@@ -151,5 +155,49 @@ export class PsnController {
     @Param("id", new ParseUUIDPipe()) id: string,
   ) {
     return this.adminPsns.payHold(id, user.vendorId!, user.sub);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration 0024 — per-PSN chat (vendor side)
+  //
+  // `psns.get` already enforces tenant scoping (only the owning vendor
+  // can resolve the PSN), so calling it before each message action gives
+  // us the IDOR guard for free: an attempt to chat on another vendor's
+  // PSN throws 404 before the message service is touched.
+  // ---------------------------------------------------------------------------
+
+  @Get(":id/messages")
+  async listMessages(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    await this.psns.get(user.vendorId!, id);
+    return this.messages.listForPsn(id);
+  }
+
+  @Post(":id/messages")
+  @HttpCode(HttpStatus.OK)
+  async postMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(postPsnMessageSchema)) body: PostPsnMessageInput,
+  ) {
+    await this.psns.get(user.vendorId!, id);
+    return this.messages.postFromVendor({
+      psnId: id,
+      senderUserId: user.sub,
+      body: body.body,
+      attachmentUrls: body.attachmentUrls,
+    });
+  }
+
+  @Post(":id/messages/read")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async markRead(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ): Promise<void> {
+    await this.psns.get(user.vendorId!, id);
+    return this.messages.markReadByVendor(id);
   }
 }

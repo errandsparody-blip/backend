@@ -74,7 +74,28 @@ export class AdminPsnService {
     const psn = await this.prisma.psn.findUnique({
       where: { id },
       include: {
-        lines: true,
+        // Migration 0024 — include the product's storageTier on each
+        // line so the admin receive page can render a "Tier size"
+        // column (dimensions sourced from the tier_dimensions config
+        // row on the frontend). The product include also keeps the
+        // existing code/name/variant available.
+        lines: {
+          include: {
+            product: {
+              select: {
+                id: true,
+                code: true,
+                name: true,
+                variant: true,
+                // `storageTier` is on the Product model (migration 0010).
+                // Cast through unknown because Railway's stale Prisma
+                // client may not know about this column until the next
+                // `prisma generate` runs.
+                ...({ storageTier: true } as Record<string, unknown>),
+              },
+            },
+          },
+        },
         vendor: { select: { id: true, businessName: true, country: true } },
         exceptions: true,
         // Migration 0020 — include hold lifecycle so the receive page can
@@ -172,6 +193,10 @@ export class AdminPsnService {
             receivedQty: total,
             acceptedQty: submitted.acceptedQty,
             damagedQty: submitted.damagedQty,
+            // Migration 0024 — capture the missing count alongside damaged.
+            // Cast around the stale Prisma client (the column is in 0024,
+            // generated client catches up post-deploy).
+            ...({ missingQty: submitted.missingQty ?? 0 } as Record<string, unknown>),
             ...(skuId ? { skuId } : {}),
             ...(submitted.notes !== undefined ? { notes: submitted.notes } : {}),
           },

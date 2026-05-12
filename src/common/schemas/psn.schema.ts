@@ -40,6 +40,10 @@ export const receiveLineSchema = z.object({
   lineId: z.string().uuid(),
   acceptedQty: z.number().int().nonnegative(),
   damagedQty: z.number().int().nonnegative().default(0),
+  // Migration 0024 — items declared but not in the box (courier loss,
+  // mispack, etc.). Distinct from damagedQty because the financial story
+  // is different; persisted for the audit trail.
+  missingQty: z.number().int().nonnegative().default(0),
   notes: z.string().max(500).optional(),
 });
 export type ReceiveLineInput = z.infer<typeof receiveLineSchema>;
@@ -48,6 +52,18 @@ export const completeReceivingSchema = z.object({
   lines: z.array(receiveLineSchema).min(1),
 });
 export type CompleteReceivingInput = z.infer<typeof completeReceivingSchema>;
+
+// Migration 0024 — PSN chat thread. Both vendor + admin post into the
+// same shape; the controller derives sender from the authenticated user.
+export const postPsnMessageSchema = z.object({
+  body: z.string().trim().min(1, "Message can't be empty.").max(10_000),
+  attachmentUrls: z
+    .array(z.string().url().max(2048))
+    .max(10, "Up to 10 attachments per message.")
+    .optional()
+    .default([]),
+});
+export type PostPsnMessageInput = z.infer<typeof postPsnMessageSchema>;
 
 // ---------------------------------------------------------------------------
 // Phase 2 — admin receiving actions beyond Accept / Edit & Accept.

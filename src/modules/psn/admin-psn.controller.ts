@@ -19,21 +19,27 @@ import {
   completeReceivingSchema,
   listPsnsSchema,
   placeHoldSchema,
+  postPsnMessageSchema,
   rejectPsnSchema,
   requestPsnReturnSchema,
   type CompleteReceivingInput,
   type ListPsnsInput,
   type PlaceHoldInput,
+  type PostPsnMessageInput,
   type RejectPsnInput,
   type RequestPsnReturnInput,
 } from "../../common/schemas/psn.schema";
 
 import { AdminPsnService } from "./admin-psn.service";
+import { PsnMessageService } from "./psn-message.service";
 
 @Controller({ path: "admin/psns", version: "1" })
 @Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
 export class AdminPsnController {
-  constructor(private readonly admin: AdminPsnService) {}
+  constructor(
+    private readonly admin: AdminPsnService,
+    private readonly messages: PsnMessageService,
+  ) {}
 
   @Get()
   list(@Query(new ZodValidationPipe(listPsnsSchema)) q: ListPsnsInput) {
@@ -102,5 +108,44 @@ export class AdminPsnController {
     @Body(new ZodValidationPipe(requestPsnReturnSchema)) body: RequestPsnReturnInput,
   ) {
     return this.admin.requestReturn(id, user.sub, body);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration 0024 — per-PSN chat (admin side)
+  // ---------------------------------------------------------------------------
+
+  /** GET /v1/admin/psns/:id/messages — full thread for this PSN. */
+  @Get(":id/messages")
+  listMessages(@Param("id", new ParseUUIDPipe()) id: string) {
+    return this.messages.listForPsn(id);
+  }
+
+  /**
+   * POST /v1/admin/psns/:id/messages — admin posts a message. Fans an
+   * in-app notification + email to every active user on the vendor org.
+   */
+  @Post(":id/messages")
+  @HttpCode(HttpStatus.OK)
+  postMessage(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(postPsnMessageSchema)) body: PostPsnMessageInput,
+  ) {
+    return this.messages.postFromAdmin({
+      psnId: id,
+      senderUserId: user.sub,
+      body: body.body,
+      attachmentUrls: body.attachmentUrls,
+    });
+  }
+
+  /**
+   * POST /v1/admin/psns/:id/messages/read — drop the admin-side unread
+   * badge for this PSN's vendor-authored messages to zero.
+   */
+  @Post(":id/messages/read")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  markRead(@Param("id", new ParseUUIDPipe()) id: string): Promise<void> {
+    return this.messages.markReadByAdmin(id);
   }
 }
