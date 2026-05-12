@@ -13,6 +13,7 @@
  */
 
 import {
+  Body,
   Controller,
   Get,
   HttpCode,
@@ -39,6 +40,23 @@ const listNotificationsSchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(50),
 });
 type ListInput = z.infer<typeof listNotificationsSchema>;
+
+// Category names are the leading segment of `type` — see
+// NotificationService.categoryFromType. We restrict to the known set so
+// a buggy client can't dump random strings into `type LIKE`.
+const readCategorySchema = z.object({
+  category: z.enum([
+    "psn",
+    "order",
+    "return",
+    "wallet",
+    "shopper",
+    "kyc",
+    "verification",
+    "vendor",
+  ]),
+});
+type ReadCategoryInput = z.infer<typeof readCategorySchema>;
 
 @Controller({ path: "notifications", version: "1" })
 @Roles(
@@ -77,6 +95,25 @@ export class NotificationController {
   @HttpCode(HttpStatus.OK)
   markAllRead(@CurrentUser() user: AuthenticatedUser) {
     return this.notifications.markAllReadForRecipient(this.scopeFor(user));
+  }
+
+  /**
+   * POST /v1/notifications/read-category
+   *
+   * Mark every unread notification whose `type` starts with `<category>.`
+   * as read. The sidebar fires this on nav-item click so the badge
+   * drops to 0 as soon as the user is looking at the matching page.
+   */
+  @Post("read-category")
+  @HttpCode(HttpStatus.OK)
+  markCategoryRead(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body(new ZodValidationPipe(readCategorySchema)) body: ReadCategoryInput,
+  ) {
+    return this.notifications.markCategoryReadForRecipient(
+      this.scopeFor(user),
+      body.category,
+    );
   }
 
   /**

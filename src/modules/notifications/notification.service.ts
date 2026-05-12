@@ -234,6 +234,36 @@ export class NotificationService {
     return { updated: r.count };
   }
 
+  /**
+   * Mark every unread notification of the given category as read.
+   * Category matches the leading segment of `type` (psn / order /
+   * return / wallet / etc.) — same bucketing as `categoryFromType`.
+   *
+   * Used by the sidebar: when the user clicks a nav item that has an
+   * unread badge, the front-end fires this so the count drops to 0 as
+   * soon as they're on the relevant page. The semantic is "I'm
+   * looking at it now, you can stop reminding me" — not a hard read
+   * receipt on every individual row.
+   */
+  async markCategoryReadForRecipient(
+    scope: { vendorId?: string; userId?: string },
+    category: string,
+  ): Promise<{ updated: number }> {
+    const base = this.scopeFilter(scope);
+    // Filter by the type prefix. Postgres' `startsWith` is exposed via
+    // Prisma's `type: { startsWith: ... }` filter. We append a dot so
+    // `psn` matches `psn.submitted` but not `psn_legacy`.
+    const r = await this.prisma.notification.updateMany({
+      where: {
+        ...base,
+        readAt: null,
+        type: { startsWith: `${category}.` },
+      },
+      data: { readAt: new Date() },
+    });
+    return { updated: r.count };
+  }
+
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
