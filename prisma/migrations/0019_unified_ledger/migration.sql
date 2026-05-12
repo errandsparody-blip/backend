@@ -8,37 +8,29 @@
 -- This migration unifies the two so the admin Finance page can render
 -- "every dollar movement on the platform" in one filterable view.
 --
--- Schema changes:
---   1. Extend `LedgerEntryType` enum with 4 new categories.
---   2. Make `vendor_id` nullable so shopper-only entries are valid.
---   3. Make `balance_after_cents` nullable for the same reason (a balance
+-- NOTE: The enum extension that *used* to live at the top of this file was
+-- moved into migration 0018b_ledger_enum_values. Postgres rejects "use of
+-- new enum value" in the same transaction that added it (SQLSTATE 55P04),
+-- and Prisma wraps each migration file in a single transaction. Splitting
+-- the enum adds into their own earlier file commits them before the
+-- back-fill below references them.
+--
+-- Schema changes (this file):
+--   1. Make `vendor_id` nullable so shopper-only entries are valid.
+--   2. Make `balance_after_cents` nullable for the same reason (a balance
 --      only makes sense for vendor wallets; shoppers don't have one).
---   4. Add nullable `shopper_request_id` FK.
---   5. CHECK constraint: exactly one of vendor_id / shopper_request_id is
+--   3. Add nullable `shopper_request_id` FK.
+--   4. CHECK constraint: exactly one of vendor_id / shopper_request_id is
 --      non-null per row.
---   6. Index for shopper-side lookups.
---   7. Backfill: write PARTNERSHIP_ITEM_COST + PURCHASE_FEE + SHIPPING
+--   5. Index for shopper-side lookups.
+--   6. Backfill: write PARTNERSHIP_ITEM_COST + PURCHASE_FEE + SHIPPING
 --      rows for every successfully-paid shopper request, dated to the
 --      intake-paid timestamp so the chronology matches reality.
 --
 -- Forward-only. Rollback drops the new rows + the new column.
 
 -- ---------------------------------------------------------------------------
--- 1. New enum values.
--- ---------------------------------------------------------------------------
--- Postgres requires ALTER TYPE ADD VALUE to run outside a transaction OR
--- be the only statement in a migration. Prisma's migration runner wraps
--- each file in a single transaction by default. We split into a separate
--- file would be the canonical fix; here we use `IF NOT EXISTS` (Postgres
--- 12+) which is transaction-safe.
-
-ALTER TYPE "LedgerEntryType" ADD VALUE IF NOT EXISTS 'RECEIVING_HOLD_FEE';
-ALTER TYPE "LedgerEntryType" ADD VALUE IF NOT EXISTS 'PARTNERSHIP_ITEM_COST';
-ALTER TYPE "LedgerEntryType" ADD VALUE IF NOT EXISTS 'PURCHASE_FEE';
-ALTER TYPE "LedgerEntryType" ADD VALUE IF NOT EXISTS 'REFUND';
-
--- ---------------------------------------------------------------------------
--- 2 + 3. Relax NOT NULL on vendor_id and balance_after_cents.
+-- 1 + 2. Relax NOT NULL on vendor_id and balance_after_cents.
 -- ---------------------------------------------------------------------------
 
 ALTER TABLE "ledger_entries"
@@ -46,7 +38,7 @@ ALTER TABLE "ledger_entries"
   ALTER COLUMN "balance_after_cents" DROP NOT NULL;
 
 -- ---------------------------------------------------------------------------
--- 4. New nullable FK to shopper_requests.
+-- 3. New nullable FK to shopper_requests.
 -- ON DELETE RESTRICT: the ledger is supposed to be immutable. Deleting a
 -- shopper request that has ledger rows would corrupt the audit trail, so
 -- the DB refuses outright. If we ever need to forget a shopper request
@@ -64,7 +56,7 @@ ALTER TABLE "ledger_entries"
   ON UPDATE CASCADE;
 
 -- ---------------------------------------------------------------------------
--- 5. Exactly-one-subject CHECK.
+-- 4. Exactly-one-subject CHECK.
 -- Postgres treats NULL <> NULL as NULL (not FALSE), so the bitwise XOR
 -- trick `(a IS NOT NULL) <> (b IS NOT NULL)` evaluates correctly here.
 -- ---------------------------------------------------------------------------
@@ -77,17 +69,18 @@ ALTER TABLE "ledger_entries"
   );
 
 -- ---------------------------------------------------------------------------
--- 6. Index for shopper-side lookups (chronological per-request).
+-- 5. Index for shopper-side lookups (chronological per-request).
 -- ---------------------------------------------------------------------------
 
 CREATE INDEX "ledger_entries_shopper_request_id_created_at_idx"
   ON "ledger_entries" ("shopper_request_id", "created_at");
 
 -- ---------------------------------------------------------------------------
--- 7. Backfill. For every shopper request that was successfully paid at
+-- 6. Backfill. For every shopper request that was successfully paid at
 -- intake, write three ledger rows: PARTNERSHIP_ITEM_COST (items),
 -- PURCHASE_FEE (our commission), and SHIPPING (if the actual shipping
--- cost is known).
+-- cost is known). The enum values these rows reference were committed
+-- in migration 0018b, so by the time this runs they're safe to use.
 --
 -- Amount sign convention for shopper rows:
 --   - POSITIVE = money flowed INTO the platform (revenue / income side)
