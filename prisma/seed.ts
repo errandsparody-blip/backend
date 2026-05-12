@@ -67,7 +67,12 @@ async function main(): Promise<void> {
   await upsertConfig("tier_dimensions", TIER_DIMENSIONS, "Standardized inbound box dimensions per tier.");
   await upsertConfig("repackaging_fees", REPACKAGING_FEES, "Per-tier repackaging fees for non-standard inbound packaging.");
   await upsertConfig("quarantine_daily_fee_cents", QUARANTINE_DAILY_FEE_CENTS, "Daily fee for the 14-day Hold disposition.");
-  await upsertConfig("agreement_version", "1.0", "Current Vendor Agreement version users must accept.");
+  // 1.1 — May 2026 refresh: tightened storage-tier audit language, abandoned
+  // inventory window clarified, and acceptance-trail wording aligned with the
+  // production sign-up UX. Bump again any time the legal text materially
+  // changes so the AgreementVersionGuard forces every active vendor to
+  // re-accept on their next write.
+  await upsertConfig("agreement_version", "1.1", "Current Vendor Agreement version users must accept.");
   await upsertConfig(
     "reassessment_threshold",
     { utilizationPctMax: 80, consecutiveDaysMin: 60, autoApplyAfterDays: 14 },
