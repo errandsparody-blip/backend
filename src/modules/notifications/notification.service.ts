@@ -123,24 +123,43 @@ export class NotificationService {
   }
 
   // ---------------------------------------------------------------------------
-  // Vendor-scoped reads
+  // Vendor-scoped reads (back-compat — kept so existing callers don't break)
   // ---------------------------------------------------------------------------
 
   async listForVendor(
     vendorId: string,
     input: { unreadOnly?: boolean; limit: number; cursor?: string },
   ): Promise<{ items: PublicNotification[]; nextCursor: string | null; unreadCount: number }> {
-    const where: Prisma.NotificationWhereInput = { vendorId };
-    if (input.unreadOnly) where.readAt = null;
+    return this.listForRecipient({ vendorId }, input);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Recipient-scoped reads — vendor OR admin user
+  // ---------------------------------------------------------------------------
+
+  /**
+   * List notifications for a recipient (either a vendor's whole org or a
+   * single admin user). Pass exactly one of `vendorId` / `userId`. The two
+   * scopes are disjoint by construction (vendor rows have vendorId set;
+   * admin rows have userId set) so we never need to OR them.
+   */
+  async listForRecipient(
+    scope: { vendorId?: string; userId?: string },
+    input: { unreadOnly?: boolean; limit: number; cursor?: string },
+  ): Promise<{ items: PublicNotification[]; nextCursor: string | null; unreadCount: number }> {
+    const where = this.scopeFilter(scope);
+    const whereWithRead: Prisma.NotificationWhereInput = input.unreadOnly
+      ? { ...where, readAt: null }
+      : where;
 
     const [items, unreadCount] = await Promise.all([
       this.prisma.notification.findMany({
-        where,
+        where: whereWithRead,
         take: input.limit + 1,
         orderBy: { createdAt: "desc" },
         ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
       }),
-      this.prisma.notification.count({ where: { vendorId, readAt: null } }),
+      this.prisma.notification.count({ where: { ...where, readAt: null } }),
     ]);
 
     let nextCursor: string | null = null;
@@ -151,22 +170,115 @@ export class NotificationService {
     return { items: items.map((n) => this.toPublic(n)), nextCursor, unreadCount };
   }
 
+  /**
+   * Unread notification counts bucketed by the leading segment of the
+   * notification `type`. e.g. type "psn.submitted" → bucket "psn". The
+   * frontend uses this to render per-tab badges on the sidebar.
+   *
+   * Returns `{ total, byCategory: { psn: 3, order: 2, ... } }`. Categories
+   * with zero unread are omitted to keep the payload small.
+   */
+  async unreadCountsForRecipient(
+    scope: { vendorId?: string; userId?: string },
+  ): Promise<{ total: number; byCategory: Record<string, number> }> {
+    const where = { ...this.scopeFilter(scope), readAt: null };
+    const rows = await this.prisma.notification.groupBy({
+      by: ["type"],
+      where,
+      _count: { _all: true },
+    });
+    let total = 0;
+    const byCategory: Record<string, number> = {};
+    for (const r of rows) {
+      const n = r._count._all;
+      total += n;
+      const bucket = this.categoryFromType(r.type);
+      byCategory[bucket] = (byCategory[bucket] ?? 0) + n;
+    }
+    return { total, byCategory };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mutations
+  // ---------------------------------------------------------------------------
+
+  /** Vendor-scoped mark-read. Back-compat wrapper. */
   async markRead(vendorId: string, id: string): Promise<void> {
-    const notif = await this.prisma.notification.findFirst({ where: { id, vendorId } });
+    return this.markReadForRecipient({ vendorId }, id);
+  }
+
+  /** Vendor-scoped mark-all-read. Back-compat wrapper. */
+  async markAllRead(vendorId: string): Promise<{ updated: number }> {
+    return this.markAllReadForRecipient({ vendorId });
+  }
+
+  async markReadForRecipient(
+    scope: { vendorId?: string; userId?: string },
+    id: string,
+  ): Promise<void> {
+    const where = this.scopeFilter(scope);
+    const notif = await this.prisma.notification.findFirst({ where: { ...where, id } });
     if (!notif) throw new NotFoundException();
     if (notif.readAt) return;
     await this.prisma.notification.update({ where: { id }, data: { readAt: new Date() } });
   }
 
-  async markAllRead(vendorId: string): Promise<{ updated: number }> {
+  async markAllReadForRecipient(
+    scope: { vendorId?: string; userId?: string },
+  ): Promise<{ updated: number }> {
+    const where = this.scopeFilter(scope);
     const r = await this.prisma.notification.updateMany({
-      where: { vendorId, readAt: null },
+      where: { ...where, readAt: null },
       data: { readAt: new Date() },
     });
     return { updated: r.count };
   }
 
   // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Build the Prisma `where` clause for a recipient. Exactly one of
+   * `vendorId` / `userId` must be set — we throw otherwise so a buggy
+   * caller can't accidentally fall back to a global query that would
+   * leak data across tenants.
+   */
+  private scopeFilter(scope: {
+    vendorId?: string;
+    userId?: string;
+  }): Prisma.NotificationWhereInput {
+    if (scope.vendorId && scope.userId) {
+      throw new Error("notification scope must be vendorId XOR userId");
+    }
+    if (scope.vendorId) return { vendorId: scope.vendorId };
+    if (scope.userId) return { userId: scope.userId };
+    throw new Error("notification scope requires vendorId or userId");
+  }
+
+  /**
+   * Map `type` to a sidebar category. `psn.submitted` → `psn`,
+   * `shopper.new_message` → `shopper`, etc. Unknown types fall into the
+   * `other` bucket so the total still reconciles.
+   */
+  private categoryFromType(type: string): string {
+    const first = type.split(".")[0]?.trim().toLowerCase();
+    if (!first) return "other";
+    // Whitelist of known category prefixes — keeps the map stable for the
+    // frontend. Anything outside this list lands in `other` and shows up
+    // only in the global bell, not on any specific sidebar item.
+    const known = new Set([
+      "psn",
+      "order",
+      "return",
+      "wallet",
+      "shopper",
+      "kyc",
+      "verification",
+      "vendor",
+    ]);
+    return known.has(first) ? first : "other";
+  }
 
   private toPublic(n: Notification): PublicNotification {
     return {
