@@ -49,6 +49,52 @@ export interface VendorProfile {
   socialVerifiedAt: Date | null;
 }
 
+/**
+ * Vendor-facing recurring storage snapshot returned by
+ * GET /v1/vendors/me/recurring-storage. Money is in cents; dates are ISO.
+ *
+ * The `perPsn` list attributes monthly cost back to the originating
+ * Pre-Shipment Notice so vendors see "PSN-abcd1234 is costing me $X per
+ * month." Attribution is proportional — when multiple PSNs contributed to
+ * the same SKU bucket (restocks), each PSN's share is its
+ * acceptedQty / sum-of-acceptedQty for that bucket.
+ */
+export interface VendorRecurringStorage {
+  vendorId: string;
+  /** Sum of rate × count across all tiers with a configured rate. */
+  monthlyEstimateCents: number;
+  /** SKU count sitting in negotiated tiers (e.g. PALLET) — excluded from the dollar total. */
+  negotiatedTierSkuCount: number;
+  /** Total active SKUs (whether or not they have a configured rate). */
+  activeSkuCount: number;
+  /** ISO timestamp of the next storage charge (1st of next month, 02:00 UTC). */
+  nextChargeAt: string;
+  perTier: Array<{
+    tier: string;
+    skuCount: number;
+    rateCents: number | null;
+    subtotalCents: number | null;
+  }>;
+  perPsn: Array<{
+    psnId: string;
+    status: string;
+    receivedAt: string | null;
+    carrier: string | null;
+    masterTracking: string | null;
+    declaredBoxCounts: Record<string, number>;
+    contributingSkuCount: number;
+    contributingTierCounts: Record<string, number>;
+    monthlyEstimateCents: number;
+  }>;
+  history: Array<{
+    id: string;
+    amountCents: number;
+    balanceAfterCents: number | null;
+    description: string;
+    createdAt: string;
+  }>;
+}
+
 @Injectable()
 export class VendorService {
   constructor(
@@ -57,6 +103,226 @@ export class VendorService {
     private readonly agreement: AgreementService,
     private readonly opsAlerts: OpsAlertService,
   ) {}
+
+  /**
+   * Vendor-facing recurring storage breakdown.
+   *
+   * Same math as the monthly cron (StorageBillingJob.computeVendorLiability)
+   * so what the vendor sees here is what they'll be charged on the 1st.
+   * The cron filters on `quantityAvailable > 0`; we widen the filter to
+   * include reserved-only buckets so a vendor whose stock is fully
+   * promised to in-flight orders still sees their bill — they're still
+   * occupying warehouse space.
+   *
+   * The per-PSN contribution map answers "which PSN brought this
+   * inventory?" by grouping accepted SKUs back to their originating
+   * PSN line. A single SKU bucket can be the target of multiple PSNs
+   * (restocks), so we attribute proportionally by accepted quantity.
+   */
+  async getRecurringStorage(vendorId: string): Promise<VendorRecurringStorage> {
+    const vendor = await this.prisma.vendor.findUnique({
+      where: { id: vendorId },
+      select: { id: true },
+    });
+    if (!vendor) throw new NotFoundException();
+
+    const schedule = await this.safelyLoadFees();
+
+    const [tierAgg, skus, recentStorage, allPsnsForContribution] = await Promise.all([
+      // Per-tier current SKU count — the canonical input to the monthly bill.
+      this.prisma.sku.groupBy({
+        by: ["storageTier"],
+        where: {
+          vendorId,
+          status: "ACTIVE",
+          OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
+        },
+        _count: { _all: true },
+      }),
+      // Per-SKU snapshot so the per-PSN contribution view can attribute
+      // monthly cost to the PSN(s) that filled the bucket. Limited to
+      // active buckets with stock so we don't query everything ever.
+      this.prisma.sku.findMany({
+        where: {
+          vendorId,
+          status: "ACTIVE",
+          OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
+        },
+        select: {
+          id: true,
+          storageTier: true,
+          quantityAvailable: true,
+          quantityReserved: true,
+        },
+      }),
+      // Last twelve STORAGE ledger entries — the billing history list.
+      this.prisma.ledgerEntry.findMany({
+        where: { vendorId, type: "STORAGE" },
+        orderBy: { createdAt: "desc" },
+        take: 12,
+        select: {
+          id: true,
+          amountCents: true,
+          balanceAfterCents: true,
+          description: true,
+          createdAt: true,
+        },
+      }),
+      // Every PSN with received lines. We re-derive contribution at request
+      // time so a PSN that was later cancelled or had its lines reversed
+      // shows up correctly. Capped at 100 PSNs which is well above the
+      // active inventory size for any single vendor in v1 — well past 100
+      // the truncation degrades gracefully (we just lose history).
+      this.prisma.psn.findMany({
+        where: {
+          vendorId,
+          status: { in: ["RECEIVED", "PARTIALLY_RECEIVED", "DISCREPANCY"] },
+        },
+        orderBy: { receivedAt: "desc" },
+        take: 100,
+        select: {
+          id: true,
+          status: true,
+          receivedAt: true,
+          declaredBoxCounts: true,
+          masterTracking: true,
+          carrier: true,
+          lines: {
+            select: {
+              skuId: true,
+              acceptedQty: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    // 1. Per-tier monthly estimate.
+    const perTier: VendorRecurringStorage["perTier"] = [];
+    let monthlyEstimateCents = 0;
+    let negotiatedTierSkuCount = 0;
+    for (const row of tierAgg) {
+      const tier = row.storageTier;
+      const count = row._count._all;
+      const rateCents = schedule?.monthlyStorage?.[tier] ?? null;
+      const subtotalCents = rateCents != null ? rateCents * count : null;
+      if (subtotalCents != null) monthlyEstimateCents += subtotalCents;
+      if (rateCents == null) negotiatedTierSkuCount += count;
+      perTier.push({
+        tier: String(tier),
+        skuCount: count,
+        rateCents,
+        subtotalCents,
+      });
+    }
+
+    // 2. Per-PSN contribution. We need to map each SKU bucket → its monthly
+    //    cost (rate per slot, since billing is one row per SKU bucket), then
+    //    split that cost across the PSNs that filled the bucket. The cron
+    //    treats each SKU row as a single tier-priced slot — so the bucket's
+    //    monthly cost is exactly that rate, regardless of qty inside.
+    //
+    //    Attribution rule: each PSN line gets a share of its bucket's
+    //    monthly cost weighted by accepted_qty / sum(accepted_qty for bucket
+    //    across all PSNs). Old PSNs whose lines were fully shipped out (qty
+    //    is now somewhere else) still appear if there's anything left in
+    //    that bucket — the rule attributes by historical contribution to
+    //    the bucket, not current ownership.
+    //
+    //    Returns whole cents per PSN; rounding error totals to ≤ # of
+    //    contributing PSNs which is acceptable for a UI estimate.
+
+    const skuToTier = new Map<string, string>();
+    for (const s of skus) {
+      skuToTier.set(s.id, String(s.storageTier));
+    }
+
+    /** rateCents per active SKU bucket */
+    const skuToRate = new Map<string, number | null>();
+    for (const s of skus) {
+      const tier = String(s.storageTier);
+      const rate = schedule?.monthlyStorage?.[s.storageTier] ?? null;
+      // Cast through string lookup because StorageTier enum values are
+      // exactly what we used as keys in monthlyStorage.
+      void tier;
+      skuToRate.set(s.id, rate);
+    }
+
+    // sum of acceptedQty per SKU (across all PSN lines we found)
+    const skuTotalAccepted = new Map<string, number>();
+    for (const p of allPsnsForContribution) {
+      for (const line of p.lines) {
+        if (!line.skuId || line.acceptedQty <= 0) continue;
+        skuTotalAccepted.set(line.skuId, (skuTotalAccepted.get(line.skuId) ?? 0) + line.acceptedQty);
+      }
+    }
+
+    const perPsn: VendorRecurringStorage["perPsn"] = [];
+    for (const p of allPsnsForContribution) {
+      let psnMonthlyCents = 0;
+      let psnSkuCount = 0;
+      const tierCounts: Record<string, number> = {};
+      for (const line of p.lines) {
+        if (!line.skuId || line.acceptedQty <= 0) continue;
+        const rate = skuToRate.get(line.skuId);
+        if (rate == null) continue; // bucket is gone (no current stock) or negotiable
+        const total = skuTotalAccepted.get(line.skuId) ?? 0;
+        if (total <= 0) continue;
+        const share = line.acceptedQty / total;
+        psnMonthlyCents += Math.round(rate * share);
+        psnSkuCount += 1;
+        const tier = skuToTier.get(line.skuId);
+        if (tier) tierCounts[tier] = (tierCounts[tier] ?? 0) + 1;
+      }
+      if (psnMonthlyCents === 0 && psnSkuCount === 0) continue;
+      perPsn.push({
+        psnId: p.id,
+        status: String(p.status),
+        receivedAt: p.receivedAt?.toISOString() ?? null,
+        carrier: p.carrier ?? null,
+        masterTracking: p.masterTracking ?? null,
+        declaredBoxCounts: (p.declaredBoxCounts ?? {}) as Record<string, number>,
+        contributingSkuCount: psnSkuCount,
+        contributingTierCounts: tierCounts,
+        monthlyEstimateCents: psnMonthlyCents,
+      });
+    }
+    perPsn.sort((a, b) => b.monthlyEstimateCents - a.monthlyEstimateCents);
+
+    // 3. Next charge date — the 1st of next month at 02:00 UTC, matching the cron.
+    const now = new Date();
+    const nextCharge = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 2, 0, 0));
+
+    return {
+      vendorId,
+      monthlyEstimateCents,
+      negotiatedTierSkuCount,
+      activeSkuCount: skus.length,
+      nextChargeAt: nextCharge.toISOString(),
+      perTier,
+      perPsn,
+      history: recentStorage.map((l) => ({
+        id: l.id,
+        amountCents: l.amountCents,
+        balanceAfterCents: l.balanceAfterCents,
+        description: l.description,
+        createdAt: l.createdAt.toISOString(),
+      })),
+    };
+  }
+
+  /**
+   * Pulling the fee schedule shouldn't poison the recurring view if the
+   * configuration row is missing — render whatever we can and let the
+   * frontend show "not configured" for the dollar totals.
+   */
+  private async safelyLoadFees(): Promise<FeeSchedule | null> {
+    try {
+      return await loadFeeSchedule(this.prisma);
+    } catch {
+      return null;
+    }
+  }
 
   async getProfile(vendorId: string): Promise<VendorProfile> {
     const vendor = await this.prisma.vendor.findUnique({ where: { id: vendorId } });

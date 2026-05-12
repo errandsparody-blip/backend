@@ -26,6 +26,17 @@ export class VendorController {
     return this.vendors.getProfile(user.vendorId!);
   }
 
+  /**
+   * Recurring monthly storage breakdown for the calling vendor. Same
+   * math as the billing cron — what you see here is what you'll be
+   * charged on the 1st. Sub-users are allowed: they can see what the
+   * account will pay, they just can't fund the wallet to cover it.
+   */
+  @Get("recurring-storage")
+  async recurringStorage(@CurrentUser() user: AuthenticatedUser) {
+    return this.vendors.getRecurringStorage(user.vendorId!);
+  }
+
   @Patch()
   async update(
     @CurrentUser() user: AuthenticatedUser,

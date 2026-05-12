@@ -9,47 +9,95 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
+// =============================================================================
+// FEE_SCHEDULE — published "Per-Box & Pallet Storage Pricing" guide (May 2026
+// refresh). Numbers must match the marketing /pricing page and the
+// storage-tier guide modal verbatim; any change here MUST be mirrored in
+// both surfaces (FALLBACK_TIERS in src/lib/storage-tiers.ts on the web side,
+// and the marketing page itself).
+//
+// PALLET keeps `negotiated: true` for onboarding because the policy says
+// per-box stocking + first-month fees still apply for every box ON a
+// pallet — i.e. there's no separate "pallet onboarding" charge to compute
+// in isolation. The PALLET tier on the PSN form represents the SHIPPING
+// container; the boxes inside it carry their own tier's onboarding fees.
+//
+// Monthly storage for PALLET IS a real number now ($45) — billed per
+// pallet-slot occupied. The storage-billing cron applies it just like any
+// other tier rate.
+// =============================================================================
 const FEE_SCHEDULE = {
-  // PRD §6.3.1 — onboarding fee = stocking + first month storage
   onboarding: {
-    SMALL: { stockingCents: 2500, firstMonthStorageCents: 900, totalCents: 3400 },
-    MEDIUM: { stockingCents: 4000, firstMonthStorageCents: 1500, totalCents: 5500 },
-    LARGE: { stockingCents: 6000, firstMonthStorageCents: 2500, totalCents: 8500 },
-    X_LARGE: { stockingCents: 9000, firstMonthStorageCents: 3000, totalCents: 12000 },
+    SMALL: { stockingCents: 1200, firstMonthStorageCents: 900, totalCents: 2100 },
+    MEDIUM: { stockingCents: 2200, firstMonthStorageCents: 1400, totalCents: 3600 },
+    LARGE: { stockingCents: 4000, firstMonthStorageCents: 1800, totalCents: 5800 },
+    X_LARGE: { stockingCents: 6000, firstMonthStorageCents: 2500, totalCents: 8500 },
+    // Per-box fees apply to boxes on the pallet, not the pallet itself.
+    // Declaring PALLET on a PSN without an accompanying box tier currently
+    // triggers a 400 with code `psn_negotiated_tier` — that's the right
+    // behaviour: the vendor must specify what tier of boxes is on the pallet.
     PALLET: { negotiated: true },
   },
-  // PRD §6.3.2 — monthly storage
   monthlyStorage: {
     SMALL: 900,
-    MEDIUM: 1500,
-    LARGE: 2500,
-    X_LARGE: 3000,
-    PALLET: null,
+    MEDIUM: 1400,
+    LARGE: 1800,
+    X_LARGE: 2500,
+    // Standard 40×48 pallet, up to 60 inches stacked. ~66.7 ft³ of
+    // low-touch storage. Mixed-tier pallets are prohibited (see policy).
+    PALLET: 4500,
   },
-  // PRD §6.3.3
   fulfillment: {
     baseCents: 299,
     perAdditionalUnitCents: 99,
   },
-  // PRD §6.3.4
   returnsHandlingCents: 600,
 };
 
+// Inches × inches × inches (L × W × H). maxWeightOz is an internal heuristic
+// used by the product-form's auto-suggest — not part of the published guide.
+// The guide quotes dimensions only; weight caps are USA Errands-internal
+// stack-stability guardrails.
 const TIER_DIMENSIONS = {
-  // Inches × inches × inches (L × W × H), max weight in oz.
-  // Anchored to common 3PL standards. Adjust before launch — PRD §14.1 open item.
-  SMALL: { lengthIn: 12, widthIn: 9, heightIn: 4, maxWeightOz: 80 },
-  MEDIUM: { lengthIn: 14, widthIn: 11, heightIn: 6, maxWeightOz: 240 },
-  LARGE: { lengthIn: 18, widthIn: 14, heightIn: 10, maxWeightOz: 480 },
-  X_LARGE: { lengthIn: 24, widthIn: 18, heightIn: 14, maxWeightOz: 960 },
+  SMALL: { lengthIn: 16, widthIn: 12, heightIn: 12, maxWeightOz: 480 },
+  MEDIUM: { lengthIn: 18, widthIn: 18, heightIn: 16, maxWeightOz: 800 },
+  LARGE: { lengthIn: 18, widthIn: 18, heightIn: 24, maxWeightOz: 1280 },
+  X_LARGE: { lengthIn: 24, widthIn: 18, heightIn: 24, maxWeightOz: 1920 },
+  // Standard U.S. pallet — 40×48 base × 60 in stacked height. Quoted in
+  // the marketing page; renders in the storage-tier guide modal too.
+  PALLET: { lengthIn: 48, widthIn: 40, heightIn: 60, maxWeightOz: 24000 },
 };
 
 const REPACKAGING_FEES = {
-  // PRD §14.1 — TBD anchors. Confirm before launch.
+  // Anchored to the new stocking fees — repackaging is roughly two-thirds
+  // of stocking since the labor profile is similar (unbox, repack, label).
   SMALL: 800,
-  MEDIUM: 1200,
-  LARGE: 1800,
-  X_LARGE: 2400,
+  MEDIUM: 1500,
+  LARGE: 2700,
+  X_LARGE: 4000,
+};
+
+// =============================================================================
+// Pallet policy — surfaced in the storage-tier guide modal and used by the
+// PSN-create flow to render the "max boxes per pallet" hint. The numbers
+// are the published "approximate maximum quantity of boxes per pallet"
+// from the pricing guide; actual allowable quantities vary per the
+// stack-stability rules in the policy text.
+//
+// `mixedTiersAllowed: false` encodes the rule that all boxes on a single
+// pallet must be the same tier. We don't enforce this in the DB; the PSN
+// schema doesn't tie boxes to specific pallets. The frontend reads this
+// flag and renders an explicit warning when a vendor declares PALLET
+// alongside a heterogeneous box mix on the same PSN.
+// =============================================================================
+const PALLET_POLICY = {
+  mixedTiersAllowed: false,
+  maxBoxesPerPallet: {
+    SMALL: 50,
+    MEDIUM: 12,
+    LARGE: 8,
+    X_LARGE: 8,
+  },
 };
 
 const QUARANTINE_DAILY_FEE_CENTS = 200;
