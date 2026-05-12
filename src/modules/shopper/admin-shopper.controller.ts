@@ -185,16 +185,23 @@ export class AdminShopperController {
     @Body(new ZodValidationPipe(adminSetShopperShippingSchema))
     body: AdminSetShopperShippingInput,
   ) {
-    // Pull the per-method freight rates so the service can compute the
-    // system shipping cost (and snapshot the rate). Failure to load is
-    // not fatal — we fall back to an empty map, in which case rate=0
-    // and any auto-calc path errors out cleanly with a clear code.
+    // Phase 2 redesign — admin types the per-lb rate inline for this
+    // request. We still load the legacy config map so requests that
+    // don't supply a rate (older clients, scripted updates) keep their
+    // existing behaviour, but the per-request value always wins.
     const freightRates = await this.loadFreightRates();
+    const effectiveRates = { ...freightRates };
+    if (
+      body.shippingMethod &&
+      typeof body.shippingRateCentsPerLb === "number"
+    ) {
+      effectiveRates[body.shippingMethod] = body.shippingRateCentsPerLb;
+    }
     const updated = await this.requests.setShipping({
       requestId: id,
       input: body,
       actorId: user.sub,
-      freightRates,
+      freightRates: effectiveRates,
     });
 
     // Post the freshly-updated breakdown into the chat thread so the buyer
@@ -735,10 +742,10 @@ export class AdminShopperController {
   /**
    * GET /v1/admin/shopper/freight-rates
    *
-   * Returns the current per-method rate map. The admin shipping form
-   * reads this to live-calculate the cost as the user types weights;
-   * the same map is used server-side at save time so frontend + backend
-   * agree on the number.
+   * Phase 2 redesign — the per-request rate is now typed inline on the
+   * shopper detail page so this endpoint exists only to hand back the
+   * canonical method ordering + last-known default rates (used to
+   * pre-fill the rate input when admin first opens the shipping form).
    */
   @Get("freight-rates")
   async listFreightRates(): Promise<{
@@ -748,8 +755,6 @@ export class AdminShopperController {
     const rates = await this.loadFreightRates();
     return {
       rates,
-      // Hand back the canonical method list so the UI doesn't have to
-      // hardcode it. Order is the order they're displayed in.
       methods: ["PLATFORM_FREIGHT", "BUYER_FORWARDER", "PICKUP"] as const,
     };
   }

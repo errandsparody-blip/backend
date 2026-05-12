@@ -278,6 +278,17 @@ export const adminSetShopperShippingSchema = z.object({
   // shipping panel. We accept the same shape used at intake, plus a `null`
   // shortcut to clear (rarely needed; mostly here for symmetry).
   shippingAddress: shopperShippingAddressSchema.nullable().optional(),
+  // Phase 2 redesign — admin types the per-lb rate directly on the
+  // shopper detail page for this request rather than picking from a
+  // pre-configured rate map. We persist it as the freightRateCentsPerLb
+  // snapshot so the receipt and recalc all use the same number. Capped
+  // at $1,000/lb (100,000 cents) to catch typos that turn $4.50 into $450.
+  shippingRateCentsPerLb: z
+    .number()
+    .int("Rate must be whole cents.")
+    .nonnegative("Rate cannot be negative.")
+    .max(100_000, "Rate is too large (max $1,000/lb).")
+    .optional(),
 }).refine(
   (v) => v.useCalculated === true || typeof v.shippingCostCents === "number",
   {

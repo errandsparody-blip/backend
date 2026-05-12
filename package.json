@@ -26,7 +26,8 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "prisma:seed": "ts-node prisma/seed.ts",
-    "dev:delete-user": "ts-node scripts/dev-delete-user.ts"
+    "dev:delete-user": "ts-node scripts/dev-delete-user.ts",
+    "r2:cors": "ts-node scripts/r2-apply-cors.ts"
   },
   "prisma": {
     "seed": "ts-node prisma/seed.ts"

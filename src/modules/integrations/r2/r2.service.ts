@@ -326,6 +326,163 @@ export class R2Service {
     };
   }
 
+  /**
+   * Apply a CORS policy to the bucket. Browser PUTs from
+   * `https://www.myusaerrands.com` (and any other origin the user reaches
+   * the buyer thread from) trip a CORS preflight against the R2 host. R2
+   * supports the S3-compatible `PUT /<bucket>?cors` API; this method sends
+   * the XML payload signed with SigV4.
+   *
+   * Idempotent — re-running with the same origins is a no-op from the
+   * bucket's perspective. Safe to wire into a deploy hook.
+   *
+   * @param allowedOrigins  Full origins, no trailing slash. e.g. ["https://myusaerrands.com", "https://www.myusaerrands.com"].
+   * @param allowedMethods  Defaults to PUT + GET + HEAD — the only verbs the browser uploader uses.
+   */
+  async setBucketCors(args: {
+    allowedOrigins: string[];
+    allowedMethods?: ReadonlyArray<"GET" | "HEAD" | "PUT" | "POST" | "DELETE">;
+    /** MaxAge for the preflight cache, in seconds. Default 1 hour. */
+    maxAgeSeconds?: number;
+  }): Promise<void> {
+    const cfg = this.requireConfig();
+    if (args.allowedOrigins.length === 0) {
+      throw new ServiceUnavailableException({
+        message: "At least one allowed origin is required.",
+        code: "r2_cors_no_origins",
+      });
+    }
+
+    const methods = args.allowedMethods ?? (["GET", "HEAD", "PUT"] as const);
+    const maxAge = args.maxAgeSeconds ?? 3600;
+
+    // S3 PutBucketCors XML payload. The values are user-controlled but
+    // we only ever pass them from server config — still escape defensively
+    // so a stray `<` in a host can't corrupt the body.
+    const ruleXml = [
+      "<CORSConfiguration>",
+      "  <CORSRule>",
+      ...args.allowedOrigins.map((o) => `    <AllowedOrigin>${xmlEscape(o)}</AllowedOrigin>`),
+      ...methods.map((m) => `    <AllowedMethod>${m}</AllowedMethod>`),
+      "    <AllowedHeader>*</AllowedHeader>",
+      "    <ExposeHeader>ETag</ExposeHeader>",
+      `    <MaxAgeSeconds>${maxAge}</MaxAgeSeconds>`,
+      "  </CORSRule>",
+      "</CORSConfiguration>",
+    ].join("\n");
+
+    const bodyBuf = Buffer.from(ruleXml, "utf8");
+    // S3 requires `?cors` as the subresource query (no value, just the key).
+    // The canonical request must include `cors=` as a query param even
+    // though the URL syntax is just `?cors`.
+    await this.signedSubresourcePut({
+      cfg,
+      // PutBucketCors targets the bucket itself, not an object inside it.
+      objectPath: "/" + cfg.bucket.replace(/^\/+|\/+$/g, ""),
+      subresource: "cors",
+      contentType: "application/xml",
+      // Cloudflare wants the MD5 of the body for PutBucketCors (it's
+      // optional in S3, but R2 has been observed to require it). We send
+      // both the SHA-256 (for SigV4) and the MD5 header.
+      body: bodyBuf,
+    });
+  }
+
+  /**
+   * Internal helper: sign + execute a PUT against `<host>/<path>?<subresource>`
+   * with an XML body. Used by `setBucketCors`; kept separate so future
+   * S3-subresource calls (ACL, Lifecycle, etc.) reuse the SigV4 plumbing.
+   */
+  private async signedSubresourcePut(args: {
+    cfg: R2Config;
+    objectPath: string;
+    subresource: string;
+    contentType: string;
+    body: Buffer;
+  }): Promise<void> {
+    const { cfg, objectPath, subresource, contentType, body } = args;
+
+    const payloadHash = sha256Hex(body);
+    const contentMd5 = createHash("md5").update(body).digest("base64");
+
+    const host = `${cfg.accountId}.r2.cloudflarestorage.com`;
+    const now = new Date();
+    const amzDate = isoBasic(now);
+    const dateStamp = amzDate.slice(0, 8);
+    const credentialScope = `${dateStamp}/${REGION}/${SERVICE}/aws4_request`;
+
+    const headers: Record<string, string> = {
+      host,
+      "content-type": contentType,
+      "content-length": String(body.length),
+      "content-md5": contentMd5,
+      "x-amz-content-sha256": payloadHash,
+      "x-amz-date": amzDate,
+    };
+    const signedHeaders = Object.keys(headers).sort().join(";");
+
+    const canonicalHeaders =
+      Object.keys(headers)
+        .sort()
+        .map((k) => `${k}:${headers[k]!.trim()}\n`)
+        .join("");
+
+    // Canonical query string: `cors=` (S3 spec — empty value, encoded `=`).
+    const canonicalQuery = `${encodeRfc3986(subresource)}=`;
+
+    const canonicalRequest = [
+      "PUT",
+      objectPath,
+      canonicalQuery,
+      canonicalHeaders,
+      signedHeaders,
+      payloadHash,
+    ].join("\n");
+
+    const stringToSign = [
+      ALGORITHM,
+      amzDate,
+      credentialScope,
+      sha256Hex(canonicalRequest),
+    ].join("\n");
+
+    const signingKey = deriveSigningKey(cfg.secretAccessKey, dateStamp, REGION, SERVICE);
+    const signature = hmacHex(signingKey, stringToSign);
+
+    const authorization =
+      `${ALGORITHM} Credential=${cfg.accessKeyId}/${credentialScope}, ` +
+      `SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+    const url = `https://${host}${objectPath}?${subresource}`;
+
+    const res = await fetch(url, {
+      method: "PUT",
+      headers: {
+        "Content-Type": contentType,
+        "Content-Length": String(body.length),
+        "Content-MD5": contentMd5,
+        "x-amz-content-sha256": payloadHash,
+        "x-amz-date": amzDate,
+        Authorization: authorization,
+      },
+      body,
+    });
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      this.logger.error(
+        { status: res.status, errBody: errBody.slice(0, 500), subresource },
+        "r2.signedSubresourcePut_failed",
+      );
+      throw new ServiceUnavailableException({
+        message: `R2 ${subresource} update failed (${res.status}).`,
+        code: "r2_subresource_put_failed",
+        status: res.status,
+        body: errBody.slice(0, 500),
+      });
+    }
+  }
+
   private requireConfig(): R2Config {
     if (!this.cfg) {
       throw new ServiceUnavailableException({
@@ -393,4 +550,19 @@ function encodePathSegment(key: string): string {
 function isoBasic(d: Date): string {
   // YYYYMMDDTHHMMSSZ — matches `new Date().toISOString().replace(/[-:]|\.\d+/g, "")`.
   return d.toISOString().replace(/[-:]|\.\d+/g, "");
+}
+
+/**
+ * Minimal XML escaper for the values that go into the CORS payload. We
+ * never put unsanitised user input here — origins come from env vars —
+ * but defensive escaping costs nothing and prevents accidental payload
+ * corruption if a config value ever contains an angle bracket.
+ */
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
