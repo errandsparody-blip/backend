@@ -103,4 +103,13 @@ EXPOSE 4000
 # Apply pending migrations, then start the API. If the migration step fails,
 # the container exits and Railway's restartPolicy kicks in (configured in
 # railway.json).
-CMD ["sh", "-c", "pnpm prisma migrate deploy && node dist/main.js"]
+#
+# The first step (`prisma db execute --file recover-failed-0019.sql`) is a
+# one-time self-heal for the 0019_unified_ledger migration that originally
+# failed with "unsafe use of new enum value" (SQLSTATE 55P04). The SQL
+# inside deletes only the failed (unfinished) row from `_prisma_migrations`,
+# leaving the rest of the migration history intact. After it runs, Prisma
+# re-applies 0019 cleanly. The file is idempotent — once the failed row is
+# gone, the DELETE is a no-op on every subsequent boot, so it's safe to
+# leave in the deploy chain forever.
+CMD ["sh", "-c", "pnpm prisma db execute --schema prisma/schema.prisma --file prisma/recover-failed-0019.sql && pnpm prisma migrate deploy && node dist/main.js"]
