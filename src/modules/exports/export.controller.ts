@@ -196,7 +196,13 @@ export class ExportController {
             e.createdAt.toISOString(),
             e.type,
             (e.amountCents / 100).toFixed(2),
-            (e.balanceAfterCents / 100).toFixed(2),
+            // Migration 0019 made `balance_after_cents` nullable to
+            // support shopper-side ledger rows. The query above is
+            // vendor-scoped so these rows will always have a snapshot,
+            // but the type is now `number | null` — coerce to 0 (and
+            // render as a blank cell would be confusing in a CSV) so
+            // the column stays parseable.
+            ((e.balanceAfterCents ?? 0) / 100).toFixed(2),
             e.description,
             e.referenceType ?? "",
             e.referenceId ?? "",

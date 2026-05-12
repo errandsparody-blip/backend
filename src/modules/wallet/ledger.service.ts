@@ -88,9 +88,16 @@ export class LedgerService {
       orderBy: { createdAt: "asc" },
     });
 
-    const closingCents = entries.length > 0
-      ? entries[entries.length - 1]!.balanceAfterCents
-      : openingCents;
+    // Migration 0019 made balanceAfterCents nullable to support shopper-
+    // side ledger rows (no wallet = no running balance). Vendor-scoped
+    // queries never return those rows, but TS doesn't know that. Coerce
+    // a stray null down to the opening balance so the statement still
+    // makes arithmetic sense even if a backfill ever wrote a vendor row
+    // with no snapshot.
+    const closingCents =
+      entries.length > 0
+        ? entries[entries.length - 1]!.balanceAfterCents ?? openingCents
+        : openingCents;
 
     // Per-type aggregates. Positive = credit, negative = charge.
     const byType: Record<string, { count: number; totalCents: number }> = {};
@@ -126,7 +133,11 @@ export class LedgerService {
       id: e.id,
       type: e.type,
       amountCents: e.amountCents,
-      balanceAfterCents: e.balanceAfterCents,
+      // Migration 0019 — column is nullable to support shopper-side
+      // rows that have no wallet. The vendor-scoped queries above only
+      // ever return vendor rows, which always carry a snapshot, but TS
+      // can't see that — coerce null to 0 for the public shape.
+      balanceAfterCents: e.balanceAfterCents ?? 0,
       description: e.description,
       referenceType: e.referenceType,
       referenceId: e.referenceId,
