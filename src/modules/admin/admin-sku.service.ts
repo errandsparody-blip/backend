@@ -40,6 +40,14 @@ export interface AdminSkuRow {
   productCode: string;
   productName: string;
   variant: string;
+  /**
+   * Locked product image URL (R2) for the parent product, or null if the
+   * vendor never uploaded one. Surfaced to admin views so warehouse staff
+   * can visually match incoming/outgoing stock against the cataloged
+   * image without a separate lookup. Frozen at creation along with the
+   * rest of the product fields — see ProductService.update().
+   */
+  productImageUrl: string | null;
   quantityAvailable: number;
   quantityReserved: number;
   storageTier: string;
@@ -101,7 +109,11 @@ export class AdminSkuService {
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
       include: {
-        product: { select: { id: true, code: true, name: true } },
+        // imageUrl was added in migration 0022. The generated client may
+        // still be stale at typecheck time so we cast at the row-mapping
+        // boundary below. Including it in the select keeps the query
+        // shape narrow.
+        product: { select: { id: true, code: true, name: true, imageUrl: true } as unknown as { id: true; code: true; name: true } },
         vendor: { select: { id: true, businessName: true } },
       },
     });
@@ -121,6 +133,8 @@ export class AdminSkuService {
         productCode: s.product.code,
         productName: s.product.name,
         variant: s.variant,
+        productImageUrl:
+          (s.product as unknown as { imageUrl?: string | null }).imageUrl ?? null,
         quantityAvailable: s.quantityAvailable,
         quantityReserved: s.quantityReserved,
         storageTier: s.storageTier,
@@ -141,7 +155,11 @@ export class AdminSkuService {
     const sku = await this.prisma.sku.findUnique({
       where: { id },
       include: {
-        product: { select: { id: true, code: true, name: true } },
+        // imageUrl was added in migration 0022. The generated client may
+        // still be stale at typecheck time so we cast at the row-mapping
+        // boundary below. Including it in the select keeps the query
+        // shape narrow.
+        product: { select: { id: true, code: true, name: true, imageUrl: true } as unknown as { id: true; code: true; name: true } },
         vendor: { select: { id: true, businessName: true } },
       },
     });
@@ -154,6 +172,8 @@ export class AdminSkuService {
       productCode: sku.product.code,
       productName: sku.product.name,
       variant: sku.variant,
+      productImageUrl:
+        (sku.product as unknown as { imageUrl?: string | null }).imageUrl ?? null,
       quantityAvailable: sku.quantityAvailable,
       quantityReserved: sku.quantityReserved,
       storageTier: sku.storageTier,

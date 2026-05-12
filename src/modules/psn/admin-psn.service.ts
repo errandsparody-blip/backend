@@ -88,10 +88,13 @@ export class AdminPsnService {
                 name: true,
                 variant: true,
                 // `storageTier` is on the Product model (migration 0010).
-                // Cast through unknown because Railway's stale Prisma
-                // client may not know about this column until the next
-                // `prisma generate` runs.
-                ...({ storageTier: true } as Record<string, unknown>),
+                // `imageUrl` was added in migration 0022. Both flow
+                // through this cast because Railway's stale Prisma
+                // client may not know about either column until the
+                // next `prisma generate` runs. Surfacing the locked
+                // product image here lets the admin receive page
+                // visually match incoming stock without an extra hop.
+                ...({ storageTier: true, imageUrl: true } as Record<string, unknown>),
               },
             },
           },

@@ -9,6 +9,7 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { KycStatus, VendorStatus } from "@prisma/client";
 
+import { loadFeeSchedule, type FeeSchedule } from "../../common/fees";
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import { opsNewKycTemplate } from "../email/email-templates";

@@ -26,6 +26,7 @@ import {
 } from "@nestjs/common";
 import { KycStatus, VendorStatus } from "@prisma/client";
 
+import { loadFeeSchedule, type FeeSchedule } from "../../common/fees";
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import {
@@ -40,6 +41,131 @@ interface ActorContext {
   actorId: string;
   /** Optional admin-only note attached to the audit entry. Never emailed. */
   notes?: string;
+}
+
+/**
+ * Aggregated operational view of a vendor — returned by
+ * GET /admin/vendors/:id/overview. Every money field is in CENTS so the
+ * frontend formats once. Counts are total / by-status so the dashboard
+ * cards can render without re-summing arrays on the wire.
+ */
+export interface VendorOverview {
+  vendorId: string;
+  psns: {
+    total: number;
+    byStatus: Record<string, number>;
+    recent: Array<{
+      id: string;
+      status: string;
+      carrier: string | null;
+      masterTracking: string | null;
+      declaredBoxCounts: Record<string, number>;
+      onboardingFeeCents: number | null;
+      submittedAt: string | null;
+      receivedAt: string | null;
+      createdAt: string;
+    }>;
+  };
+  orders: {
+    total: number;
+    byStatus: Record<string, number>;
+    lifetimeRevenueCents: number;
+    recent: Array<{
+      id: string;
+      externalReference: string | null;
+      status: string;
+      recipientName: string;
+      destination: string;
+      carrier: string | null;
+      trackingNumber: string | null;
+      totalChargedCents: number;
+      submittedAt: string | null;
+      shippedAt: string | null;
+      deliveredAt: string | null;
+      createdAt: string;
+    }>;
+  };
+  returns: {
+    total: number;
+    byStatus: Record<string, number>;
+    recent: Array<{
+      id: string;
+      status: string;
+      reason: string | null;
+      handlingFeeCents: number | null;
+      totalRefundCents: number | null;
+      createdAt: string;
+      inspectedAt: string | null;
+    }>;
+  };
+  inventory: {
+    activeSkus: number;
+    perTier: Array<{
+      tier: string;
+      skuCount: number;
+      rateCents: number | null;
+      subtotalCents: number | null;
+    }>;
+  };
+  recurringStorage: {
+    /** Sum of (rate × sku-count) across all tiers with a configured rate. */
+    monthlyEstimateCents: number;
+    /** SKU count sitting in a negotiated-tier bucket (e.g. PALLET). */
+    negotiatedTierSkuCount: number;
+    perTier: Array<{
+      tier: string;
+      skuCount: number;
+      rateCents: number | null;
+      subtotalCents: number | null;
+    }>;
+  };
+  spend: {
+    /** Absolute total of all negative-sign ledger entries (everything they've paid us). */
+    lifetimeSpendCents: number;
+    /** Sum of positive DEPOSIT entries — gross top-ups, before refunds. */
+    lifetimeDepositCents: number;
+    /** Sum of REFUND + MANUAL_CREDIT + REVERSAL — money returned to the vendor. */
+    lifetimeRefundCents: number;
+    /** Sum of unresolved receiving-hold extra charges (vendor owes). */
+    outstandingHoldsCents: number;
+    /** Per-ledger-type net + row count. Frontend renders the spend breakdown from this. */
+    byType: Record<string, { count: number; netCents: number }>;
+  };
+  ledger: {
+    recent: Array<{
+      id: string;
+      type: string;
+      amountCents: number;
+      balanceAfterCents: number | null;
+      description: string;
+      referenceType: string | null;
+      referenceId: string | null;
+      createdAt: string;
+    }>;
+  };
+  holds: Array<{
+    id: string;
+    psnId: string;
+    extraChargeCents: number;
+    reasonCode: string;
+    reasonNote: string;
+    createdAt: string;
+    releaseAfter: string;
+    vendorPaidAt: string | null;
+  }>;
+}
+
+/** Reduce a [{status, count}] array into `{total, byStatus}`. Defensive helper for groupBy outputs. */
+function collapseCounts(
+  rows: Array<{ status: string; count: number }>,
+): { total: number; byStatus: Record<string, number> } {
+  const byStatus: Record<string, number> = {};
+  let total = 0;
+  for (const r of rows) {
+    byStatus[r.status] = (byStatus[r.status] ?? 0) + r.count;
+    total += r.count;
+  }
+  return { total, byStatus };
 }
 
 @Injectable()
@@ -108,6 +234,369 @@ export class AdminVendorService {
           }
         : null,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Operational overview — everything the vendor has done on the platform.
+  //
+  // Returned in a single round-trip so the admin detail page renders without
+  // a waterfall of dependent fetches. Each section is intentionally capped
+  // (recent 10 PSNs/orders/returns, 25 ledger entries) — anything more is a
+  // drill-down to the dedicated PSN / orders / finance pages, which already
+  // exist with filters + pagination.
+  //
+  // Money is reported in CENTS (consistent with the rest of the API) so the
+  // frontend formats once at the render boundary. Lifetime totals are the
+  // ABSOLUTE value of debits within each LedgerEntryType — i.e. "how much has
+  // this vendor paid us for storage." Deposits are reported separately as
+  // positive sums.
+  // ---------------------------------------------------------------------------
+
+  async getVendorOverview(vendorId: string): Promise<VendorOverview> {
+    // 1. Verify vendor exists FIRST so the rest of the queries don't all
+    //    return empty arrays for a non-existent id and the admin sees a clear
+    //    404 instead of an empty overview.
+    const exists = await this.prisma.vendor.findUnique({
+      where: { id: vendorId },
+      select: { id: true },
+    });
+    if (!exists) throw new NotFoundException();
+
+    // 2. Run aggregate queries in parallel — none of them depend on each
+    //    other, so Promise.all keeps the round-trip tight. We rely on the
+    //    `ledger_entries(vendor_id, created_at)` and per-table vendorId
+    //    indexes added in earlier migrations; no new index needed.
+    const [
+      psnsByStatus,
+      psnsRecent,
+      ordersByStatus,
+      ordersRecent,
+      returnsByStatus,
+      returnsRecent,
+      ledgerByType,
+      ledgerRecent,
+      skuTierAgg,
+      activeHolds,
+    ] = await Promise.all([
+      this.prisma.psn.groupBy({
+        by: ["status"],
+        where: { vendorId },
+        _count: { _all: true },
+      }),
+      this.prisma.psn.findMany({
+        where: { vendorId },
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        select: {
+          id: true,
+          status: true,
+          carrier: true,
+          masterTracking: true,
+          declaredBoxCounts: true,
+          submittedAt: true,
+          receivedAt: true,
+          createdAt: true,
+          onboardingFeeCents: true,
+        },
+      }),
+      this.prisma.order.groupBy({
+        by: ["status"],
+        where: { vendorId },
+        _count: { _all: true },
+        _sum: { totalChargedCents: true },
+      }),
+      this.prisma.order.findMany({
+        where: { vendorId },
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        select: {
+          id: true,
+          externalReference: true,
+          status: true,
+          recipientName: true,
+          shipCity: true,
+          shipState: true,
+          shipCountry: true,
+          carrier: true,
+          trackingNumber: true,
+          totalChargedCents: true,
+          submittedAt: true,
+          shippedAt: true,
+          deliveredAt: true,
+          createdAt: true,
+        },
+      }),
+      this.prisma.return.groupBy({
+        by: ["status"],
+        where: { vendorId },
+        _count: { _all: true },
+      }),
+      this.prisma.return.findMany({
+        where: { vendorId },
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        select: {
+          id: true,
+          status: true,
+          reason: true,
+          // The Return model splits the refund-side amounts into two
+          // columns: refundAmountCents (paid back to vendor) and
+          // restockFeeCents (kept by USA Errands). We surface both so
+          // the admin can spot a return that cost the vendor money.
+          refundAmountCents: true,
+          restockFeeCents: true,
+          createdAt: true,
+          inspectedAt: true,
+        },
+      }),
+      // Lifetime spend / inflow per ledger category. Sum the SIGNED amount
+      // and we'll surface the absolute value of negative buckets as "paid",
+      // and the positive value of DEPOSIT as "deposited."
+      this.prisma.ledgerEntry.groupBy({
+        by: ["type"],
+        where: { vendorId },
+        _count: { _all: true },
+        _sum: { amountCents: true },
+      }),
+      this.prisma.ledgerEntry.findMany({
+        where: { vendorId },
+        orderBy: { createdAt: "desc" },
+        take: 25,
+        select: {
+          id: true,
+          type: true,
+          amountCents: true,
+          balanceAfterCents: true,
+          description: true,
+          referenceType: true,
+          referenceId: true,
+          createdAt: true,
+        },
+      }),
+      // Active inventory by storage tier — drives the recurring-storage
+      // estimate. We count SKU rows with stock > 0; the storage-billing cron
+      // charges per SKU bucket so the count maps 1:1 to next month's bill.
+      this.prisma.sku.groupBy({
+        by: ["storageTier"],
+        where: {
+          vendorId,
+          status: "ACTIVE",
+          // Either available or reserved counts as "occupying a slot" for
+          // storage billing purposes — matches the cron's view of the world.
+          OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
+        },
+        _count: { _all: true },
+      }),
+      // Outstanding receiving holds (Phase 2 admin workflow). Each unresolved
+      // hold is a vendor liability we surface so finance can chase it.
+      // Cast through `unknown` because the generated Prisma client may not
+      // yet know about psnHold (migration 0020 added it).
+      (this.prisma as unknown as {
+        psnHold: {
+          findMany: (args: unknown) => Promise<
+            Array<{
+              id: string;
+              psnId: string;
+              extraChargeCents: number;
+              reasonCode: string;
+              reasonNote: string;
+              createdAt: Date;
+              releaseAfter: Date;
+              resolvedAt: Date | null;
+              vendorPaidAt: Date | null;
+            }>
+          >;
+        };
+      }).psnHold.findMany({
+        where: {
+          psn: { vendorId },
+          resolvedAt: null,
+        },
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        select: {
+          id: true,
+          psnId: true,
+          extraChargeCents: true,
+          reasonCode: true,
+          reasonNote: true,
+          createdAt: true,
+          releaseAfter: true,
+          resolvedAt: true,
+          vendorPaidAt: true,
+        },
+      }),
+    ]);
+
+    // 3. Fold ledger group-by into a typed bucket map so the frontend doesn't
+    //    have to guess at enum names. Lifetime spend is the absolute total of
+    //    all negative-sign categories.
+    const ledgerBuckets: Record<string, { count: number; netCents: number }> = {};
+    let lifetimeSpendCents = 0;
+    let lifetimeDepositCents = 0;
+    let lifetimeRefundCents = 0;
+    for (const row of ledgerByType) {
+      const net = row._sum.amountCents ?? 0;
+      // `row.type` is the LedgerEntryType enum, but the generated client
+      // can lag the database (migration 0019 added REFUND / PURCHASE_FEE
+      // etc.). Comparing as a plain string keeps TS happy across both
+      // pre- and post-generate builds.
+      const t = row.type as unknown as string;
+      ledgerBuckets[t] = { count: row._count._all, netCents: net };
+      if (t === "DEPOSIT") {
+        lifetimeDepositCents += net; // positive
+      } else if (t === "REFUND" || t === "MANUAL_CREDIT" || t === "REVERSAL") {
+        lifetimeRefundCents += net; // positive (credits back to wallet)
+      } else if (net < 0) {
+        lifetimeSpendCents += Math.abs(net);
+      }
+    }
+
+    // 4. Recurring storage estimate. Pull the live fee_schedule config row
+    //    and multiply each tier's monthlyStorage rate by the count of active
+    //    SKUs in that tier. PALLET (null rate) is reported as "negotiated"
+    //    with no dollar figure so finance knows to look it up manually.
+    const fees = await this.safelyLoadFees();
+    const tierBreakdown: VendorOverview["recurringStorage"]["perTier"] = [];
+    let recurringMonthlyCents = 0;
+    let negotiatedTierCount = 0;
+    for (const row of skuTierAgg) {
+      const tier = row.storageTier as keyof FeeSchedule["monthlyStorage"];
+      const count = row._count._all;
+      const rateCents = fees?.monthlyStorage?.[tier] ?? null;
+      const subtotal = rateCents != null ? rateCents * count : null;
+      if (subtotal != null) recurringMonthlyCents += subtotal;
+      if (rateCents == null) negotiatedTierCount += count;
+      tierBreakdown.push({
+        tier: String(tier),
+        skuCount: count,
+        rateCents,
+        subtotalCents: subtotal,
+      });
+    }
+
+    // 5. Lifetime PSN / order / return counts derived from the same group-by
+    //    so the dashboard tile and the table footer can't disagree.
+    const psnCounts = collapseCounts(psnsByStatus.map((r) => ({ status: r.status as string, count: r._count._all })));
+    const orderCounts = collapseCounts(ordersByStatus.map((r) => ({ status: r.status as string, count: r._count._all })));
+    const returnCounts = collapseCounts(returnsByStatus.map((r) => ({ status: r.status as string, count: r._count._all })));
+
+    const lifetimeOrderRevenueCents = ordersByStatus.reduce(
+      (acc, r) => acc + (r._sum.totalChargedCents ?? 0),
+      0,
+    );
+
+    // 6. Total active SKUs + total units in storage — used by the inventory
+    //    stats tile.
+    const totalActiveSkus = skuTierAgg.reduce((acc, r) => acc + r._count._all, 0);
+
+    const outstandingHoldsCents = activeHolds.reduce(
+      (acc, h) => acc + h.extraChargeCents,
+      0,
+    );
+
+    return {
+      vendorId,
+      psns: {
+        total: psnCounts.total,
+        byStatus: psnCounts.byStatus,
+        recent: psnsRecent.map((p) => ({
+          id: p.id,
+          status: p.status as string,
+          carrier: p.carrier,
+          masterTracking: p.masterTracking,
+          declaredBoxCounts: (p.declaredBoxCounts ?? {}) as Record<string, number>,
+          onboardingFeeCents: p.onboardingFeeCents,
+          submittedAt: p.submittedAt?.toISOString() ?? null,
+          receivedAt: p.receivedAt?.toISOString() ?? null,
+          createdAt: p.createdAt.toISOString(),
+        })),
+      },
+      orders: {
+        total: orderCounts.total,
+        byStatus: orderCounts.byStatus,
+        lifetimeRevenueCents: lifetimeOrderRevenueCents,
+        recent: ordersRecent.map((o) => ({
+          id: o.id,
+          externalReference: o.externalReference,
+          status: o.status as string,
+          recipientName: o.recipientName,
+          destination: `${o.shipCity}, ${o.shipState}, ${o.shipCountry}`,
+          carrier: o.carrier,
+          trackingNumber: o.trackingNumber,
+          totalChargedCents: o.totalChargedCents,
+          submittedAt: o.submittedAt?.toISOString() ?? null,
+          shippedAt: o.shippedAt?.toISOString() ?? null,
+          deliveredAt: o.deliveredAt?.toISOString() ?? null,
+          createdAt: o.createdAt.toISOString(),
+        })),
+      },
+      returns: {
+        total: returnCounts.total,
+        byStatus: returnCounts.byStatus,
+        recent: returnsRecent.map((r) => ({
+          id: r.id,
+          status: r.status as string,
+          reason: r.reason,
+          handlingFeeCents: r.restockFeeCents,
+          totalRefundCents: r.refundAmountCents,
+          createdAt: r.createdAt.toISOString(),
+          inspectedAt: r.inspectedAt?.toISOString() ?? null,
+        })),
+      },
+      inventory: {
+        activeSkus: totalActiveSkus,
+        perTier: tierBreakdown,
+      },
+      recurringStorage: {
+        monthlyEstimateCents: recurringMonthlyCents,
+        negotiatedTierSkuCount: negotiatedTierCount,
+        perTier: tierBreakdown,
+      },
+      spend: {
+        lifetimeSpendCents,
+        lifetimeDepositCents,
+        lifetimeRefundCents,
+        outstandingHoldsCents,
+        byType: ledgerBuckets,
+      },
+      ledger: {
+        recent: ledgerRecent.map((l) => ({
+          id: l.id,
+          type: l.type as string,
+          amountCents: l.amountCents,
+          balanceAfterCents: l.balanceAfterCents,
+          description: l.description,
+          referenceType: l.referenceType,
+          referenceId: l.referenceId,
+          createdAt: l.createdAt.toISOString(),
+        })),
+      },
+      holds: activeHolds.map((h) => ({
+        id: h.id,
+        psnId: h.psnId,
+        extraChargeCents: h.extraChargeCents,
+        reasonCode: h.reasonCode,
+        reasonNote: h.reasonNote,
+        createdAt: h.createdAt.toISOString(),
+        releaseAfter: h.releaseAfter.toISOString(),
+        vendorPaidAt: h.vendorPaidAt?.toISOString() ?? null,
+      })),
+    };
+  }
+
+  /**
+   * Pulling the fee schedule shouldn't poison the entire overview if the
+   * configuration row is missing — show what we can and let the frontend
+   * render "not configured" for the recurring estimate. Logging happens
+   * inside `loadFeeSchedule`.
+   */
+  private async safelyLoadFees(): Promise<FeeSchedule | null> {
+    try {
+      return await loadFeeSchedule(this.prisma);
+    } catch {
+      return null;
+    }
   }
 
   // ---------------------------------------------------------------------------

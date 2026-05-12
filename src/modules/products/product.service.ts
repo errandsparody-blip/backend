@@ -40,9 +40,12 @@ export interface PublicProduct {
   storageTier: "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET";
   /**
    * Migration 0022 — optional product image (URL into our R2 bucket).
-   * `null` when the vendor hasn't uploaded an image. NEVER locked — image
-   * is purely cosmetic and editing it never affects shipping, customs,
-   * or storage billing, so we keep it editable even after stock arrives.
+   * `null` when the vendor hasn't uploaded an image. Locked the moment the
+   * product is created — the same immutability rule that protects identity,
+   * customs, and dimension fields applies here. The image is what admin
+   * receivers visually match against incoming stock, so swapping it after
+   * the fact would break the photographic audit trail. To change a wrong
+   * image, archive the product and recreate it.
    */
   imageUrl: string | null;
   status: string;
@@ -198,10 +201,12 @@ export class ProductService {
     // first PSN — useful for typo fixes, but also abusable. Per product
     // owner decision (2026-05): lock at creation, no window.
 
-    // NOTE: `imageUrl` is deliberately NOT in this list. Images are
-    // cosmetic — they don't affect shipping rates, customs, storage
-    // billing, or pick lists. Letting vendors refresh a stale or
-    // low-quality image is a UX win with zero compliance cost.
+    // `imageUrl` is now also locked. The product image is part of the
+    // visual record admin receivers match against incoming stock — if the
+    // vendor could swap it after PSNs were submitted, the photographic
+    // audit trail would silently drift. Locking from creation onwards
+    // mirrors the rule for every other identity / customs / dimension
+    // field. The escape hatch is the same: archive and recreate.
     const lockableFields: Array<keyof UpdateProductInput> = [
       "name",
       "variant",
@@ -213,6 +218,7 @@ export class ProductService {
       "widthIn",
       "heightIn",
       "storageTier",
+      "imageUrl",
     ];
     // Detect *attempted* changes — patch fields that differ from the
     // current value. A patch that re-sends the same value is a no-op
@@ -253,10 +259,12 @@ export class ProductService {
         ...(patch.heightIn != null ? { heightIn: patch.heightIn } : {}),
         ...(patch.storageTier !== undefined ? { storageTier: patch.storageTier } : {}),
         ...(patch.status !== undefined ? { status: patch.status } : {}),
-        // Image: explicitly accept `null` so a vendor can clear an
-        // existing image (e.g. they uploaded the wrong one). The Zod
-        // layer above normalised "" → null already.
-        ...(patch.imageUrl !== undefined ? { imageUrl: patch.imageUrl } : {}),
+        // `imageUrl` is no longer accepted on update — it's locked. The
+        // lock-check above already rejects any attempt to change it, so we
+        // intentionally do NOT spread `patch.imageUrl` into the persisted
+        // data here. Idempotent re-saves of the same image value are
+        // tolerated by the lock check (no diff = no error) and end up as
+        // a no-op write, which is fine.
       } as Prisma.ProductUncheckedUpdateInput,
     });
 

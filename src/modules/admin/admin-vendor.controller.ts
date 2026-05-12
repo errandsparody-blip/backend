@@ -56,6 +56,21 @@ export class AdminVendorController {
     return this.vendors.getVendorDetail(id);
   }
 
+  /**
+   * Operational snapshot — lifetime spend, recurring storage estimate,
+   * PSNs / orders / returns counts plus the 10 most-recent of each, an
+   * inventory-by-tier breakdown, and the latest 25 ledger entries.
+   *
+   * Returned in a single round-trip so the admin detail page renders
+   * without a waterfall. Read-only — same FINANCE_ADMIN + SUPER_ADMIN
+   * scope as the detail endpoint.
+   */
+  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+  @Get(":id/overview")
+  async overview(@Param("id", new ParseUUIDPipe()) id: string) {
+    return this.vendors.getVendorOverview(id);
+  }
+
   // ---------------------------------------------------------------------------
   // KYC decisions — SUPER_ADMIN only.
   //
