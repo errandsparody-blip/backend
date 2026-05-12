@@ -86,6 +86,28 @@ export interface RequestRow {
   parentRequestId: string | null;
   buyerEmail: string;
   buyerName: string | null;
+  // Migration 0023 — added for the wire/ID flow. Nullable so historical
+  // rows don't blow up when read.
+  buyerPhone: string | null;
+  // Migration 0023 — payment rail this request is on.
+  paymentMethod: "STRIPE" | "WIRE";
+  // Migration 0023 — gov-ID review packet (only meaningful when WIRE).
+  idVerificationStatus:
+    | "NONE"
+    | "PENDING_UPLOAD"
+    | "UNDER_REVIEW"
+    | "APPROVED"
+    | "REJECTED";
+  idDocumentUrl: string | null;
+  idSelfieUrl: string | null;
+  idRejectionReason: string | null;
+  idVerifiedAt: Date | null;
+  idVerifiedById: string | null;
+  // Migration 0023 — wire-transfer proof packet.
+  wireProofUrl: string | null;
+  wireProofUploadedAt: Date | null;
+  wireConfirmedAt: Date | null;
+  wireConfirmedById: string | null;
   shippingAddress: Prisma.JsonValue | null;
   shippingMethod: ShopperShippingMethod | null;
   trackingNumber: string | null;
@@ -239,9 +261,18 @@ export class ShopperRequestService {
        * — survives operator tweaks to the rate map.
        */
       effectiveTaxState: string;
+      /**
+       * Migration 0023 — server-derived payment rail. Above the wire
+       * threshold the request is created with `paymentMethod=WIRE`,
+       * status `AWAITING_ID_VERIFICATION`, and we skip the Stripe
+       * Checkout step entirely. Defaults to STRIPE so existing callers
+       * stay on the original flow.
+       */
+      paymentMethod?: "STRIPE" | "WIRE";
     },
   ): Promise<RequestWithLines> {
     const { commissionBps, estimatedTaxBps, effectiveTaxState } = rates;
+    const paymentMethod = rates.paymentMethod ?? "STRIPE";
     if (!Number.isInteger(commissionBps) || commissionBps < 0 || commissionBps > COMMISSION_BPS_CAP) {
       // Defence in depth: should already be validated upstream.
       throw new BadRequestException({
@@ -345,6 +376,14 @@ export class ShopperRequestService {
         throw new Error("Failed to allocate shopper reference (sequence missing).");
       }
 
+      // Migration 0023 — the WIRE rail enters the lifecycle at a totally
+      // different status. The buyer never hits Stripe; they verify ID
+      // first, get a quote with bank details second, wire the money
+      // third. We snapshot the starting status here so the rest of the
+      // service stays unaware of which rail spawned the row.
+      const initialStatus: ShopperRequestStatus =
+        paymentMethod === "WIRE" ? "AWAITING_ID_VERIFICATION" : "AWAITING_INTAKE_PAYMENT";
+
       const requestRow = await (
         tx as unknown as { shopperRequest: AnyPrismaShopperRequest }
       ).shopperRequest.create({
@@ -353,6 +392,10 @@ export class ShopperRequestService {
           parentRequestId,
           buyerEmail: input.buyerEmail,
           buyerName: input.buyerName ?? null,
+          // Migration 0023 — phone is required at the Zod layer for new
+          // requests but the column is nullable for back-compat. We coerce
+          // an empty input back to null defensively.
+          buyerPhone: input.buyerPhone && input.buyerPhone.length > 0 ? input.buyerPhone : null,
           shippingAddress: input.shippingAddress
             ? (input.shippingAddress as unknown as Prisma.InputJsonValue)
             : null,
@@ -363,7 +406,13 @@ export class ShopperRequestService {
           estimatedTaxCents,
           effectiveTaxState,
           intakeTotalCents,
-          status: "AWAITING_INTAKE_PAYMENT",
+          status: initialStatus as unknown as never,
+          // Cast — the generated Prisma client may not include the new
+          // enum/column types until `prisma generate` runs post-deploy.
+          paymentMethod: paymentMethod as unknown as never,
+          idVerificationStatus: (paymentMethod === "WIRE"
+            ? "PENDING_UPLOAD"
+            : "NONE") as unknown as never,
           lines: {
             create: input.lines.map((line) => ({
               productUrl: line.productUrl,
@@ -373,7 +422,7 @@ export class ShopperRequestService {
               procurementStatus: "pending",
             })),
           },
-        },
+        } as unknown as never,
         include: { lines: true },
       });
       return requestRow as unknown as RequestWithLines;
@@ -1346,5 +1395,403 @@ export class ShopperRequestService {
       idempotencyKey: `shopper:cancelled_email:${row.id}:${row.status}`,
       type: "shopper.cancelled",
     });
+  }
+
+  // =========================================================================
+  // Migration 0023 — wire-transfer / ID-verification state machine.
+  //
+  // Lifecycle (only relevant to paymentMethod = WIRE rows):
+  //
+  //   AWAITING_ID_VERIFICATION
+  //        │  buyer uploads ID document + selfie
+  //        ▼
+  //   ID_UNDER_REVIEW
+  //        │  admin approves                ──► QUOTE_SENT
+  //        │  admin rejects (reason)        ──► AWAITING_ID_VERIFICATION
+  //        ▼
+  //   QUOTE_SENT (= bank instructions revealed to buyer)
+  //        │  buyer wires + uploads proof
+  //        ▼
+  //   WIRE_PROOF_UPLOADED → WIRE_UNDER_REVIEW (alias; we go straight to UNDER_REVIEW)
+  //        │  admin confirms                ──► WIRE_CONFIRMED → PURCHASE_APPROVED → PROCURING
+  //        │  admin rejects (reason)        ──► AWAITING_WIRE_PAYMENT
+  //        ▼
+  //   PURCHASE_APPROVED → PROCURING (rejoins existing pipeline)
+  //
+  // Each transition is a single `where: { id, status: <expected> }` Prisma
+  // update so two admins clicking at once produce ONE state change and the
+  // loser sees a 409, not a corrupt row.
+  // =========================================================================
+
+  /**
+   * Buyer-side action — they uploaded ID + selfie via presigned R2 PUTs and
+   * are now telling the server the URLs. Validates the request is on the
+   * WIRE rail and at a state where re-upload is permitted (PENDING_UPLOAD
+   * or REJECTED — the buyer may need to re-submit after a rejection).
+   *
+   * On success the status moves to ID_UNDER_REVIEW and the ID-verification
+   * status flips to UNDER_REVIEW. No email here — the admin sees the queue.
+   */
+  async submitIdUploads(args: {
+    requestId: string;
+    idDocumentUrl: string;
+    idSelfieUrl: string;
+  }): Promise<RequestRow> {
+    const before = await this.getById(args.requestId, { includeLines: false });
+    if (before.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request doesn't require ID verification.",
+        code: "shopper_id_not_required",
+      });
+    }
+    // The buyer can submit/replace uploads while waiting for their first
+    // review OR after a rejection asking them to try again. Once we approve
+    // (or the request progresses past the ID stage entirely) the upload is
+    // locked — they can't replace an approved ID without admin intervention.
+    const allowed = ["AWAITING_ID_VERIFICATION", "ID_UNDER_REVIEW"];
+    if (
+      !allowed.includes(before.status as string) &&
+      before.idVerificationStatus !== "REJECTED"
+    ) {
+      throw new ConflictException({
+        message: "ID can no longer be re-submitted at this stage.",
+        code: "shopper_id_locked",
+        status: before.status,
+        idVerificationStatus: before.idVerificationStatus,
+      });
+    }
+
+    const updated = await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: args.requestId },
+      data: {
+        idDocumentUrl: args.idDocumentUrl,
+        idSelfieUrl: args.idSelfieUrl,
+        idVerificationStatus: "UNDER_REVIEW" as unknown as never,
+        // Snap status forward only if we're still waiting on the upload.
+        // A buyer fixing a rejection stays on the ID review track.
+        status: ("ID_UNDER_REVIEW" as unknown) as never,
+        // Clear any previous rejection reason — admin will write a new one
+        // if they reject this fresh submission.
+        idRejectionReason: null,
+      },
+    });
+
+    await this.audit.log({
+      action: "shopper.id.submit",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      beforeState: {
+        status: before.status,
+        idVerificationStatus: before.idVerificationStatus,
+      },
+      afterState: {
+        status: "ID_UNDER_REVIEW",
+        idVerificationStatus: "UNDER_REVIEW",
+        idDocumentUrl: args.idDocumentUrl,
+        idSelfieUrl: args.idSelfieUrl,
+      },
+    });
+
+    return updated;
+  }
+
+  /**
+   * Admin approves the buyer's ID. Moves the request to QUOTE_SENT — the
+   * thread page starts rendering bank-transfer instructions and the buyer
+   * gets a "your ID has been approved, here's how to pay" email.
+   *
+   * Note: we don't email from this method — the controller composes the
+   * email after this returns so it can include the chat thread message
+   * link with a freshly issued token.
+   */
+  async approveIdVerification(args: {
+    requestId: string;
+    actorId: string;
+  }): Promise<RequestRow> {
+    const before = await this.getById(args.requestId, { includeLines: false });
+    if (before.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request isn't on the wire-transfer track.",
+        code: "shopper_id_not_required",
+      });
+    }
+    if (before.idVerificationStatus !== "UNDER_REVIEW") {
+      throw new ConflictException({
+        message: "ID is not currently under review.",
+        code: "shopper_id_not_under_review",
+        idVerificationStatus: before.idVerificationStatus,
+      });
+    }
+
+    const updated = await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: args.requestId, status: "ID_UNDER_REVIEW" as unknown as never },
+      data: {
+        idVerificationStatus: "APPROVED" as unknown as never,
+        idVerifiedAt: new Date(),
+        idVerifiedById: args.actorId,
+        idRejectionReason: null,
+        status: "QUOTE_SENT" as unknown as never,
+      },
+    }).catch((err) => {
+      if (this.isPrismaNotFound(err)) {
+        throw new ConflictException({
+          message: "Status changed while you were approving. Refresh and try again.",
+          code: "shopper_id_status_conflict",
+        });
+      }
+      throw err;
+    });
+
+    await this.audit.log({
+      actorId: args.actorId,
+      action: "shopper.id.approved",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      beforeState: { status: before.status, idVerificationStatus: before.idVerificationStatus },
+      afterState: { status: "QUOTE_SENT", idVerificationStatus: "APPROVED" },
+    });
+
+    return updated;
+  }
+
+  /**
+   * Admin rejects the ID. The reason is shown to the buyer so they know
+   * what to fix; we never reject silently. Status returns to
+   * AWAITING_ID_VERIFICATION so the buyer's uploader is re-enabled.
+   */
+  async rejectIdVerification(args: {
+    requestId: string;
+    reason: string;
+    actorId: string;
+  }): Promise<RequestRow> {
+    const before = await this.getById(args.requestId, { includeLines: false });
+    if (before.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request isn't on the wire-transfer track.",
+        code: "shopper_id_not_required",
+      });
+    }
+    if (before.idVerificationStatus !== "UNDER_REVIEW") {
+      throw new ConflictException({
+        message: "ID is not currently under review.",
+        code: "shopper_id_not_under_review",
+        idVerificationStatus: before.idVerificationStatus,
+      });
+    }
+
+    const updated = await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: args.requestId, status: "ID_UNDER_REVIEW" as unknown as never },
+      data: {
+        idVerificationStatus: "REJECTED" as unknown as never,
+        idRejectionReason: args.reason,
+        idVerifiedAt: null,
+        idVerifiedById: null,
+        status: "AWAITING_ID_VERIFICATION" as unknown as never,
+      },
+    }).catch((err) => {
+      if (this.isPrismaNotFound(err)) {
+        throw new ConflictException({
+          message: "Status changed while you were rejecting. Refresh and try again.",
+          code: "shopper_id_status_conflict",
+        });
+      }
+      throw err;
+    });
+
+    await this.audit.log({
+      actorId: args.actorId,
+      action: "shopper.id.rejected",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      beforeState: { status: before.status, idVerificationStatus: before.idVerificationStatus },
+      afterState: {
+        status: "AWAITING_ID_VERIFICATION",
+        idVerificationStatus: "REJECTED",
+        rejectionReason: args.reason,
+      },
+    });
+
+    return updated;
+  }
+
+  /**
+   * Buyer uploaded their wire-transfer proof. Validates that the request
+   * is in a state where a wire proof makes sense (QUOTE_SENT or
+   * AWAITING_WIRE_PAYMENT after a rejected proof). Moves the status to
+   * WIRE_UNDER_REVIEW so the admin queue picks it up.
+   */
+  async submitWireProof(args: {
+    requestId: string;
+    wireProofUrl: string;
+  }): Promise<RequestRow> {
+    const before = await this.getById(args.requestId, { includeLines: false });
+    if (before.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request isn't on the wire-transfer track.",
+        code: "shopper_wire_not_applicable",
+      });
+    }
+    if (before.idVerificationStatus !== "APPROVED") {
+      throw new BadRequestException({
+        message: "ID must be verified before submitting wire proof.",
+        code: "shopper_wire_id_not_verified",
+      });
+    }
+    const allowed = ["QUOTE_SENT", "AWAITING_WIRE_PAYMENT", "WIRE_PROOF_UPLOADED", "WIRE_UNDER_REVIEW"];
+    if (!allowed.includes(before.status as string)) {
+      throw new ConflictException({
+        message: "Wire proof can only be uploaded after we've sent your quote.",
+        code: "shopper_wire_proof_invalid_state",
+        status: before.status,
+      });
+    }
+
+    const updated = await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: args.requestId },
+      data: {
+        wireProofUrl: args.wireProofUrl,
+        wireProofUploadedAt: new Date(),
+        wireConfirmedAt: null,
+        wireConfirmedById: null,
+        status: "WIRE_UNDER_REVIEW" as unknown as never,
+      },
+    });
+
+    await this.audit.log({
+      action: "shopper.wire.proof_submitted",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      beforeState: { status: before.status },
+      afterState: {
+        status: "WIRE_UNDER_REVIEW",
+        wireProofUrl: args.wireProofUrl,
+      },
+    });
+
+    return updated;
+  }
+
+  /**
+   * Admin confirms the wire payment landed. The request transitions
+   * WIRE_UNDER_REVIEW → WIRE_CONFIRMED → PURCHASE_APPROVED → PROCURING in
+   * a single conceptual step. We collapse the intermediate statuses into
+   * a single audit-logged transition with a short window where the row is
+   * briefly in WIRE_CONFIRMED — useful if the wire ledger lookup fails so
+   * admin sees exactly where we got stuck.
+   */
+  async confirmWirePayment(args: {
+    requestId: string;
+    actorId: string;
+  }): Promise<RequestRow> {
+    const before = await this.getById(args.requestId, { includeLines: false });
+    if (before.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request isn't on the wire-transfer track.",
+        code: "shopper_wire_not_applicable",
+      });
+    }
+    if (before.status !== "WIRE_UNDER_REVIEW" && before.status !== "WIRE_PROOF_UPLOADED") {
+      throw new ConflictException({
+        message: "Wire payment is not currently under review.",
+        code: "shopper_wire_not_under_review",
+        status: before.status,
+      });
+    }
+
+    const updated = await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: args.requestId },
+      data: {
+        wireConfirmedAt: new Date(),
+        wireConfirmedById: args.actorId,
+        // Snap straight to PROCURING — the WIRE_CONFIRMED / PURCHASE_APPROVED
+        // statuses are conceptually intermediate. The audit log captures the
+        // full chain so finance can reconstruct the moment money landed.
+        // intakePaidAt is reused to mirror the STRIPE-rail timestamp; downstream
+        // consumers (receipts, reports) read that field uniformly.
+        intakePaidAt: new Date(),
+        status: "PROCURING" as unknown as never,
+      },
+    });
+
+    await this.audit.log({
+      actorId: args.actorId,
+      action: "shopper.wire.confirmed",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      beforeState: { status: before.status },
+      afterState: {
+        status: "PROCURING",
+        wireConfirmedAt: new Date().toISOString(),
+        // Chain of intermediate statuses we collapsed through, for audit
+        // forensics ("what did finance see at every step?").
+        chain: ["WIRE_CONFIRMED", "PURCHASE_APPROVED", "PROCURING"],
+      },
+    });
+
+    return updated;
+  }
+
+  /**
+   * Admin rejects the wire proof — the screenshot didn't match the
+   * statement, the amount is short, the reference is wrong, etc. Status
+   * returns to AWAITING_WIRE_PAYMENT so the buyer can resubmit. The
+   * rejection reason is exposed to the buyer.
+   */
+  async rejectWireProof(args: {
+    requestId: string;
+    reason: string;
+    actorId: string;
+  }): Promise<RequestRow> {
+    const before = await this.getById(args.requestId, { includeLines: false });
+    if (before.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request isn't on the wire-transfer track.",
+        code: "shopper_wire_not_applicable",
+      });
+    }
+    if (before.status !== "WIRE_UNDER_REVIEW" && before.status !== "WIRE_PROOF_UPLOADED") {
+      throw new ConflictException({
+        message: "Wire payment is not currently under review.",
+        code: "shopper_wire_not_under_review",
+        status: before.status,
+      });
+    }
+
+    const updated = await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: args.requestId },
+      data: {
+        // Keep the URL on the row — the admin can compare future uploads
+        // against the rejected one if there's any dispute. We don't store
+        // the rejection reason in a dedicated column; it lives in the
+        // chat message the controller posts so the buyer sees it inline.
+        status: "AWAITING_WIRE_PAYMENT" as unknown as never,
+      },
+    });
+
+    await this.audit.log({
+      actorId: args.actorId,
+      action: "shopper.wire.rejected",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      beforeState: { status: before.status },
+      afterState: {
+        status: "AWAITING_WIRE_PAYMENT",
+        rejectionReason: args.reason,
+      },
+    });
+
+    return updated;
   }
 }

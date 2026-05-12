@@ -30,8 +30,34 @@ export const ShopperRequestStatusValues = [
   "DELIVERED",
   "CANCELLED",
   "REFUNDED",
+  // Migration 0023a — wire-transfer / ID-verification track. Statuses are
+  // listed in lifecycle order so a glance at the enum tells the story.
+  "AWAITING_ID_VERIFICATION",
+  "ID_UNDER_REVIEW",
+  "QUOTE_SENT",
+  "AWAITING_WIRE_PAYMENT",
+  "WIRE_PROOF_UPLOADED",
+  "WIRE_UNDER_REVIEW",
+  "WIRE_CONFIRMED",
+  "PURCHASE_APPROVED",
 ] as const;
 export type ShopperRequestStatus = (typeof ShopperRequestStatusValues)[number];
+
+// Migration 0023 — payment rail. Server-derived; never accept from client.
+export const ShopperPaymentMethodValues = ["STRIPE", "WIRE"] as const;
+export type ShopperPaymentMethod = (typeof ShopperPaymentMethodValues)[number];
+
+// Migration 0023 — ID-verification lifecycle. Only meaningful on WIRE
+// requests; STRIPE requests stay at NONE forever.
+export const ShopperIdVerificationStatusValues = [
+  "NONE",
+  "PENDING_UPLOAD",
+  "UNDER_REVIEW",
+  "APPROVED",
+  "REJECTED",
+] as const;
+export type ShopperIdVerificationStatus =
+  (typeof ShopperIdVerificationStatusValues)[number];
 
 export const ShopperShippingMethodValues = [
   "PLATFORM_FREIGHT",
@@ -56,7 +82,40 @@ export type ShopperLineProcurementStatus =
 // Shared field schemas
 // ---------------------------------------------------------------------------
 
-const emailField = z.string().trim().toLowerCase().email("Invalid email.").max(254);
+// Email field for buyer intake. Zod's `.email()` is permissive (it accepts
+// things like `a@b` and `foo@-bar.com`); we tighten with a regex that
+// requires at least one dot in the domain and rejects consecutive dots.
+// This is NOT a complete RFC 5322 implementation — it's a "this almost
+// certainly was a typo" filter that catches the common mistakes before
+// the buyer pays and finds out the receipt email bounced.
+const STRICT_EMAIL_RE =
+  /^[A-Za-z0-9._%+-]+@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
+const emailField = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .email("Invalid email.")
+  .max(254)
+  .refine((v) => !v.includes(".."), "Email cannot contain consecutive dots.")
+  .refine((v) => STRICT_EMAIL_RE.test(v), "Looks like a typo — double-check the email.");
+
+// Migration 0023 — buyer phone, required at intake. Loose digit/`+` check;
+// we don't enforce E.164 because international numbers vary too much and a
+// hard parse would lock out legitimate buyers. Operators eyeball the
+// number anyway during the ID-review step for high-value (wire) requests.
+const phoneField = z
+  .string()
+  .trim()
+  // Strip common formatting so the stored value is canonical-ish without
+  // forcing a strict format on the buyer's keyboard.
+  .transform((v) => v.replace(/[\s().-]/g, ""))
+  .pipe(
+    z
+      .string()
+      .min(7, "Phone too short.")
+      .max(20, "Phone too long.")
+      .regex(/^\+?[0-9]+$/, "Digits only (optional leading +)."),
+  );
 
 // Product URLs: enforce http/https + reasonable length. Unknown hosts allowed
 // because this service explicitly accepts links from any retailer.
@@ -115,7 +174,12 @@ export const SHOPPER_REFERENCE_PATTERN = /^SHP-[A-Z0-9-]{3,32}$/;
 
 export const createShopperRequestSchema = z.object({
   buyerEmail: emailField,
-  buyerName: z.string().trim().min(1).max(120).optional(),
+  // Migration 0023 — name + phone are required for new intake. They were
+  // optional in v1; the wire-transfer / ID-verification track tightened
+  // the contract because we need a real identity attached to every
+  // request that might end up on the WIRE rail.
+  buyerName: z.string().trim().min(1, "Required.").max(120, "Up to 120 characters."),
+  buyerPhone: phoneField,
   shippingAddress: shopperShippingAddressSchema.optional(),
   lines: z
     .array(lineInputSchema)
@@ -329,3 +393,78 @@ export const adminCancelShopperSchema = z.object({
   issueRefund: z.boolean().default(true),
 });
 export type AdminCancelShopperInput = z.infer<typeof adminCancelShopperSchema>;
+
+// ---------------------------------------------------------------------------
+// Migration 0023 — buyer ID + wire upload schemas (buyer-side)
+// ---------------------------------------------------------------------------
+//
+// Buyer uploads happen in two stages: first call the presign endpoint
+// (same schema as the existing chat presign), then POST the resulting
+// public URL back so the server can persist it on the request row.
+
+// Tight URL allow-list: must be https and live under our own R2 host (or
+// the configured public-uploads origin). Application-level check; the
+// service layer verifies the URL belongs to this request before saving.
+const uploadedUrlField = z
+  .string()
+  .trim()
+  .url("Must be a full URL.")
+  .max(2048, "URL is too long.")
+  .refine((u) => /^https:\/\//i.test(u), "Only https URLs are accepted.");
+
+export const submitShopperIdUploadsSchema = z.object({
+  // Front of the government-issued ID (passport, driver's licence, …).
+  idDocumentUrl: uploadedUrlField,
+  // A selfie holding the ID — guard against stolen-document attempts.
+  idSelfieUrl: uploadedUrlField,
+});
+export type SubmitShopperIdUploadsInput = z.infer<typeof submitShopperIdUploadsSchema>;
+
+export const submitShopperWireProofSchema = z.object({
+  // Bank receipt / transfer screenshot. PDF, image — same allow-list as
+  // chat attachments. The server doesn't OCR; the admin eyeballs it.
+  wireProofUrl: uploadedUrlField,
+});
+export type SubmitShopperWireProofInput = z.infer<typeof submitShopperWireProofSchema>;
+
+// ---------------------------------------------------------------------------
+// Migration 0023 — admin wire / ID review schemas
+// ---------------------------------------------------------------------------
+
+export const adminApproveShopperIdSchema = z.object({
+  // Optional admin note appended to the chat thread when approving.
+  note: z.string().trim().max(2000).optional(),
+});
+export type AdminApproveShopperIdInput = z.infer<typeof adminApproveShopperIdSchema>;
+
+export const adminRejectShopperIdSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(1, "Reason is required.")
+    .max(2000, "Reason is too long."),
+});
+export type AdminRejectShopperIdInput = z.infer<typeof adminRejectShopperIdSchema>;
+
+export const adminSendShopperQuoteSchema = z.object({
+  // Optional admin message added to the buyer-facing chat when the quote
+  // is published. The buyer always sees the canonical bank-instructions
+  // panel rendered from configuration; this is supplementary copy.
+  message: z.string().trim().max(5000).optional(),
+});
+export type AdminSendShopperQuoteInput = z.infer<typeof adminSendShopperQuoteSchema>;
+
+export const adminConfirmShopperWireSchema = z.object({
+  // Optional admin note appended to the chat thread when confirming.
+  note: z.string().trim().max(2000).optional(),
+});
+export type AdminConfirmShopperWireInput = z.infer<typeof adminConfirmShopperWireSchema>;
+
+export const adminRejectShopperWireSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(1, "Reason is required.")
+    .max(2000, "Reason is too long."),
+});
+export type AdminRejectShopperWireInput = z.infer<typeof adminRejectShopperWireSchema>;

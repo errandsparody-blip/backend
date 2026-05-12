@@ -196,6 +196,24 @@ export class R2Service implements OnApplicationBootstrap {
   }
 
   /**
+   * Return the host portion of `R2_PUBLIC_BASE_URL` (without scheme or
+   * path), or null when R2 isn't configured. Used by validators that
+   * need to confirm a URL the client posted back is actually from our
+   * public bucket — see ShopperController.assertUrlBelongsToOurBucket.
+   */
+  getPublicBaseHost(): string | null {
+    if (!this.cfg) return null;
+    try {
+      return new URL(this.cfg.publicBaseUrl).host.toLowerCase();
+    } catch {
+      // The config was validated at construction; an invalid URL here
+      // would already have crashed the boot. Return null defensively
+      // rather than throwing on a hot path.
+      return null;
+    }
+  }
+
+  /**
    * Generate a fresh, hard-to-guess object key under a controlled prefix.
    * 16 bytes of entropy → ~2^128 keyspace; base64url-encoded for URL
    * safety; suffix preserves the original extension for `Content-Type`

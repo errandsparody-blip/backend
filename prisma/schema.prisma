@@ -137,6 +137,11 @@ model User {
   // Personal Shopper feature back-relations.
   shopperRequestsAssigned ShopperRequest[] @relation("ShopperAssignedAdmin")
   shopperMessages         ShopperMessage[] @relation("ShopperMessageSender")
+  // Migration 0023 — wire-track audit relations. Both nullable so deleting
+  // the user doesn't cascade; the FK on ShopperRequest sets the column to
+  // NULL on the way out.
+  shopperIdVerified       ShopperRequest[] @relation("ShopperIdVerifier")
+  shopperWireConfirmed    ShopperRequest[] @relation("ShopperWireConfirmer")
 
   @@index([role])
   @@index([vendorId])
@@ -1041,6 +1046,35 @@ enum ShopperRequestStatus {
   DELIVERED
   CANCELLED
   REFUNDED
+  // Migration 0023a — wire-transfer + ID-verification track for buyers
+  // whose items subtotal crosses the configured threshold (default
+  // $1,000). The buyer never sees Stripe; they verify ID, get a quote
+  // with bank details, wire the money, and we confirm before procuring.
+  AWAITING_ID_VERIFICATION
+  ID_UNDER_REVIEW
+  QUOTE_SENT
+  AWAITING_WIRE_PAYMENT
+  WIRE_PROOF_UPLOADED
+  WIRE_UNDER_REVIEW
+  WIRE_CONFIRMED
+  PURCHASE_APPROVED
+}
+
+// Migration 0023 — which payment rail this request is on. Server-derived
+// at intake from items_subtotal vs `shopper_wire_threshold_cents`.
+enum ShopperPaymentMethod {
+  STRIPE
+  WIRE
+}
+
+// Migration 0023 — lifecycle of the buyer's gov-ID upload. Manual review
+// by admin is the only approver in v1; Stripe Identity is a possible v2.
+enum ShopperIdVerificationStatus {
+  NONE
+  PENDING_UPLOAD
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
 }
 
 enum ShopperMessageSender {
@@ -1071,6 +1105,34 @@ model ShopperRequest {
   // Buyer identity (no User row — magic-link only)
   buyerEmail                  String                 @map("buyer_email")
   buyerName                   String?                @map("buyer_name")
+  // Migration 0023 — required for NEW requests at the Zod layer; nullable
+  // here so the column doesn't require a backfill of historical rows.
+  buyerPhone                  String?                @map("buyer_phone")
+
+  // Migration 0023 — payment rail. Server-derived at intake from
+  // items_subtotal vs the `shopper_wire_threshold_cents` config row. We
+  // do NOT trust the client to pick.
+  paymentMethod               ShopperPaymentMethod   @default(STRIPE) @map("payment_method")
+
+  // Migration 0023 — ID-verification packet. Only meaningful when
+  // paymentMethod = WIRE. Status is NONE by default for STRIPE-track
+  // requests; the buyer never uploads anything.
+  idVerificationStatus        ShopperIdVerificationStatus @default(NONE) @map("id_verification_status")
+  idDocumentUrl               String?                @map("id_document_url")
+  idSelfieUrl                 String?                @map("id_selfie_url")
+  idRejectionReason           String?                @map("id_rejection_reason")
+  idVerifiedAt                DateTime?              @map("id_verified_at")
+  idVerifiedById              String?                @map("id_verified_by") @db.Uuid
+  idVerifiedBy                User?                  @relation("ShopperIdVerifier", fields: [idVerifiedById], references: [id], onDelete: SetNull)
+
+  // Migration 0023 — wire-transfer proof packet. Buyer uploads after we
+  // send the quote; admin confirms once the bank receipt matches our
+  // statement.
+  wireProofUrl                String?                @map("wire_proof_url")
+  wireProofUploadedAt         DateTime?              @map("wire_proof_uploaded_at")
+  wireConfirmedAt             DateTime?              @map("wire_confirmed_at")
+  wireConfirmedById           String?                @map("wire_confirmed_by") @db.Uuid
+  wireConfirmedBy             User?                  @relation("ShopperWireConfirmer", fields: [wireConfirmedById], references: [id], onDelete: SetNull)
 
   // Shipping (optional at intake, captured later in chat if missing)
   shippingAddress             Json?                  @map("shipping_address")

@@ -35,9 +35,13 @@ import {
   createShopperRequestSchema,
   postShopperMessageSchema,
   presignShopperUploadSchema,
+  submitShopperIdUploadsSchema,
+  submitShopperWireProofSchema,
   type CreateShopperRequestInput,
   type PostShopperMessageInput,
   type PresignShopperUploadInput,
+  type SubmitShopperIdUploadsInput,
+  type SubmitShopperWireProofInput,
 } from "../../common/schemas/shopper.schema";
 import { EmailService } from "../email/email.service";
 import {
@@ -62,6 +66,17 @@ const WAREHOUSE_STATE_CONFIG_KEY = "shopper_warehouse_state";
 // row is missing or the resolved state isn't in the tax-rate map.
 const FALLBACK_WAREHOUSE_STATE = "TX";
 const FALLBACK_TAX_BPS = 825;
+// Migration 0023 — items-subtotal threshold above which a buyer is routed
+// onto the wire-transfer + ID-verification track. Configurable via the
+// `shopper_wire_threshold_cents` row; fallback used only if the row is
+// missing (fresh dev environments that haven't run migration 0023 yet).
+const WIRE_THRESHOLD_CONFIG_KEY = "shopper_wire_threshold_cents";
+const WIRE_THRESHOLD_FALLBACK_CENTS = 100_000; // $1,000
+// Cap on the threshold so a misconfigured row can't push the wire flow
+// effectively off (e.g. a billion-cent threshold) or shrink it to a few
+// dollars by accident.
+const WIRE_THRESHOLD_MAX_CENTS = 10_000_000; // $100,000
+const BANK_INSTRUCTIONS_CONFIG_KEY = "shopper_bank_instructions";
 
 @Controller({ path: "shopper", version: "1" })
 export class ShopperController {
@@ -93,11 +108,19 @@ export class ShopperController {
     requestId: string;
     reference: string;
     threadUrl: string;
+    // Migration 0023 — empty string when the buyer was routed to WIRE.
+    // The frontend already refuses to navigate to anything not starting
+    // with https://, so an empty string keeps it on /shopper/r/<token>.
     payUrl: string;
     intakeTotalCents: number;
+    paymentMethod: "STRIPE" | "WIRE";
   }> {
     const cfg = loadConfig();
     const commissionBps = await this.loadCommissionBps();
+    // Migration 0023 — load the wire threshold AFTER computing the items
+    // subtotal (we'd need to validate the lines first either way; doing
+    // the lookup up here keeps the create-call atomic).
+    const wireThresholdCents = await this.loadWireThresholdCents();
 
     // Resolve the effective tax state for this request. The retailer ships
     // to whoever's address gets put on the order — that's our warehouse
@@ -118,11 +141,29 @@ export class ShopperController {
       taxRates[effectiveTaxState] ??
       (effectiveTaxState === FALLBACK_WAREHOUSE_STATE ? FALLBACK_TAX_BPS : 0);
 
-    // 1. Persist request (status = AWAITING_INTAKE_PAYMENT).
+    // Migration 0023 — decide the rail BEFORE creating the row so the
+    // initial status is correct and we don't have to mutate-after-create
+    // (which would race with the chat-message insert below).
+    //
+    // The check is on the items subtotal alone, NOT the intake total,
+    // because the threshold is the buyer-visible "your cart" number.
+    // Adding commission + tax in here would silently push borderline
+    // carts onto the wire flow even when the buyer thinks they're under.
+    const itemsSubtotalForRailCents = body.lines.reduce(
+      (sum, line) => sum + line.estimatedUnitPriceCents * line.quantity,
+      0,
+    );
+    const paymentMethod: "STRIPE" | "WIRE" =
+      itemsSubtotalForRailCents >= wireThresholdCents ? "WIRE" : "STRIPE";
+
+    // 1. Persist request. Status is set inside requests.create() based on
+    //    paymentMethod (AWAITING_INTAKE_PAYMENT for STRIPE,
+    //    AWAITING_ID_VERIFICATION for WIRE).
     const created = await this.requests.create(body, {
       commissionBps,
       estimatedTaxBps,
       effectiveTaxState,
+      paymentMethod,
     });
 
     // 2. Mint a magic-link token for the buyer to access the thread.
@@ -136,35 +177,9 @@ export class ShopperController {
       });
     }
 
-    // 4. Create the intake Checkout session.
-    let session: { sessionId: string; paymentIntentId: string | null; url: string };
-    try {
-      session = await this.stripe.createShopperIntakeSession({
-        requestId: created.id,
-        buyerEmail: created.buyerEmail,
-        itemsSubtotalCents: created.itemsSubtotalCents,
-        commissionCents: created.commissionCents,
-        estimatedTaxCents: created.estimatedTaxCents,
-        idempotencyKey: `shopper:intake:${created.id}`,
-        successUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(issued.plaintext)}?paid=1`,
-        cancelUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(issued.plaintext)}?cancelled=1`,
-      });
-    } catch (err) {
-      // Stripe outage during intake. The request is already saved with status
-      // AWAITING_INTAKE_PAYMENT; the buyer can retry from the thread page.
-      this.logger.error({ err, requestId: created.id }, "shopper.intake.stripe_failed");
-      throw new InternalServerErrorException({
-        message: "Could not start payment. Please try again.",
-        code: "shopper_stripe_unavailable",
-      });
-    }
-
-    await this.requests.attachIntakeSession(created.id, session.sessionId, session.paymentIntentId);
-
-    // 5. Email the buyer the magic link + the Stripe Checkout URL.
-    // Look up parent reference (if any) so the email can show "addition
-    // to SHP-000041" instead of just a UUID. Best-effort — failure here
-    // shouldn't block the intake email; we just omit the parent context.
+    // Resolve the optional parent reference for both the buyer email and
+    // the ops alert. Best-effort — a missing parent reference shouldn't
+    // block the intake from succeeding.
     let parentReference: string | null = null;
     if (created.parentRequestId) {
       const parentRow = await this.requests
@@ -173,25 +188,118 @@ export class ShopperController {
       parentReference = parentRow?.reference ?? null;
     }
 
-    const tpl = shopperIntakeReceivedTemplate({
+    // ============================================================
+    // BRANCH — Stripe rail (unchanged from v1)
+    // ============================================================
+
+    if (paymentMethod === "STRIPE") {
+      let session: { sessionId: string; paymentIntentId: string | null; url: string };
+      try {
+        session = await this.stripe.createShopperIntakeSession({
+          requestId: created.id,
+          buyerEmail: created.buyerEmail,
+          itemsSubtotalCents: created.itemsSubtotalCents,
+          commissionCents: created.commissionCents,
+          estimatedTaxCents: created.estimatedTaxCents,
+          idempotencyKey: `shopper:intake:${created.id}`,
+          successUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(issued.plaintext)}?paid=1`,
+          cancelUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(issued.plaintext)}?cancelled=1`,
+        });
+      } catch (err) {
+        // Stripe outage during intake. The request is already saved
+        // with status AWAITING_INTAKE_PAYMENT; the buyer can retry from
+        // the thread page.
+        this.logger.error({ err, requestId: created.id }, "shopper.intake.stripe_failed");
+        throw new InternalServerErrorException({
+          message: "Could not start payment. Please try again.",
+          code: "shopper_stripe_unavailable",
+        });
+      }
+
+      await this.requests.attachIntakeSession(
+        created.id,
+        session.sessionId,
+        session.paymentIntentId,
+      );
+
+      const tpl = shopperIntakeReceivedTemplate({
+        reference: created.reference,
+        parentReference,
+        threadToken: issued.plaintext,
+        intakePayUrl: session.url,
+        intakeTotalCents: created.intakeTotalCents,
+      });
+      void this.email.send({
+        to: created.buyerEmail,
+        subject: tpl.subject,
+        html: tpl.html,
+        text: tpl.text,
+        idempotencyKey: `shopper:intake_email:${created.id}`,
+        type: "shopper.intake_received",
+      });
+
+      const ops = opsNewShopperRequestTemplate({
+        requestId: created.id,
+        reference: created.reference,
+        parentReference,
+        buyerEmail: created.buyerEmail,
+        itemsCount: created.lines.length,
+        intakeTotalCents: created.intakeTotalCents,
+      });
+      void this.opsAlerts
+        .send({
+          type: "ops.shopper.request",
+          subject: ops.subject,
+          html: ops.html,
+          text: ops.text,
+          idempotencyKey: `ops:shopper:new:${created.id}`,
+        })
+        .catch(() => undefined);
+
+      return {
+        requestId: created.id,
+        reference: created.reference,
+        threadUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(issued.plaintext)}`,
+        payUrl: session.url,
+        intakeTotalCents: created.intakeTotalCents,
+        paymentMethod: "STRIPE",
+      };
+    }
+
+    // ============================================================
+    // BRANCH — WIRE rail
+    //
+    // Skip Stripe entirely. The buyer lands on their thread page, which
+    // surfaces the ID-upload prompt. Bank-transfer instructions stay
+    // hidden until admin approves the ID and issues a quote.
+    //
+    // We still email the buyer so they have the magic link, and we still
+    // fire the ops alert so the admin team knows a high-value request
+    // arrived. The email subject + body is tailored to the wire flow so
+    // the buyer doesn't get confused looking for a Stripe link.
+    // ============================================================
+
+    const wireTpl = shopperIntakeReceivedTemplate({
       reference: created.reference,
       parentReference,
       threadToken: issued.plaintext,
-      intakePayUrl: session.url,
+      // No Stripe URL on the WIRE rail. The template swaps the
+      // call-to-action to "open your private order page" and walks the
+      // buyer through the two-step ID-then-wire flow.
+      intakePayUrl: "",
       intakeTotalCents: created.intakeTotalCents,
+      paymentMethod: "WIRE",
     });
     void this.email.send({
       to: created.buyerEmail,
-      subject: tpl.subject,
-      html: tpl.html,
-      text: tpl.text,
+      subject: wireTpl.subject,
+      html: wireTpl.html,
+      text: wireTpl.text,
       idempotencyKey: `shopper:intake_email:${created.id}`,
       type: "shopper.intake_received",
     });
 
-    // Ops alert — admin team needs to know a new request landed even
-    // before the buyer pays. The intake-paid signal is separate.
-    const ops = opsNewShopperRequestTemplate({
+    const wireOps = opsNewShopperRequestTemplate({
       requestId: created.id,
       reference: created.reference,
       parentReference,
@@ -202,9 +310,9 @@ export class ShopperController {
     void this.opsAlerts
       .send({
         type: "ops.shopper.request",
-        subject: ops.subject,
-        html: ops.html,
-        text: ops.text,
+        subject: `[WIRE] ${wireOps.subject}`,
+        html: wireOps.html,
+        text: wireOps.text,
         idempotencyKey: `ops:shopper:new:${created.id}`,
       })
       .catch(() => undefined);
@@ -213,8 +321,9 @@ export class ShopperController {
       requestId: created.id,
       reference: created.reference,
       threadUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(issued.plaintext)}`,
-      payUrl: session.url,
+      payUrl: "",
       intakeTotalCents: created.intakeTotalCents,
+      paymentMethod: "WIRE",
     };
   }
 
@@ -242,8 +351,35 @@ export class ShopperController {
       parentReference = parentRow?.reference ?? null;
     }
 
+    // Migration 0023 — bank instructions are NEVER rendered on the
+    // intake form. They only ride along on the thread response when:
+    //   1. payment_method is WIRE,
+    //   2. ID is APPROVED, and
+    //   3. status is past the quote-sending step.
+    // Defensive gating in addition to the screen-level check on the
+    // client — keeps the bank details out of any debug payload an
+    // unverified buyer might capture.
+    const bankRevealStatuses = new Set([
+      "QUOTE_SENT",
+      "AWAITING_WIRE_PAYMENT",
+      "WIRE_PROOF_UPLOADED",
+      "WIRE_UNDER_REVIEW",
+    ]);
+    const shouldRevealBank =
+      request.paymentMethod === "WIRE" &&
+      request.idVerificationStatus === "APPROVED" &&
+      bankRevealStatuses.has(request.status as string);
+
+    const bankInstructions = shouldRevealBank ? await this.loadBankInstructions() : null;
+
     return {
-      request: { ...this.serializeBuyerRequest(request), parentReference },
+      request: {
+        ...this.serializeBuyerRequest(request),
+        parentReference,
+        // Surface the bank instructions only on the wire-payment leg.
+        // Null otherwise so the client UI never accidentally renders.
+        bankInstructions,
+      },
       messages: messageRows.map((m) => ({
         id: m.id,
         sender: m.sender,
@@ -329,6 +465,174 @@ export class ShopperController {
       contentLengthBytes: body.contentLengthBytes,
     });
     return presigned;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration 0023 — wire-track buyer endpoints
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Presign a PUT for the ID document or selfie. Same shape as the chat
+   * uploads endpoint but the R2 key prefix lives under `id/` so an
+   * admin-side audit by request id can distinguish KYC artefacts from
+   * chat attachments at a glance.
+   *
+   * Refuses to presign unless the request is on the WIRE rail and in a
+   * state where ID uploads are expected — defence in depth even though
+   * the URL is gated by a magic-link token.
+   */
+  @Public()
+  @Post("r/:token/id-uploads")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async presignIdUpload(
+    @Param("token") token: string,
+    @Body(new ZodValidationPipe(presignShopperUploadSchema))
+    body: PresignShopperUploadInput,
+  ) {
+    const resolved = await this.tokens.resolve(token);
+    const request = await this.requests.getById(resolved.requestId, { includeLines: false });
+    if (request.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request doesn't require ID verification.",
+        code: "shopper_id_not_required",
+      });
+    }
+    const allowed = ["AWAITING_ID_VERIFICATION", "ID_UNDER_REVIEW"];
+    if (
+      !allowed.includes(request.status as string) &&
+      request.idVerificationStatus !== "REJECTED"
+    ) {
+      throw new BadRequestException({
+        message: "ID can no longer be re-uploaded at this stage.",
+        code: "shopper_id_locked",
+        status: request.status,
+        idVerificationStatus: request.idVerificationStatus,
+      });
+    }
+    const key = this.r2.generateKey(`shopper/${resolved.requestId}/id`, body.filename);
+    return this.r2.presignPut({
+      key,
+      contentType: body.contentType,
+      contentLengthBytes: body.contentLengthBytes,
+    });
+  }
+
+  /**
+   * Buyer submits the URLs of the ID document + selfie they just PUT'd
+   * to R2. The server validates the URLs belong to OUR R2 bucket and
+   * advances the request to ID_UNDER_REVIEW.
+   */
+  @Public()
+  @Post("r/:token/id-submit")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async submitIdUploads(
+    @Param("token") token: string,
+    @Body(new ZodValidationPipe(submitShopperIdUploadsSchema))
+    body: SubmitShopperIdUploadsInput,
+  ) {
+    const resolved = await this.tokens.resolve(token);
+    this.assertUrlBelongsToOurBucket(body.idDocumentUrl);
+    this.assertUrlBelongsToOurBucket(body.idSelfieUrl);
+    const updated = await this.requests.submitIdUploads({
+      requestId: resolved.requestId,
+      idDocumentUrl: body.idDocumentUrl,
+      idSelfieUrl: body.idSelfieUrl,
+    });
+
+    // Ops alert — admin team needs to review the ID. Best-effort.
+    void this.opsAlerts
+      .send({
+        type: "ops.shopper.id_submitted",
+        subject: `[WIRE] ID submitted — ${updated.reference}`,
+        html: `<p>Buyer <strong>${this.escapeHtml(updated.buyerEmail)}</strong> uploaded ID for ${this.escapeHtml(updated.reference)}. Review at the admin shopper page.</p>`,
+        text: `Buyer ${updated.buyerEmail} uploaded ID for ${updated.reference}. Review in admin.`,
+        idempotencyKey: `ops:shopper:id_submitted:${updated.id}`,
+      })
+      .catch(() => undefined);
+
+    return {
+      status: updated.status,
+      idVerificationStatus: updated.idVerificationStatus,
+    };
+  }
+
+  /**
+   * Presign a PUT for the wire-transfer proof (bank receipt / screenshot).
+   * Refuses to presign unless ID is APPROVED and the request is in a
+   * state expecting wire proof.
+   */
+  @Public()
+  @Post("r/:token/wire-proof-uploads")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async presignWireProofUpload(
+    @Param("token") token: string,
+    @Body(new ZodValidationPipe(presignShopperUploadSchema))
+    body: PresignShopperUploadInput,
+  ) {
+    const resolved = await this.tokens.resolve(token);
+    const request = await this.requests.getById(resolved.requestId, { includeLines: false });
+    if (request.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request isn't on the wire-transfer track.",
+        code: "shopper_wire_not_applicable",
+      });
+    }
+    if (request.idVerificationStatus !== "APPROVED") {
+      throw new BadRequestException({
+        message: "ID must be approved before uploading wire proof.",
+        code: "shopper_wire_id_not_verified",
+      });
+    }
+    const allowed = ["QUOTE_SENT", "AWAITING_WIRE_PAYMENT", "WIRE_PROOF_UPLOADED", "WIRE_UNDER_REVIEW"];
+    if (!allowed.includes(request.status as string)) {
+      throw new BadRequestException({
+        message: "Wire proof can only be uploaded after we've sent your quote.",
+        code: "shopper_wire_proof_invalid_state",
+        status: request.status,
+      });
+    }
+    const key = this.r2.generateKey(`shopper/${resolved.requestId}/wire`, body.filename);
+    return this.r2.presignPut({
+      key,
+      contentType: body.contentType,
+      contentLengthBytes: body.contentLengthBytes,
+    });
+  }
+
+  /**
+   * Buyer submits the URL of the wire-transfer proof. Advances the
+   * request to WIRE_UNDER_REVIEW so admin can confirm.
+   */
+  @Public()
+  @Post("r/:token/wire-proof-submit")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async submitWireProof(
+    @Param("token") token: string,
+    @Body(new ZodValidationPipe(submitShopperWireProofSchema))
+    body: SubmitShopperWireProofInput,
+  ) {
+    const resolved = await this.tokens.resolve(token);
+    this.assertUrlBelongsToOurBucket(body.wireProofUrl);
+    const updated = await this.requests.submitWireProof({
+      requestId: resolved.requestId,
+      wireProofUrl: body.wireProofUrl,
+    });
+
+    void this.opsAlerts
+      .send({
+        type: "ops.shopper.wire_proof_submitted",
+        subject: `[WIRE] Payment proof submitted — ${updated.reference}`,
+        html: `<p>Buyer <strong>${this.escapeHtml(updated.buyerEmail)}</strong> submitted wire-transfer proof for ${this.escapeHtml(updated.reference)}.</p>`,
+        text: `Buyer ${updated.buyerEmail} submitted wire-transfer proof for ${updated.reference}.`,
+        idempotencyKey: `ops:shopper:wire_submitted:${updated.id}`,
+      })
+      .catch(() => undefined);
+
+    return { status: updated.status };
   }
 
   // ---------------------------------------------------------------------------
@@ -465,6 +769,106 @@ export class ShopperController {
   }
 
   /**
+   * Load the wire-track threshold from configuration. Caps the value so
+   * a misconfigured row can't accidentally disable the wire flow
+   * entirely or push it down to a few dollars.
+   */
+  private async loadWireThresholdCents(): Promise<number> {
+    try {
+      const row = await this.prisma.configuration.findUnique({
+        where: { key: WIRE_THRESHOLD_CONFIG_KEY },
+      });
+      if (!row) return WIRE_THRESHOLD_FALLBACK_CENTS;
+      const value = row.value as unknown;
+      const cents = typeof value === "number" ? value : Number(value);
+      if (!Number.isFinite(cents) || cents < 0 || cents > WIRE_THRESHOLD_MAX_CENTS) {
+        this.logger.warn(
+          { value, max: WIRE_THRESHOLD_MAX_CENTS },
+          "shopper_wire_threshold_cents: invalid; falling back to default",
+        );
+        return WIRE_THRESHOLD_FALLBACK_CENTS;
+      }
+      return Math.floor(cents);
+    } catch (err) {
+      this.logger.error({ err }, "shopper.wire_threshold_load_failed");
+      return WIRE_THRESHOLD_FALLBACK_CENTS;
+    }
+  }
+
+  /**
+   * Load bank-transfer instructions from configuration. Returns null if
+   * the row is missing OR if every meaningful field is empty (defence
+   * against a half-configured environment leaking sensitive blanks).
+   *
+   * Only ever exposed to the buyer thread response when ID is APPROVED
+   * AND status is one of the wire-payment states. The caller enforces
+   * that contract — this loader is permissive.
+   */
+  private async loadBankInstructions(): Promise<Record<string, string> | null> {
+    try {
+      const row = await this.prisma.configuration.findUnique({
+        where: { key: BANK_INSTRUCTIONS_CONFIG_KEY },
+      });
+      if (!row) return null;
+      const value = row.value as unknown;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        this.logger.warn({ value }, "shopper_bank_instructions: not an object");
+        return null;
+      }
+      const obj: Record<string, string> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        if (typeof v === "string") obj[k] = v;
+      }
+      // Are ANY meaningful (non-memo) fields populated? If the row is
+      // still at its seeded blanks we treat it as absent.
+      const meaningful = ["beneficiaryName", "bankName", "accountNumber", "routingNumber", "iban", "swift"];
+      const hasAny = meaningful.some((k) => (obj[k] ?? "").trim().length > 0);
+      return hasAny ? obj : null;
+    } catch (err) {
+      this.logger.error({ err }, "shopper.bank_instructions_load_failed");
+      return null;
+    }
+  }
+
+  /**
+   * Validates that a URL we received from the buyer points at our R2
+   * bucket. We accept either the configured public bucket URL or any
+   * URL on the *.r2.cloudflarestorage.com hosts (private + public).
+   * Throws if the URL is off-platform.
+   */
+  private assertUrlBelongsToOurBucket(url: string): void {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new BadRequestException({
+        message: "Upload URL is malformed.",
+        code: "shopper_upload_url_invalid",
+      });
+    }
+    const host = parsed.host.toLowerCase();
+    const publicBase = this.r2.getPublicBaseHost();
+    const okPublic = publicBase ? host === publicBase : false;
+    const okPrivate = /(^|\.)r2\.cloudflarestorage\.com$/.test(host);
+    if (!okPublic && !okPrivate) {
+      throw new BadRequestException({
+        message: "Upload URL is not from our storage bucket.",
+        code: "shopper_upload_url_off_platform",
+      });
+    }
+  }
+
+  /** Tiny HTML escape for ops-alert templates we build inline. */
+  private escapeHtml(s: string): string {
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  /**
    * Buyer-facing serialization. Strips internal fields (admin notes,
    * Stripe ids, internal fee breakdown) — the buyer sees totals, status,
    * shipping, and lines without admin commentary.
@@ -477,6 +881,23 @@ export class ShopperController {
       status: row.status,
       buyerEmail: row.buyerEmail,
       buyerName: row.buyerName,
+      // Migration 0023 — wire-track UI state. The buyer thread needs to
+      // know which rail this is + how far through the ID/wire flow they
+      // are; the bank-instructions payload is emitted SEPARATELY in
+      // getThread() so we can gate it on idVerificationStatus + status.
+      buyerPhone: row.buyerPhone,
+      paymentMethod: row.paymentMethod,
+      idVerificationStatus: row.idVerificationStatus,
+      idRejectionReason: row.idRejectionReason,
+      // We expose booleans, not URLs — the buyer doesn't need a direct
+      // link to the file they themselves uploaded, and we don't want to
+      // leak the path. Their own ID viewer renders nothing; only admin
+      // sees the URLs.
+      hasIdDocument: !!row.idDocumentUrl,
+      hasIdSelfie: !!row.idSelfieUrl,
+      hasWireProof: !!row.wireProofUrl,
+      wireProofUploadedAt: row.wireProofUploadedAt,
+      wireConfirmedAt: row.wireConfirmedAt,
       shippingAddress: row.shippingAddress,
       shippingMethod: row.shippingMethod,
       trackingNumber: row.trackingNumber,

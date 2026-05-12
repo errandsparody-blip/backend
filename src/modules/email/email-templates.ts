@@ -474,27 +474,57 @@ export function shopperIntakeReceivedTemplate(args: {
   reference: string;
   parentReference?: string | null;
   threadToken: string;
+  /** Stripe Checkout URL. Empty string when the buyer is on the WIRE rail. */
   intakePayUrl: string;
   intakeTotalCents: number;
+  /**
+   * Migration 0023 — which rail the server placed this request on.
+   * "WIRE" swaps the call-to-action from "pay securely" to "verify ID +
+   * receive bank instructions on your private order page". Defaults to
+   * "STRIPE" so legacy callers stay on the original copy.
+   */
+  paymentMethod?: "STRIPE" | "WIRE";
 }): RenderedEmail {
   const total = `$${(args.intakeTotalCents / 100).toFixed(2)}`;
-  const base: RenderedEmail = {
-    subject: `Your USA Errands shopper request — ${total}`,
-    html: shell({
-      eyebrow: "[08] Shopper request",
-      title: "Your request is in. One step to finish.",
-      bodyHtml: `<p style="margin:0 0 12px 0;">Thanks for using USA Errands. To start procurement we need the upfront amount of <strong>${total}</strong>.</p>
-        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">After we buy your items we'll either send a small follow-up invoice for the actual cost difference + shipping, or refund the difference. Either way, you'll see it in this thread.</p>
-        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">Want to add more items later? Use the order reference above when you submit a new request and we'll link them.</p>`,
-      cta: { label: `Pay ${total} securely`, href: shopperPayUrl(args.intakePayUrl) },
-    }),
-    text:
-      `Your USA Errands shopper request — ${total}\n\n` +
-      `Thanks for using USA Errands. To start procurement we need the upfront amount of ${total}.\n\n` +
-      `Pay securely: ${args.intakePayUrl}\n\n` +
-      `Open your request thread anytime: ${shopperThreadUrl(args.threadToken)}\n\n` +
-      `To add more items later, submit a new request and reference this order number.`,
-  };
+  const threadUrl = shopperThreadUrl(args.threadToken);
+  const isWire = args.paymentMethod === "WIRE";
+
+  const base: RenderedEmail = isWire
+    ? {
+        subject: `Your USA Errands shopper request — ${total} (ID verification required)`,
+        html: shell({
+          eyebrow: "[08] Shopper request",
+          title: "Your request is in. Two steps to finish.",
+          bodyHtml: `<p style="margin:0 0 12px 0;">Thanks for using USA Errands. Orders over $1,000 are paid by bank wire transfer.</p>
+            <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;"><strong>Step 1</strong> — open your private order page and upload a photo of your government-issued ID and a selfie holding it. We review within one business day.</p>
+            <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;"><strong>Step 2</strong> — once we approve your ID, we'll send the bank-transfer instructions on the same page. You wire ${total}, upload your receipt, and we start sourcing as soon as the bank confirms.</p>
+            <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">Want to add more items later? Use the order reference above when you submit a new request and we'll link them.</p>`,
+          cta: { label: "Open your order page", href: threadUrl },
+        }),
+        text:
+          `Your USA Errands shopper request — ${total} (ID verification required)\n\n` +
+          `Thanks for using USA Errands. Orders over $1,000 are paid by bank wire transfer.\n\n` +
+          `Step 1 — Open your private order page and upload a photo of your government-issued ID and a selfie holding it. We review within one business day.\n\n` +
+          `Step 2 — Once approved, we'll send bank-transfer instructions on the same page. You wire ${total}, upload your receipt, and we start sourcing as soon as the bank confirms.\n\n` +
+          `Open your order page: ${threadUrl}`,
+      }
+    : {
+        subject: `Your USA Errands shopper request — ${total}`,
+        html: shell({
+          eyebrow: "[08] Shopper request",
+          title: "Your request is in. One step to finish.",
+          bodyHtml: `<p style="margin:0 0 12px 0;">Thanks for using USA Errands. To start procurement we need the upfront amount of <strong>${total}</strong>.</p>
+            <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">After we buy your items we'll either send a small follow-up invoice for the actual cost difference + shipping, or refund the difference. Either way, you'll see it in this thread.</p>
+            <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">Want to add more items later? Use the order reference above when you submit a new request and we'll link them.</p>`,
+          cta: { label: `Pay ${total} securely`, href: shopperPayUrl(args.intakePayUrl) },
+        }),
+        text:
+          `Your USA Errands shopper request — ${total}\n\n` +
+          `Thanks for using USA Errands. To start procurement we need the upfront amount of ${total}.\n\n` +
+          `Pay securely: ${args.intakePayUrl}\n\n` +
+          `Open your request thread anytime: ${threadUrl}\n\n` +
+          `To add more items later, submit a new request and reference this order number.`,
+      };
   return withShopperReference(base, args.reference, args.parentReference);
 }
 

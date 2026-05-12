@@ -47,17 +47,27 @@ import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { PrismaService } from "../../common/prisma.service";
 import {
+  adminApproveShopperIdSchema,
   adminCancelShopperSchema,
+  adminConfirmShopperWireSchema,
   adminListShopperRequestsSchema,
+  adminRejectShopperIdSchema,
+  adminRejectShopperWireSchema,
   adminSendFollowupSchema,
+  adminSendShopperQuoteSchema,
   adminSetShopperShippingSchema,
   adminShipShopperSchema,
   adminUpdateShopperLineSchema,
   postShopperMessageSchema,
   presignShopperUploadSchema,
+  type AdminApproveShopperIdInput,
   type AdminCancelShopperInput,
+  type AdminConfirmShopperWireInput,
   type AdminListShopperRequestsInput,
+  type AdminRejectShopperIdInput,
+  type AdminRejectShopperWireInput,
   type AdminSendFollowupInput,
+  type AdminSendShopperQuoteInput,
   type AdminSetShopperShippingInput,
   type AdminShipShopperInput,
   type AdminUpdateShopperLineInput,
@@ -527,6 +537,166 @@ export class AdminShopperController {
     });
 
     return updated;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration 0023 — wire-track admin actions
+  //
+  // The four endpoints below drive the high-value (> wire threshold)
+  // workflow. They're idempotent at the status-transition level — a
+  // double-click produces a 409, not a corrupt row.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Approve the buyer's gov-ID upload. Status moves to QUOTE_SENT, the
+   * bank-instructions panel becomes visible to the buyer on the thread
+   * page, and an optional admin note is posted to the chat thread.
+   */
+  @Post(":id/id/approve")
+  @HttpCode(HttpStatus.OK)
+  async approveId(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(adminApproveShopperIdSchema)) body: AdminApproveShopperIdInput,
+  ) {
+    const updated = await this.requests.approveIdVerification({
+      requestId: id,
+      actorId: user.sub,
+    });
+    // Surface the approval in the buyer's chat thread so they see the
+    // "your ID has been verified — see bank instructions above" hint
+    // alongside any admin note. Best-effort.
+    const note =
+      (body.note?.trim() ? `${body.note.trim()}\n\n` : "") +
+      "Your ID has been verified. The bank-transfer instructions are now visible on your request page. " +
+      "Please make the transfer and upload your bank receipt when done.";
+    try {
+      await this.postAdminNote(id, note, user.sub);
+    } catch (err) {
+      this.logger.warn({ err, requestId: id }, "shopper.id.approve.note_failed");
+    }
+    return updated;
+  }
+
+  /**
+   * Reject the buyer's ID. The reason is sent to the buyer as a chat
+   * message so they know exactly what to fix.
+   */
+  @Post(":id/id/reject")
+  @HttpCode(HttpStatus.OK)
+  async rejectId(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(adminRejectShopperIdSchema)) body: AdminRejectShopperIdInput,
+  ) {
+    const updated = await this.requests.rejectIdVerification({
+      requestId: id,
+      reason: body.reason,
+      actorId: user.sub,
+    });
+    // Post the rejection reason directly to the chat so the buyer sees it.
+    try {
+      await this.postAdminNote(
+        id,
+        `We couldn't verify your ID. Reason: ${body.reason}\n\nPlease re-upload a clearer photo of your government-issued ID and a selfie holding it.`,
+        user.sub,
+      );
+    } catch (err) {
+      this.logger.warn({ err, requestId: id }, "shopper.id.reject.note_failed");
+    }
+    return updated;
+  }
+
+  /**
+   * Confirm a wire-transfer payment. Status snaps to PROCURING (passing
+   * through WIRE_CONFIRMED and PURCHASE_APPROVED in the audit log). An
+   * optional admin note rides along on the chat thread.
+   */
+  @Post(":id/wire/confirm")
+  @HttpCode(HttpStatus.OK)
+  async confirmWire(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(adminConfirmShopperWireSchema)) body: AdminConfirmShopperWireInput,
+  ) {
+    this.assertFinanceRole(user);
+    const updated = await this.requests.confirmWirePayment({
+      requestId: id,
+      actorId: user.sub,
+    });
+    const note =
+      (body.note?.trim() ? `${body.note.trim()}\n\n` : "") +
+      "Payment confirmed. We've started sourcing your items and will update you here as we go.";
+    try {
+      await this.postAdminNote(id, note, user.sub);
+    } catch (err) {
+      this.logger.warn({ err, requestId: id }, "shopper.wire.confirm.note_failed");
+    }
+    return updated;
+  }
+
+  /**
+   * Reject the buyer's wire-transfer proof. Status returns to
+   * AWAITING_WIRE_PAYMENT and the rejection reason is posted to chat so
+   * the buyer can resubmit.
+   */
+  @Post(":id/wire/reject")
+  @HttpCode(HttpStatus.OK)
+  async rejectWire(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(adminRejectShopperWireSchema)) body: AdminRejectShopperWireInput,
+  ) {
+    this.assertFinanceRole(user);
+    const updated = await this.requests.rejectWireProof({
+      requestId: id,
+      reason: body.reason,
+      actorId: user.sub,
+    });
+    try {
+      await this.postAdminNote(
+        id,
+        `We couldn't match your wire-transfer proof. Reason: ${body.reason}\n\nPlease re-upload a clearer bank receipt or contact us if you need help.`,
+        user.sub,
+      );
+    } catch (err) {
+      this.logger.warn({ err, requestId: id }, "shopper.wire.reject.note_failed");
+    }
+    return updated;
+  }
+
+  /**
+   * Send the quote — convenience endpoint distinct from /id/approve.
+   * In v1 approveId already moves the status to QUOTE_SENT, so this
+   * endpoint exists to let admin re-send the quote message at any point
+   * after that without changing the status. Useful when the buyer asks
+   * for the bank details again or when a fresh chat reminder is wanted.
+   */
+  @Post(":id/quote/send")
+  @HttpCode(HttpStatus.OK)
+  async sendQuote(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(adminSendShopperQuoteSchema)) body: AdminSendShopperQuoteInput,
+  ) {
+    const request = await this.requests.getById(id, { includeLines: false });
+    if (request.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request isn't on the wire-transfer track.",
+        code: "shopper_wire_not_applicable",
+      });
+    }
+    if (request.idVerificationStatus !== "APPROVED") {
+      throw new BadRequestException({
+        message: "Approve the ID before sending the quote.",
+        code: "shopper_quote_id_not_verified",
+      });
+    }
+    const body0 =
+      (body.message?.trim() ? `${body.message.trim()}\n\n` : "") +
+      "Here's a quick reminder of the bank-transfer instructions for your order. The exact bank details are shown on your request page once your ID is approved — please include the reference in the wire memo so we can match the payment to your order.";
+    await this.postAdminNote(id, body0, user.sub);
+    return { status: request.status };
   }
 
   // ---------------------------------------------------------------------------
