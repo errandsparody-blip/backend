@@ -152,12 +152,11 @@ export class ProductService {
     // existence to the wrong tenant.
     const product = await this.prisma.product.findFirst({ where: { id, vendorId } });
     if (!product) throw new NotFoundException();
-    // Compute lock state — needed for the form to render fields read-only.
-    // Done at read time rather than persisted because it's a pure function
-    // of `count(skus where productId)` and we'd otherwise need triggers to
-    // keep a `lockedAt` column in sync.
-    const skuCount = await this.prisma.sku.count({ where: { productId: id, vendorId } });
-    return this.toPublic(product, { locked: skuCount > 0 });
+    // Products are always locked for vendors once they exist (the only
+    // changes allowed are image + archive). Returning `locked: true`
+    // here tells the frontend to render every field read-only. The
+    // backend enforces the same lock in `update()` for defence in depth.
+    return this.toPublic(product, { locked: true });
   }
 
   async update(
@@ -169,34 +168,40 @@ export class ProductService {
     const before = await this.prisma.product.findFirst({ where: { id, vendorId } });
     if (!before) throw new NotFoundException();
 
-    // Once stock has been received under this product (i.e. any SKU exists),
-    // the entire product becomes IMMUTABLE except for `status` — vendors
-    // can still archive. Rationale:
+    // Products are IMMUTABLE for vendors the moment they're created. The
+    // only fields they can change post-create are `status` (archive) and
+    // `imageUrl` (cosmetic, no compliance impact).
+    //
+    // Rationale — the same constraints that used to fire only once stock
+    // existed apply just as well from day one:
     //
     //   - variant   → part of the SKU id format (`UER-<vendor>-<code>-<variant>`).
     //                 Editing would silently fork ids on the next receive.
     //   - weight, dimensions, storageTier
-    //               → drive shipping rates and storage billing. Edits would
-    //                 desync our published prices from what the vendor signed
-    //                 up for and let a vendor under-declare retroactively to
-    //                 dodge carrier reweigh charges and storage fees.
+    //               → drive shipping rates and storage billing. Locking at
+    //                 creation eliminates the entire class of "edit my
+    //                 product to under-declare and dodge carrier reweigh
+    //                 charges" attack.
     //   - declaredValueCents, countryOfOrigin, hsCode
-    //               → customs declarations on every order we&apos;ve already
-    //                 shipped. Editing creates retroactive customs liability.
+    //               → customs declarations. Any future PSN / order that
+    //                 references this product needs the originally-declared
+    //                 values; editing creates retroactive customs liability.
     //   - name      → labels physical inventory in the warehouse. Renaming
-    //                 mid-flight breaks pick lists.
+    //                 breaks pick lists for any future receive.
     //
-    // The escape hatch is the same as before: archive the product and create
-    // a fresh one with the new attributes. Historical orders/PSNs stay
-    // attached to the archived product for audit purposes.
-    const skuCount = await this.prisma.sku.count({
-      where: { productId: id, vendorId },
-    });
+    // Escape hatch: archive the product and create a fresh one with the
+    // new attributes. Historical orders/PSNs stay attached to the
+    // archived product for audit purposes.
+    //
+    // We previously gated this on `skuCount > 0`. That left a window
+    // where a vendor could rapid-fire edits between creation and the
+    // first PSN — useful for typo fixes, but also abusable. Per product
+    // owner decision (2026-05): lock at creation, no window.
+
     // NOTE: `imageUrl` is deliberately NOT in this list. Images are
     // cosmetic — they don't affect shipping rates, customs, storage
     // billing, or pick lists. Letting vendors refresh a stale or
-    // low-quality image even after stock has arrived is a UX win with
-    // zero compliance cost.
+    // low-quality image is a UX win with zero compliance cost.
     const lockableFields: Array<keyof UpdateProductInput> = [
       "name",
       "variant",
@@ -209,24 +214,23 @@ export class ProductService {
       "heightIn",
       "storageTier",
     ];
-    if (skuCount > 0) {
-      // Detect *attempted* changes — patch fields that differ from the
-      // current value. A patch that just re-sends the same value is a
-      // no-op idempotent edit and we accept it silently.
-      const changedFields = lockableFields.filter((field) => {
-        const next = patch[field];
-        if (next === undefined) return false;
-        const current = (before as unknown as Record<string, unknown>)[field];
-        return next !== current;
+    // Detect *attempted* changes — patch fields that differ from the
+    // current value. A patch that re-sends the same value is a no-op
+    // idempotent edit and we accept it silently so a benign re-save
+    // from the UI doesn't surface a "product_locked" 400.
+    const changedFields = lockableFields.filter((field) => {
+      const next = patch[field];
+      if (next === undefined) return false;
+      const current = (before as unknown as Record<string, unknown>)[field];
+      return next !== current;
+    });
+    if (changedFields.length > 0) {
+      throw new BadRequestException({
+        message:
+          "Products can't be edited after they're created. Archive this product and create a new one with the updated details instead.",
+        code: "product_locked",
+        fields: changedFields,
       });
-      if (changedFields.length > 0) {
-        throw new BadRequestException({
-          message:
-            "Product can't be edited once stock has been received. Archive this product and create a new one with the updated details instead.",
-          code: "product_locked",
-          fields: changedFields,
-        });
-      }
     }
 
     const updated = await this.prisma.product.update({
@@ -264,7 +268,11 @@ export class ProductService {
       beforeState: this.diffSnapshot(before),
       afterState: this.diffSnapshot(updated),
     });
-    return this.toPublic(updated, { locked: skuCount > 0 });
+    // Always locked from the vendor's POV — the only fields this PATCH
+    // accepted are `imageUrl` / `status`, which are intentionally outside
+    // the lockable set. Returning `locked: true` keeps the form rendered
+    // in its read-only state across the round trip.
+    return this.toPublic(updated, { locked: true });
   }
 
   /**

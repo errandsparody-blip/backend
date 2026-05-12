@@ -33,6 +33,12 @@ import {
   type PostPsnMessageInput,
   type UpdatePsnDraftInput,
 } from "../../common/schemas/psn.schema";
+import {
+  presignShopperUploadSchema,
+  type PresignShopperUploadInput,
+} from "../../common/schemas/shopper.schema";
+
+import { R2Service } from "../integrations/r2/r2.service";
 
 import { AdminPsnService } from "./admin-psn.service";
 import { PsnMessageService } from "./psn-message.service";
@@ -51,6 +57,7 @@ export class PsnController {
     // vendorId comparison.
     private readonly adminPsns: AdminPsnService,
     private readonly messages: PsnMessageService,
+    private readonly r2: R2Service,
   ) {}
 
   @Get()
@@ -199,5 +206,29 @@ export class PsnController {
   ): Promise<void> {
     await this.psns.get(user.vendorId!, id);
     return this.messages.markReadByVendor(id);
+  }
+
+  /**
+   * Migration 0024 — presign an R2 PUT for a vendor-side chat
+   * attachment. The vendor must own the PSN — psns.get() throws 404 if
+   * not. Same MIME allow-list / size cap as the shopper presign route;
+   * key prefix is scoped to `psn/<id>/vendor` so forensic audits can
+   * tell vendor-uploaded vs admin-uploaded attachments apart.
+   */
+  @Post(":id/uploads")
+  @HttpCode(HttpStatus.OK)
+  async presignChatUpload(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(presignShopperUploadSchema))
+    body: PresignShopperUploadInput,
+  ) {
+    await this.psns.get(user.vendorId!, id);
+    const key = this.r2.generateKey(`psn/${id}/vendor`, body.filename);
+    return this.r2.presignPut({
+      key,
+      contentType: body.contentType,
+      contentLengthBytes: body.contentLengthBytes,
+    });
   }
 }

@@ -29,6 +29,12 @@ import {
   type RejectPsnInput,
   type RequestPsnReturnInput,
 } from "../../common/schemas/psn.schema";
+import {
+  presignShopperUploadSchema,
+  type PresignShopperUploadInput,
+} from "../../common/schemas/shopper.schema";
+
+import { R2Service } from "../integrations/r2/r2.service";
 
 import { AdminPsnService } from "./admin-psn.service";
 import { PsnMessageService } from "./psn-message.service";
@@ -39,6 +45,7 @@ export class AdminPsnController {
   constructor(
     private readonly admin: AdminPsnService,
     private readonly messages: PsnMessageService,
+    private readonly r2: R2Service,
   ) {}
 
   @Get()
@@ -147,5 +154,29 @@ export class AdminPsnController {
   @HttpCode(HttpStatus.NO_CONTENT)
   markRead(@Param("id", new ParseUUIDPipe()) id: string): Promise<void> {
     return this.messages.markReadByAdmin(id);
+  }
+
+  /**
+   * Migration 0024 — presign an R2 PUT for a chat attachment. Reuses the
+   * shopper presign schema (same MIME allow-list, same 25 MB cap) so we
+   * only have one source of truth for what a chat attachment can be.
+   * Key prefix is scoped to `psn/<id>/admin` for forensic auditing.
+   */
+  @Post(":id/uploads")
+  @HttpCode(HttpStatus.OK)
+  async presignChatUpload(
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(presignShopperUploadSchema))
+    body: PresignShopperUploadInput,
+  ) {
+    // Confirm the PSN exists — admin role is already gated by @Roles
+    // above, so we don't need vendor-scope here.
+    await this.admin.get(id);
+    const key = this.r2.generateKey(`psn/${id}/admin`, body.filename);
+    return this.r2.presignPut({
+      key,
+      contentType: body.contentType,
+      contentLengthBytes: body.contentLengthBytes,
+    });
   }
 }
