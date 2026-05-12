@@ -60,10 +60,26 @@ export type DeclaredBoxCounts = Partial<Record<StorageTier, number>>;
 /**
  * Sum onboarding fees for a declared mix of boxes.
  *
- * Throws NegotiatedTierError (400, code = `psn_negotiated_tier`) if any
- * tier present has `negotiated=true` and no explicit override. The frontend
- * should detect this code and tell the vendor to contact support before
- * resubmitting — it's a normal product flow, not an error to log to Sentry.
+ * Two modes, distinguished by whether the vendor declared any pallets:
+ *
+ *   LOOSE MODE (declared.PALLET is 0 or absent)
+ *     Each box contributes stocking + first-month storage (the full
+ *     `totalCents` from the schedule). Monthly storage rolls per-SKU
+ *     starting on the 1st.
+ *
+ *   PALLET MODE (declared.PALLET >= 1)
+ *     Each box on a pallet contributes ONLY its stocking fee — the
+ *     pallet's $45/month covers storage going forward, so charging
+ *     per-box first-month storage on top would double-bill. PALLET
+ *     itself contributes its monthly-storage rate × pallet count as
+ *     the pallet's first-month charge (the "first month included in
+ *     onboarding" pattern, just at the pallet rate). PALLET stays in
+ *     `schedule.onboarding` as `{ negotiated: true }` so we read the
+ *     storage figure from `schedule.monthlyStorage.PALLET` instead.
+ *
+ * Throws NegotiatedTierError (400, code = `psn_negotiated_tier`) for
+ * non-PALLET tiers that are marked negotiated — those still need a
+ * manual quote regardless of mode.
  */
 export function computeOnboardingFeeCents(
   schedule: FeeSchedule,
@@ -72,8 +88,34 @@ export function computeOnboardingFeeCents(
   const perTier: Array<{ tier: StorageTier; count: number; subtotalCents: number }> = [];
   let totalCents = 0;
 
+  const palletCount = Math.max(0, Number(declared.PALLET ?? 0));
+  const isPalletMode = palletCount > 0;
+
   for (const [tier, count] of Object.entries(declared) as Array<[StorageTier, number]>) {
     if (!count || count <= 0) continue;
+
+    // PALLET tier — only charged in pallet mode (loose mode shouldn't
+    // include it; if it does, that's a misuse and we ignore it). The
+    // pallet's first-month storage uses the monthly rate from the
+    // schedule's monthlyStorage table, NOT the onboarding table (which
+    // keeps PALLET as `negotiated` so the box loop below doesn't try
+    // to read totalCents off it).
+    if (tier === "PALLET") {
+      if (!isPalletMode) continue;
+      const palletFirstMonth = schedule.monthlyStorage?.PALLET;
+      if (typeof palletFirstMonth !== "number" || !Number.isFinite(palletFirstMonth)) {
+        // PALLET monthly rate isn't configured. Fall back to surfacing
+        // the tier as negotiated so finance is forced to set the rate
+        // before vendors can submit pallet PSNs.
+        throw new NegotiatedTierError(tier);
+      }
+      const subtotal = palletFirstMonth * count;
+      perTier.push({ tier, count, subtotalCents: subtotal });
+      totalCents += subtotal;
+      continue;
+    }
+
+    // Box tiers (SMALL / MEDIUM / LARGE / X_LARGE).
     const fee = schedule.onboarding[tier];
     // Defensive: if the schedule was seeded before this tier existed, `fee`
     // is undefined. `"negotiated" in undefined` would throw a raw TypeError
@@ -85,15 +127,28 @@ export function computeOnboardingFeeCents(
     if ("negotiated" in fee && fee.negotiated) {
       throw new NegotiatedTierError(tier);
     }
-    const totalCentsForTier = (fee as { totalCents?: number }).totalCents;
-    if (typeof totalCentsForTier !== "number" || !Number.isFinite(totalCentsForTier)) {
-      // Same defence as above: an inconsistent config row should produce
-      // a structured response, not a NaN that propagates into the ledger.
-      throw new MissingTierFeeError(tier);
+
+    if (isPalletMode) {
+      // Stocking only — the pallet's monthly storage covers the rest.
+      const stocking = (fee as { stockingCents?: number }).stockingCents;
+      if (typeof stocking !== "number" || !Number.isFinite(stocking)) {
+        throw new MissingTierFeeError(tier);
+      }
+      const subtotal = stocking * count;
+      perTier.push({ tier, count, subtotalCents: subtotal });
+      totalCents += subtotal;
+    } else {
+      // Loose mode — full stocking + first-month storage per box.
+      const totalCentsForTier = (fee as { totalCents?: number }).totalCents;
+      if (typeof totalCentsForTier !== "number" || !Number.isFinite(totalCentsForTier)) {
+        // Same defence as above: an inconsistent config row should produce
+        // a structured response, not a NaN that propagates into the ledger.
+        throw new MissingTierFeeError(tier);
+      }
+      const subtotal = totalCentsForTier * count;
+      perTier.push({ tier, count, subtotalCents: subtotal });
+      totalCents += subtotal;
     }
-    const subtotal = totalCentsForTier * count;
-    perTier.push({ tier, count, subtotalCents: subtotal });
-    totalCents += subtotal;
   }
 
   return { totalCents, perTier };

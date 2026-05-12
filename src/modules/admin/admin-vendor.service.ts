@@ -266,6 +266,23 @@ export class AdminVendorService {
     //    other, so Promise.all keeps the round-trip tight. We rely on the
     //    `ledger_entries(vendor_id, created_at)` and per-table vendorId
     //    indexes added in earlier migrations; no new index needed.
+    //
+    // Every individual query is wrapped in `.catch()` so a single bad
+    // query degrades that one section to empty rather than 500'ing the
+    // whole overview. Without this guard, a single column rename or
+    // missing migration silently took down the entire vendor detail
+    // page (production incident: psnHold field-name mismatch). Logging
+    // happens inline so the issue is still visible in Sentry / stdout
+    // but the admin sees the rest of the data.
+    const onErr =
+      (label: string) =>
+      <T>(fallback: T) =>
+      (err: unknown): T => {
+        // eslint-disable-next-line no-console
+        console.warn(`[admin-vendor.overview] ${label} query failed:`, err);
+        return fallback;
+      };
+
     const [
       psnsByStatus,
       psnsRecent,
@@ -278,115 +295,219 @@ export class AdminVendorService {
       skuTierAgg,
       activeHolds,
     ] = await Promise.all([
-      this.prisma.psn.groupBy({
-        by: ["status"],
-        where: { vendorId },
-        _count: { _all: true },
-      }),
-      this.prisma.psn.findMany({
-        where: { vendorId },
-        orderBy: { createdAt: "desc" },
-        take: 10,
-        select: {
-          id: true,
-          status: true,
-          carrier: true,
-          masterTracking: true,
-          declaredBoxCounts: true,
-          submittedAt: true,
-          receivedAt: true,
-          createdAt: true,
-          onboardingFeeCents: true,
-        },
-      }),
-      this.prisma.order.groupBy({
-        by: ["status"],
-        where: { vendorId },
-        _count: { _all: true },
-        _sum: { totalChargedCents: true },
-      }),
-      this.prisma.order.findMany({
-        where: { vendorId },
-        orderBy: { createdAt: "desc" },
-        take: 10,
-        select: {
-          id: true,
-          externalReference: true,
-          status: true,
-          recipientName: true,
-          shipCity: true,
-          shipState: true,
-          shipCountry: true,
-          carrier: true,
-          trackingNumber: true,
-          totalChargedCents: true,
-          submittedAt: true,
-          shippedAt: true,
-          deliveredAt: true,
-          createdAt: true,
-        },
-      }),
-      this.prisma.return.groupBy({
-        by: ["status"],
-        where: { vendorId },
-        _count: { _all: true },
-      }),
-      this.prisma.return.findMany({
-        where: { vendorId },
-        orderBy: { createdAt: "desc" },
-        take: 10,
-        select: {
-          id: true,
-          status: true,
-          reason: true,
-          // The Return model splits the refund-side amounts into two
-          // columns: refundAmountCents (paid back to vendor) and
-          // restockFeeCents (kept by USA Errands). We surface both so
-          // the admin can spot a return that cost the vendor money.
-          refundAmountCents: true,
-          restockFeeCents: true,
-          createdAt: true,
-          inspectedAt: true,
-        },
-      }),
+      this.prisma.psn
+        .groupBy({
+          by: ["status"],
+          where: { vendorId },
+          _count: { _all: true },
+        })
+        .catch(
+          onErr("psn.groupBy")(
+            [] as Array<{ status: unknown; _count: { _all: number } }>,
+          ),
+        ),
+      this.prisma.psn
+        .findMany({
+          where: { vendorId },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+          select: {
+            id: true,
+            status: true,
+            carrier: true,
+            masterTracking: true,
+            declaredBoxCounts: true,
+            submittedAt: true,
+            receivedAt: true,
+            createdAt: true,
+            onboardingFeeCents: true,
+          },
+        })
+        .catch(
+          onErr("psn.findMany")(
+            [] as Array<{
+              id: string;
+              status: unknown;
+              carrier: string | null;
+              masterTracking: string | null;
+              declaredBoxCounts: unknown;
+              submittedAt: Date | null;
+              receivedAt: Date | null;
+              createdAt: Date;
+              onboardingFeeCents: number | null;
+            }>,
+          ),
+        ),
+      this.prisma.order
+        .groupBy({
+          by: ["status"],
+          where: { vendorId },
+          _count: { _all: true },
+          _sum: { totalChargedCents: true },
+        })
+        .catch(
+          onErr("order.groupBy")(
+            [] as Array<{
+              status: unknown;
+              _count: { _all: number };
+              _sum: { totalChargedCents: number | null };
+            }>,
+          ),
+        ),
+      this.prisma.order
+        .findMany({
+          where: { vendorId },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+          select: {
+            id: true,
+            externalReference: true,
+            status: true,
+            recipientName: true,
+            shipCity: true,
+            shipState: true,
+            shipCountry: true,
+            carrier: true,
+            trackingNumber: true,
+            totalChargedCents: true,
+            submittedAt: true,
+            shippedAt: true,
+            deliveredAt: true,
+            createdAt: true,
+          },
+        })
+        .catch(
+          onErr("order.findMany")(
+            [] as Array<{
+              id: string;
+              externalReference: string | null;
+              status: unknown;
+              recipientName: string;
+              shipCity: string;
+              shipState: string;
+              shipCountry: string;
+              carrier: string | null;
+              trackingNumber: string | null;
+              totalChargedCents: number;
+              submittedAt: Date | null;
+              shippedAt: Date | null;
+              deliveredAt: Date | null;
+              createdAt: Date;
+            }>,
+          ),
+        ),
+      this.prisma.return
+        .groupBy({
+          by: ["status"],
+          where: { vendorId },
+          _count: { _all: true },
+        })
+        .catch(
+          onErr("return.groupBy")(
+            [] as Array<{ status: unknown; _count: { _all: number } }>,
+          ),
+        ),
+      this.prisma.return
+        .findMany({
+          where: { vendorId },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+          select: {
+            id: true,
+            status: true,
+            reason: true,
+            // The Return model splits the refund-side amounts into two
+            // columns: refundAmountCents (paid back to vendor) and
+            // restockFeeCents (kept by USA Errands). We surface both so
+            // the admin can spot a return that cost the vendor money.
+            refundAmountCents: true,
+            restockFeeCents: true,
+            createdAt: true,
+            inspectedAt: true,
+          },
+        })
+        .catch(
+          onErr("return.findMany")(
+            [] as Array<{
+              id: string;
+              status: unknown;
+              reason: unknown;
+              refundAmountCents: number;
+              restockFeeCents: number;
+              createdAt: Date;
+              inspectedAt: Date | null;
+            }>,
+          ),
+        ),
       // Lifetime spend / inflow per ledger category. Sum the SIGNED amount
       // and we'll surface the absolute value of negative buckets as "paid",
       // and the positive value of DEPOSIT as "deposited."
-      this.prisma.ledgerEntry.groupBy({
-        by: ["type"],
-        where: { vendorId },
-        _count: { _all: true },
-        _sum: { amountCents: true },
-      }),
-      this.prisma.ledgerEntry.findMany({
-        where: { vendorId },
-        orderBy: { createdAt: "desc" },
-        take: 25,
-        select: {
-          id: true,
-          type: true,
-          amountCents: true,
-          balanceAfterCents: true,
-          description: true,
-          referenceType: true,
-          referenceId: true,
-          createdAt: true,
-        },
-      }),
+      this.prisma.ledgerEntry
+        .groupBy({
+          by: ["type"],
+          where: { vendorId },
+          _count: { _all: true },
+          _sum: { amountCents: true },
+        })
+        .catch(
+          onErr("ledger.groupBy")(
+            [] as Array<{
+              type: unknown;
+              _count: { _all: number };
+              _sum: { amountCents: number | null };
+            }>,
+          ),
+        ),
+      this.prisma.ledgerEntry
+        .findMany({
+          where: { vendorId },
+          orderBy: { createdAt: "desc" },
+          take: 25,
+          select: {
+            id: true,
+            type: true,
+            amountCents: true,
+            balanceAfterCents: true,
+            description: true,
+            referenceType: true,
+            referenceId: true,
+            createdAt: true,
+          },
+        })
+        .catch(
+          onErr("ledger.findMany")(
+            [] as Array<{
+              id: string;
+              type: unknown;
+              amountCents: number;
+              balanceAfterCents: number | null;
+              description: string;
+              referenceType: string | null;
+              referenceId: string | null;
+              createdAt: Date;
+            }>,
+          ),
+        ),
       // Active inventory by storage tier — drives the recurring-storage
       // estimate. We count SKU rows with stock > 0; the storage-billing cron
       // charges per SKU bucket so the count maps 1:1 to next month's bill.
-      this.prisma.sku.groupBy({
-        by: ["storageTier"],
-        where: {
-          vendorId,
-          status: "ACTIVE",
-          // Either available or reserved counts as "occupying a slot" for
-          // storage billing purposes — matches the cron's view of the world.
-          OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
-        },
-        _count: { _all: true },
-      }),
+      this.prisma.sku
+        .groupBy({
+          by: ["storageTier"],
+          where: {
+            vendorId,
+            status: "ACTIVE",
+            // Either available or reserved counts as "occupying a slot" for
+            // storage billing purposes — matches the cron's view of the world.
+            OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
+          },
+          _count: { _all: true },
+        })
+        .catch(
+          onErr("sku.groupBy")(
+            [] as Array<{ storageTier: unknown; _count: { _all: number } }>,
+          ),
+        ),
       // Outstanding receiving holds (Phase 2 admin workflow). The PsnHold
       // model uses `status: PsnHoldStatus` (PENDING_PAYMENT / PAID /
       // CANCELLED / AUTO_RETURNED) — "outstanding" means status =
@@ -564,7 +685,11 @@ export class AdminVendorService {
         recent: returnsRecent.map((r) => ({
           id: r.id,
           status: r.status as string,
-          reason: r.reason,
+          // `reason` is typed `unknown` on the catch-fallback path so we
+          // cast it into the API contract shape here. Real reasons are
+          // the ReturnReason enum (a stringly-typed enum on the DB side),
+          // which serialises cleanly to `string | null` for clients.
+          reason: r.reason == null ? null : String(r.reason),
           handlingFeeCents: r.restockFeeCents,
           totalRefundCents: r.refundAmountCents,
           createdAt: r.createdAt.toISOString(),
