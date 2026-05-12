@@ -111,10 +111,15 @@ async function upsertConfig(key: string, value: unknown, description: string): P
 }
 
 async function main(): Promise<void> {
-  await upsertConfig("fee_schedule", FEE_SCHEDULE, "PRD §6.3 — onboarding, storage, fulfillment, returns.");
-  await upsertConfig("tier_dimensions", TIER_DIMENSIONS, "Standardized inbound box dimensions per tier.");
+  await upsertConfig("fee_schedule", FEE_SCHEDULE, "Published storage tier + pallet pricing (May 2026 refresh).");
+  await upsertConfig("tier_dimensions", TIER_DIMENSIONS, "Standardized inbound box + pallet dimensions per tier.");
   await upsertConfig("repackaging_fees", REPACKAGING_FEES, "Per-tier repackaging fees for non-standard inbound packaging.");
   await upsertConfig("quarantine_daily_fee_cents", QUARANTINE_DAILY_FEE_CENTS, "Daily fee for the 14-day Hold disposition.");
+  await upsertConfig(
+    "pallet_policy",
+    PALLET_POLICY,
+    "Pallet rules — uniform tier per pallet + approximate maximum box counts per pallet.",
+  );
   // 1.1 — May 2026 refresh: tightened storage-tier audit language, abandoned
   // inventory window clarified, and acceptance-trail wording aligned with the
   // production sign-up UX. Bump again any time the legal text materially
