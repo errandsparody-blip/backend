@@ -23,7 +23,12 @@
  *   - Payload signing: "UNSIGNED-PAYLOAD" sentinel for browser PUTs.
  */
 
-import { Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
+import {
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+  ServiceUnavailableException,
+} from "@nestjs/common";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 
 import { loadConfig } from "../../../common/config";
@@ -81,9 +86,11 @@ export interface PutObjectResult {
 }
 
 @Injectable()
-export class R2Service {
+export class R2Service implements OnApplicationBootstrap {
   private readonly logger = new Logger(R2Service.name);
   private readonly cfg: R2Config | null;
+  /** Cached origin allow-list snapshot, populated at boot. */
+  private corsOrigins: string[] = [];
 
   constructor() {
     const c = loadConfig();
@@ -106,6 +113,82 @@ export class R2Service {
       // with `/${key}` later would produce //.
       publicBaseUrl: c.R2_PUBLIC_BASE_URL.replace(/\/+$/, ""),
     };
+
+    // Snapshot the env-derived CORS origins at construction so the
+    // boot hook below can apply them. We do this here rather than in
+    // the hook itself so a missing-env failure surfaces during normal
+    // app construction (where it's logged) rather than swallowed in
+    // best-effort boot code.
+    this.corsOrigins = this.deriveCorsOriginsFromEnv(c);
+  }
+
+  /**
+   * NestJS lifecycle hook — runs once after every provider is
+   * instantiated, before the HTTP listener starts accepting traffic.
+   * We use it to push the bucket's CORS policy in lockstep with the
+   * `WEB_PUBLIC_URL` + `WEB_ALLOWED_ORIGINS` env vars, so every deploy
+   * automatically reconciles the bucket policy with the origins the
+   * frontend actually serves from.
+   *
+   * Strictly best-effort. If R2 isn't configured (dev), the bucket
+   * already has the right policy (re-applying with identical contents
+   * is a no-op anyway), or the API call fails, we log and continue.
+   * The API should never refuse to boot because a bucket-config sync
+   * sneezed.
+   */
+  async onApplicationBootstrap(): Promise<void> {
+    if (!this.cfg) {
+      this.logger.log("R2 not configured — skipping CORS bootstrap.");
+      return;
+    }
+    if (this.corsOrigins.length === 0) {
+      this.logger.warn(
+        "WEB_PUBLIC_URL / WEB_ALLOWED_ORIGINS are empty — skipping R2 CORS bootstrap. " +
+          "Browser uploads will be blocked until origins are set.",
+      );
+      return;
+    }
+    try {
+      await this.setBucketCors({
+        allowedOrigins: this.corsOrigins,
+        allowedMethods: ["GET", "HEAD", "PUT"],
+        maxAgeSeconds: 3600,
+      });
+      this.logger.log(
+        `R2 CORS applied for ${this.corsOrigins.length} origin(s): ${this.corsOrigins.join(", ")}`,
+      );
+    } catch (err) {
+      // Don't crash on a bucket-config blip. Log noisily so Sentry +
+      // Railway log search pick it up, and let the manual `pnpm
+      // r2:cors` script remain available as the escape hatch.
+      this.logger.error(
+        { err, origins: this.corsOrigins },
+        "R2 CORS bootstrap failed — browser uploads may be blocked until this is resolved.",
+      );
+    }
+  }
+
+  /**
+   * Pull the canonical web origin and the optional allow-list out of
+   * env, dedupe, and strip trailing slashes. The function lives on the
+   * class so unit tests can exercise it with a synthetic config.
+   */
+  private deriveCorsOriginsFromEnv(c: ReturnType<typeof loadConfig>): string[] {
+    const out = new Set<string>();
+    if (c.WEB_PUBLIC_URL) out.add(c.WEB_PUBLIC_URL.replace(/\/+$/, ""));
+    for (const extra of c.WEB_ALLOWED_ORIGINS ?? []) {
+      const trimmed = extra.trim().replace(/\/+$/, "");
+      if (trimmed.length === 0) continue;
+      if (!/^https?:\/\/[^\s/]+$/.test(trimmed)) {
+        this.logger.warn(
+          { origin: trimmed },
+          "Skipping malformed entry in WEB_ALLOWED_ORIGINS (must be a bare origin like https://example.com).",
+        );
+        continue;
+      }
+      out.add(trimmed);
+    }
+    return Array.from(out);
   }
 
   isConfigured(): boolean {
