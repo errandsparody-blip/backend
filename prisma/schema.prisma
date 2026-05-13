@@ -1080,6 +1080,11 @@ enum ShopperRequestStatus {
   AWAITING_DELIVERY
   AWAITING_RECONCILIATION
   READY_TO_SHIP
+  // Migration 0025a — PICKUP-method readiness state. PLATFORM_FREIGHT /
+  // BUYER_FORWARDER / BUYER_FREIGHT all share READY_TO_SHIP since they
+  // transition to SHIPPED next. PICKUP transitions from READY_FOR_PICKUP
+  // to DELIVERED when the admin records the in-person handoff.
+  READY_FOR_PICKUP
   SHIPPED
   DELIVERED
   CANCELLED
@@ -1122,6 +1127,11 @@ enum ShopperMessageSender {
 
 enum ShopperShippingMethod {
   PLATFORM_FREIGHT
+  // Migration 0025a — buyer supplies their own carrier label (we apply
+  // it and hand the package off without quoting freight). Distinct from
+  // BUYER_FORWARDER, where the buyer routes through a US freight
+  // forwarder and we still ship + price the freight to that address.
+  BUYER_FREIGHT
   BUYER_FORWARDER
   PICKUP
 }
@@ -1172,6 +1182,13 @@ model ShopperRequest {
   wireConfirmedById           String?                @map("wire_confirmed_by") @db.Uuid
   wireConfirmedBy             User?                  @relation("ShopperWireConfirmer", fields: [wireConfirmedById], references: [id], onDelete: SetNull)
 
+  // Migration 0026 — per-request bank instructions chosen by the admin
+  // at ID-approval time. Falls back to the global
+  // `shopper_bank_instructions` config row when null. Shape:
+  //   { beneficiaryName?, bankName?, accountNumber, routingNumber?,
+  //     swift?, iban?, memo? }
+  wireBankInstructions        Json?                  @map("wire_bank_instructions")
+
   // Shipping (optional at intake, captured later in chat if missing)
   shippingAddress             Json?                  @map("shipping_address")
   shippingMethod              ShopperShippingMethod? @map("shipping_method")
@@ -1179,6 +1196,14 @@ model ShopperRequest {
   carrier                     String?
   shippedAt                   DateTime?              @map("shipped_at")
   deliveredAt                 DateTime?              @map("delivered_at")
+
+  // Migration 0025 — method-specific extras. All nullable; only relevant
+  // for one method each (buyerLabelUrl ↔ BUYER_FREIGHT, pickupName +
+  // pickupScheduledAt + pickupCompletedAt ↔ PICKUP).
+  buyerLabelUrl               String?                @map("buyer_label_url")
+  pickupName                  String?                @map("pickup_name")
+  pickupScheduledAt           DateTime?              @map("pickup_scheduled_at")
+  pickupCompletedAt           DateTime?              @map("pickup_completed_at")
 
   // Money — intake payment (sum of buyer's estimates + commission + tax)
   itemsSubtotalCents          Int                    @map("items_subtotal_cents")

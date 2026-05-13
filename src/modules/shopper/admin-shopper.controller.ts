@@ -51,8 +51,10 @@ import {
   adminCancelShopperSchema,
   adminConfirmShopperWireSchema,
   adminListShopperRequestsSchema,
+  adminMarkPickedUpSchema,
   adminRejectShopperIdSchema,
   adminRejectShopperWireSchema,
+  adminReleaseWithBuyerLabelSchema,
   adminSendFollowupSchema,
   adminSendShopperQuoteSchema,
   adminSetShopperShippingSchema,
@@ -64,8 +66,10 @@ import {
   type AdminCancelShopperInput,
   type AdminConfirmShopperWireInput,
   type AdminListShopperRequestsInput,
+  type AdminMarkPickedUpInput,
   type AdminRejectShopperIdInput,
   type AdminRejectShopperWireInput,
+  type AdminReleaseWithBuyerLabelInput,
   type AdminSendFollowupInput,
   type AdminSendShopperQuoteInput,
   type AdminSetShopperShippingInput,
@@ -539,6 +543,103 @@ export class AdminShopperController {
     return updated;
   }
 
+  /**
+   * Migration 0025 — release on the buyer's own carrier label.
+   *
+   * Same end state as `/ship` (status moves to SHIPPED + tracking is
+   * recorded) but the carrier + tracking come from the prepaid label
+   * the buyer uploaded earlier, not from a Shippo purchase on our
+   * account. The service refuses the call if the request isn't on
+   * BUYER_FREIGHT or the label hasn't been uploaded.
+   */
+  @Post(":id/release-with-buyer-label")
+  @HttpCode(HttpStatus.OK)
+  async releaseWithBuyerLabel(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(adminReleaseWithBuyerLabelSchema))
+    body: AdminReleaseWithBuyerLabelInput,
+  ) {
+    const updated = await this.requests.releaseWithBuyerLabel({
+      requestId: id,
+      input: body,
+      actorId: user.sub,
+    });
+    // Same "shipped" email template as platform ship — the buyer gets
+    // tracking + a fresh thread link. Generated lazily so we don't
+    // store plaintext tokens.
+    const fresh = (await this.tokens.issue(id)).plaintext;
+    const request = await this.requests.getById(id, { includeLines: false });
+    let receipt: { imageUrl: string | null; html: string; text: string } = {
+      imageUrl: null,
+      html: "",
+      text: "",
+    };
+    try {
+      const r = await this.receipts.generate(id);
+      receipt = { imageUrl: r.imageUrl, html: r.html, text: r.text };
+    } catch (err) {
+      this.logger.warn(
+        { err, requestId: id },
+        "shopper.release_with_buyer_label.receipt_failed",
+      );
+    }
+    const tpl = shopperShippedTemplate({
+      reference: request.reference,
+      threadToken: fresh,
+      carrier: body.carrier,
+      trackingNumber: body.trackingNumber,
+      receiptHtml: receipt.html || undefined,
+      receiptText: receipt.text || undefined,
+      receiptImageUrl: receipt.imageUrl,
+    });
+    void this.email.send({
+      to: request.buyerEmail,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+      idempotencyKey: `shopper:release_buyer_label_email:${id}`,
+      type: "shopper.shipped",
+    });
+    return updated;
+  }
+
+  /**
+   * Migration 0025 — record an in-person pickup (PICKUP method only).
+   *
+   * Transitions READY_FOR_PICKUP → DELIVERED and stamps
+   * pickupCompletedAt. Optional note lands in the chat thread so the
+   * audit trail shows "delivered to authorized rep" or similar
+   * deviation. No tracking number or carrier — there's no carrier
+   * involved.
+   */
+  @Post(":id/mark-picked-up")
+  @HttpCode(HttpStatus.OK)
+  async markPickedUp(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(adminMarkPickedUpSchema)) body: AdminMarkPickedUpInput,
+  ) {
+    const updated = await this.requests.markPickedUp({
+      requestId: id,
+      input: body,
+      actorId: user.sub,
+    });
+    // Surface the handoff in the buyer's chat thread + email so they
+    // have an on-record confirmation. Best-effort — same pattern as
+    // the other "background notification" calls.
+    const note =
+      "Your order has been picked up at the warehouse. " +
+      "Thank you for using USA Errands!" +
+      (body.note?.trim() ? `\n\n${body.note.trim()}` : "");
+    try {
+      await this.postAdminNote(id, note, user.sub);
+    } catch (err) {
+      this.logger.warn({ err, requestId: id }, "shopper.picked_up.note_failed");
+    }
+    return updated;
+  }
+
   // ---------------------------------------------------------------------------
   // Migration 0023 — wire-track admin actions
   //
@@ -562,14 +663,31 @@ export class AdminShopperController {
     const updated = await this.requests.approveIdVerification({
       requestId: id,
       actorId: user.sub,
+      bankInstructions: body.bankInstructions,
     });
     // Surface the approval in the buyer's chat thread so they see the
     // "your ID has been verified — see bank instructions above" hint
-    // alongside any admin note. Best-effort.
-    const note =
+    // alongside any admin note. When per-request bank instructions are
+    // attached we also paste the account-number block directly into the
+    // chat so the buyer doesn't have to switch tabs to grab it.
+    //
+    // Best-effort: a chat-post failure must not undo the approval.
+    let note =
       (body.note?.trim() ? `${body.note.trim()}\n\n` : "") +
       "Your ID has been verified. The bank-transfer instructions are now visible on your request page. " +
       "Please make the transfer and upload your bank receipt when done.";
+    if (body.bankInstructions) {
+      const bi = body.bankInstructions;
+      const lines: string[] = ["", "Wire to:"];
+      if (bi.beneficiaryName) lines.push(`Beneficiary: ${bi.beneficiaryName}`);
+      if (bi.bankName) lines.push(`Bank: ${bi.bankName}`);
+      lines.push(`Account: ${bi.accountNumber}`);
+      if (bi.routingNumber) lines.push(`Routing: ${bi.routingNumber}`);
+      if (bi.swift) lines.push(`SWIFT/BIC: ${bi.swift}`);
+      if (bi.iban) lines.push(`IBAN: ${bi.iban}`);
+      if (bi.memo) lines.push(`Memo / reference: ${bi.memo}`);
+      note += "\n" + lines.join("\n");
+    }
     try {
       await this.postAdminNote(id, note, user.sub);
     } catch (err) {

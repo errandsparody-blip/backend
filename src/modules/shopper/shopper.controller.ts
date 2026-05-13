@@ -375,7 +375,30 @@ export class ShopperController {
       request.idVerificationStatus === "APPROVED" &&
       bankRevealStatuses.has(request.status as string);
 
-    const bankInstructions = shouldRevealBank ? await this.loadBankInstructions() : null;
+    // Migration 0026 — prefer the per-request bank instructions chosen
+    // by the admin at approval time. If null we fall back to the global
+    // config row so historical requests created before this column was
+    // populated keep working unchanged.
+    let bankInstructions: Record<string, string> | null = null;
+    if (shouldRevealBank) {
+      const perRequest = (request as unknown as {
+        wireBankInstructions?: Record<string, unknown> | null;
+      }).wireBankInstructions;
+      if (perRequest && typeof perRequest === "object") {
+        const normalised: Record<string, string> = {};
+        for (const [k, v] of Object.entries(perRequest)) {
+          if (typeof v === "string" && v.trim().length > 0) normalised[k] = v.trim();
+        }
+        // Require at least an account number to count as "set" —
+        // mirrors the Zod constraint admin-side.
+        if (normalised.accountNumber) {
+          bankInstructions = normalised;
+        }
+      }
+      if (!bankInstructions) {
+        bankInstructions = await this.loadBankInstructions();
+      }
+    }
 
     return {
       request: {

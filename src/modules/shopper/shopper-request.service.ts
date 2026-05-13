@@ -54,12 +54,15 @@ import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../common/prisma.service";
 import type {
   AdminListShopperRequestsInput,
+  AdminMarkPickedUpInput,
+  AdminReleaseWithBuyerLabelInput,
   AdminSetShopperShippingInput,
   AdminShipShopperInput,
   AdminUpdateShopperLineInput,
   CreateShopperRequestInput,
   ShopperRequestStatus,
   ShopperShippingMethod,
+  ShopperWireBankInstructions,
 } from "../../common/schemas/shopper.schema";
 import { AuditService } from "../audit/audit.service";
 import {
@@ -647,8 +650,27 @@ export class ShopperRequestService {
         status: before.status,
       });
     }
+    // Migration 0025 — branch on shipping method. PICKUP transitions to
+    // READY_FOR_PICKUP (terminal-readiness for in-person handoff); every
+    // other method continues to READY_TO_SHIP (buy/release a label). If
+    // the method isn't set yet we refuse — without it we don't know
+    // which downstream status to use, and once the request leaves
+    // AWAITING_DELIVERY the shipping form is no longer reachable.
+    //
+    // Cast through `unknown` to ride out a stale Prisma client (the
+    // BUYER_FREIGHT / READY_FOR_PICKUP enum values arrived in 0025a;
+    // string comparison works at runtime regardless).
+    const method = (before as unknown as { shippingMethod: string | null }).shippingMethod;
+    if (!method) {
+      throw new ConflictException({
+        message:
+          "Pick a shipping method first — we need to know whether this request goes to ready-to-ship or ready-for-pickup.",
+        code: "shopper_warehouse_delivery_no_method",
+      });
+    }
+    const nextStatus = method === "PICKUP" ? "READY_FOR_PICKUP" : "READY_TO_SHIP";
     return this.transition(args.requestId, {
-      to: "READY_TO_SHIP",
+      to: nextStatus as unknown as Parameters<typeof this.transition>[1]["to"],
       actorId: args.actorId,
       action: "shopper.warehouse.delivered",
     });
@@ -824,11 +846,19 @@ export class ShopperRequestService {
         ? args.input.parcelWeightOz
         : before.parcelWeightOz;
 
-    // Look up the per-lb rate for the resolved method. PICKUP and
-    // unrecognised methods are 0 — pickup never has shipping; an
+    // Methods that DON'T charge freight: BUYER_FREIGHT (buyer's own label
+    // on the box) and PICKUP (no shipping at all). For these we zero the
+    // cost + rate + calc regardless of what the form sent, so the receipt
+    // never shows a phantom freight line.
+    const NO_FREIGHT_METHODS: ShopperShippingMethod[] = ["BUYER_FREIGHT", "PICKUP"];
+    const skipFreight = !!(effectiveMethod && NO_FREIGHT_METHODS.includes(effectiveMethod));
+
+    // Look up the per-lb rate for the resolved method. Skip-freight
+    // methods get 0; everything else uses the configured rate. An
     // unrecognised value would fail Zod validation upstream anyway.
-    const ratePerLb =
-      effectiveMethod && Number.isFinite(args.freightRates[effectiveMethod])
+    const ratePerLb = skipFreight
+      ? 0
+      : effectiveMethod && Number.isFinite(args.freightRates[effectiveMethod])
         ? args.freightRates[effectiveMethod]!
         : 0;
 
@@ -836,13 +866,16 @@ export class ShopperRequestService {
     // `Math.round` so the cents land as an integer; truncating with
     // floor would systematically under-charge by sub-cent amounts.
     const calculatedCents =
-      effectiveWeightOz != null && effectiveWeightOz > 0
+      !skipFreight && effectiveWeightOz != null && effectiveWeightOz > 0
         ? Math.round((effectiveWeightOz / 16) * ratePerLb)
         : 0;
 
     // Decide what to actually charge based on the override flag.
     let chargedCents: number;
-    if (args.input.useCalculated) {
+    if (skipFreight) {
+      // Buyer-supplied label or pickup — buyer pays carrier (or nothing).
+      chargedCents = 0;
+    } else if (args.input.useCalculated) {
       // Use the system number. Refuse if the inputs needed to compute
       // it aren't ready — better than silently charging $0.
       if (!effectiveMethod) {
@@ -851,12 +884,10 @@ export class ShopperRequestService {
           code: "shopper_shipping_no_method",
         });
       }
-      // PICKUP legitimately has weight=0 and cost=0; the explicit method
-      // check above is enough — don't reject zero weight here.
       chargedCents = calculatedCents;
     } else {
       // Override path. Schema's refine() guarantees shippingCostCents is
-      // present when useCalculated is false.
+      // present when useCalculated is false AND the method charges freight.
       chargedCents = args.input.shippingCostCents!;
     }
 
@@ -865,8 +896,9 @@ export class ShopperRequestService {
       shippingCalculatedCents: calculatedCents,
       // Always snapshot the rate that was active at this save — even if
       // admin overrode, the receipt needs to explain how the system
-      // number was reached. Null only if no method is set yet.
-      freightRateCentsPerLb: effectiveMethod ? ratePerLb : null,
+      // number was reached. Null only if no method is set yet OR the
+      // method doesn't charge freight (in which case the rate is N/A).
+      freightRateCentsPerLb: skipFreight || !effectiveMethod ? null : ratePerLb,
     };
     if (args.input.shippingMethod !== undefined) {
       data.shippingMethod = args.input.shippingMethod;
@@ -883,6 +915,17 @@ export class ShopperRequestService {
     // label can both read it back without an extra join.
     if (args.input.shippingAddress !== undefined) {
       data.shippingAddress = args.input.shippingAddress as Prisma.InputJsonValue;
+    }
+    // Migration 0025 — method-specific fields. Buyer label only attaches
+    // to BUYER_FREIGHT; pickup name + scheduled date only to PICKUP.
+    if (args.input.buyerLabelUrl !== undefined) {
+      data.buyerLabelUrl = args.input.buyerLabelUrl;
+    }
+    if (args.input.pickupName !== undefined) {
+      data.pickupName = args.input.pickupName;
+    }
+    if (args.input.pickupScheduledAt !== undefined) {
+      data.pickupScheduledAt = args.input.pickupScheduledAt;
     }
 
     const updated = await (
@@ -1165,6 +1208,139 @@ export class ShopperRequestService {
       resourceType: "shopper_request",
       resourceId: args.requestId,
       afterState: { carrier: args.input.carrier, trackingNumber: args.input.trackingNumber },
+    });
+    return updated;
+  }
+
+  /**
+   * Migration 0025 — release a BUYER_FREIGHT shipment.
+   *
+   * Identical state transition as markShipped (READY_TO_SHIP → SHIPPED)
+   * but the tracking + carrier come from the buyer's prepaid label
+   * rather than our Shippo purchase. Kept as a separate method so the
+   * audit log distinguishes "we shipped on our carrier" from "we
+   * released on the buyer's label" — both are SHIPPED rows but the
+   * accounting/freight handling differs.
+   *
+   * We require the row to actually be on BUYER_FREIGHT to use this
+   * path; PLATFORM_FREIGHT and BUYER_FORWARDER must go through
+   * markShipped (which buys the label via Shippo). The buyer label URL
+   * must be set before this is called — that's how the form prevents
+   * "ship without label uploaded".
+   */
+  async releaseWithBuyerLabel(args: {
+    requestId: string;
+    input: AdminReleaseWithBuyerLabelInput;
+    actorId: string;
+  }) {
+    const row = await this.getById(args.requestId, { includeLines: false });
+    if (row.status !== "READY_TO_SHIP") {
+      throw new ConflictException({
+        message: "Request is not ready to ship.",
+        code: "shopper_ship_invalid_state",
+        status: row.status,
+      });
+    }
+    // Cast through unknown because the generated Prisma client may still
+    // be stale (migration 0025a hasn't been picked up locally). The
+    // string comparison is safe — runtime values match the enum.
+    const method = (row as unknown as { shippingMethod: string | null }).shippingMethod;
+    const buyerLabelUrl = (row as unknown as { buyerLabelUrl: string | null }).buyerLabelUrl;
+    if (method !== "BUYER_FREIGHT") {
+      throw new ConflictException({
+        message:
+          "This action is only valid for BUYER_FREIGHT requests. Use 'Ship' for platform / forwarder freight.",
+        code: "shopper_ship_wrong_method",
+        shippingMethod: method,
+      });
+    }
+    if (!buyerLabelUrl) {
+      throw new ConflictException({
+        message: "Upload the buyer's shipping label before releasing.",
+        code: "shopper_buyer_label_missing",
+      });
+    }
+    const updated = await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: args.requestId, status: "READY_TO_SHIP" },
+      data: {
+        status: "SHIPPED",
+        carrier: args.input.carrier,
+        trackingNumber: args.input.trackingNumber,
+        shippedAt: new Date(),
+      },
+    });
+    await this.audit.log({
+      actorId: args.actorId,
+      action: "shopper.released_with_buyer_label",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      afterState: {
+        carrier: args.input.carrier,
+        trackingNumber: args.input.trackingNumber,
+        buyerLabelUrl,
+      },
+    });
+    return updated;
+  }
+
+  /**
+   * Migration 0025 — record an in-person pickup.
+   *
+   * Only valid for PICKUP-method requests in READY_FOR_PICKUP state.
+   * Transitions to DELIVERED (terminal) and stamps pickupCompletedAt
+   * so the receipt can show "Picked up on …" instead of "Shipped on …".
+   * We deliberately don't write carrier/trackingNumber — there's no
+   * carrier in this flow.
+   */
+  async markPickedUp(args: {
+    requestId: string;
+    input: AdminMarkPickedUpInput;
+    actorId: string;
+  }) {
+    const row = await this.getById(args.requestId, { includeLines: false });
+    // Cast around the stale Prisma client — migration 0025a's new enum
+    // values (BUYER_FREIGHT, READY_FOR_PICKUP) aren't in the generated
+    // types yet. Runtime values match the schema.
+    const method = (row as unknown as { shippingMethod: string | null }).shippingMethod;
+    const status = (row as unknown as { status: string }).status;
+    if (method !== "PICKUP") {
+      throw new ConflictException({
+        message: "Only PICKUP-method requests can be marked picked up.",
+        code: "shopper_pickup_wrong_method",
+        shippingMethod: method,
+      });
+    }
+    if (status !== "READY_FOR_PICKUP") {
+      throw new ConflictException({
+        message: "Request is not ready for pickup yet.",
+        code: "shopper_pickup_invalid_state",
+        status,
+      });
+    }
+    const now = new Date();
+    const updated = await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      // Same string-cast for the new enum value; the column accepts it
+      // at the DB level once migration 0025a is applied.
+      where: { id: args.requestId, status: "READY_FOR_PICKUP" as never },
+      data: {
+        status: "DELIVERED",
+        pickupCompletedAt: now,
+        deliveredAt: now,
+      },
+    });
+    await this.audit.log({
+      actorId: args.actorId,
+      action: "shopper.picked_up",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      afterState: {
+        pickupCompletedAt: now,
+        note: args.input.note ?? null,
+      },
     });
     return updated;
   }
@@ -1509,6 +1685,14 @@ export class ShopperRequestService {
   async approveIdVerification(args: {
     requestId: string;
     actorId: string;
+    /**
+     * Migration 0026 — optional per-request bank instructions. When
+     * present, persisted alongside the approval and used by the
+     * buyer-facing thread response in preference to the global config.
+     * The Zod schema in the controller guarantees `accountNumber` is
+     * non-empty when this object is provided.
+     */
+    bankInstructions?: ShopperWireBankInstructions;
   }): Promise<RequestRow> {
     const before = await this.getById(args.requestId, { includeLines: false });
     if (before.paymentMethod !== "WIRE") {
@@ -1525,17 +1709,27 @@ export class ShopperRequestService {
       });
     }
 
+    // Build the persisted data object up-front so the audit log can
+    // capture exactly what changed (including bank instructions when
+    // provided — sensitive field, so the audit trail is the only
+    // historical record).
+    const updateData: Record<string, unknown> = {
+      idVerificationStatus: "APPROVED",
+      idVerifiedAt: new Date(),
+      idVerifiedById: args.actorId,
+      idRejectionReason: null,
+      status: "QUOTE_SENT",
+    };
+    if (args.bankInstructions) {
+      updateData.wireBankInstructions =
+        args.bankInstructions as unknown as Prisma.InputJsonValue;
+    }
+
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
     ).shopperRequest.update({
       where: { id: args.requestId, status: "ID_UNDER_REVIEW" as unknown as never },
-      data: {
-        idVerificationStatus: "APPROVED" as unknown as never,
-        idVerifiedAt: new Date(),
-        idVerifiedById: args.actorId,
-        idRejectionReason: null,
-        status: "QUOTE_SENT" as unknown as never,
-      },
+      data: updateData as never,
     }).catch((err) => {
       if (this.isPrismaNotFound(err)) {
         throw new ConflictException({
@@ -1552,7 +1746,14 @@ export class ShopperRequestService {
       resourceType: "shopper_request",
       resourceId: args.requestId,
       beforeState: { status: before.status, idVerificationStatus: before.idVerificationStatus },
-      afterState: { status: "QUOTE_SENT", idVerificationStatus: "APPROVED" },
+      afterState: {
+        status: "QUOTE_SENT",
+        idVerificationStatus: "APPROVED",
+        // Audit the account number so finance can later answer
+        // "what did we tell this buyer to wire to?" without digging
+        // through chat history.
+        bankInstructions: args.bankInstructions ?? null,
+      },
     });
 
     return updated;

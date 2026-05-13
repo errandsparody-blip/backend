@@ -61,6 +61,8 @@ export type ShopperIdVerificationStatus =
 
 export const ShopperShippingMethodValues = [
   "PLATFORM_FREIGHT",
+  // Migration 0025a — buyer's own carrier label.
+  "BUYER_FREIGHT",
   "BUYER_FORWARDER",
   "PICKUP",
 ] as const;
@@ -353,13 +355,43 @@ export const adminSetShopperShippingSchema = z.object({
     .nonnegative("Rate cannot be negative.")
     .max(100_000, "Rate is too large (max $1,000/lb).")
     .optional(),
-}).refine(
-  (v) => v.useCalculated === true || typeof v.shippingCostCents === "number",
-  {
-    message: "Either useCalculated must be true or shippingCostCents must be provided.",
-    path: ["shippingCostCents"],
-  },
-);
+  // Migration 0025 — buyer-supplied shipping label (R2 URL) when the
+  // shipping method is BUYER_FREIGHT. We don't price freight in that
+  // mode; the buyer's label is the label we slap on the box.
+  buyerLabelUrl: z
+    .string()
+    .url("Must be a URL.")
+    .max(2048, "URL too long.")
+    .nullable()
+    .optional(),
+  // Migration 0025 — pickup window when shippingMethod = PICKUP. We
+  // capture the person who will pick up (name only; no ID per product
+  // decision) plus the scheduled date/time so the warehouse can have
+  // it ready.
+  pickupName: z
+    .string()
+    .trim()
+    .min(2, "Pickup person's name required.")
+    .max(120, "Name too long.")
+    .nullable()
+    .optional(),
+  pickupScheduledAt: z.coerce.date().nullable().optional(),
+})
+  .refine(
+    (v) => {
+      // For PLATFORM_FREIGHT and BUYER_FORWARDER the existing constraint
+      // applies: we either compute from weight × rate or trust the
+      // override. For BUYER_FREIGHT and PICKUP we don't charge freight,
+      // so `shippingCostCents` is optional and the constraint relaxes.
+      const m = v.shippingMethod;
+      if (m === "BUYER_FREIGHT" || m === "PICKUP") return true;
+      return v.useCalculated === true || typeof v.shippingCostCents === "number";
+    },
+    {
+      message: "Either useCalculated must be true or shippingCostCents must be provided.",
+      path: ["shippingCostCents"],
+    },
+  );
 export type AdminSetShopperShippingInput = z.infer<typeof adminSetShopperShippingSchema>;
 
 // ---------------------------------------------------------------------------
@@ -381,6 +413,35 @@ export const adminShipShopperSchema = z.object({
   trackingNumber: z.string().trim().min(1).max(80),
 });
 export type AdminShipShopperInput = z.infer<typeof adminShipShopperSchema>;
+
+// ---------------------------------------------------------------------------
+// Migration 0025 — release with buyer-supplied label (BUYER_FREIGHT mode)
+// ---------------------------------------------------------------------------
+// Admin clicks "Release with buyer label" once the package is ready and
+// the buyer's label is on it. Tracking + carrier come from the buyer's
+// label scan rather than our integrated carrier API, hence the same
+// shape as adminShipShopperSchema — the difference is in the service,
+// which doesn't call Shippo for this method.
+
+export const adminReleaseWithBuyerLabelSchema = z.object({
+  carrier: z.string().trim().min(1).max(40),
+  trackingNumber: z.string().trim().min(1).max(80),
+});
+export type AdminReleaseWithBuyerLabelInput = z.infer<typeof adminReleaseWithBuyerLabelSchema>;
+
+// ---------------------------------------------------------------------------
+// Migration 0025 — mark picked up (PICKUP mode)
+// ---------------------------------------------------------------------------
+// Admin clicks "Mark picked up" after the buyer has physically collected
+// the package from the warehouse. Records the timestamp and transitions
+// the request to DELIVERED.
+
+export const adminMarkPickedUpSchema = z.object({
+  // Optional note attached to the chat thread when the handoff completes.
+  // Mostly here for "delivered to authorized rep" or similar deviation.
+  note: z.string().trim().max(500).optional(),
+});
+export type AdminMarkPickedUpInput = z.infer<typeof adminMarkPickedUpSchema>;
 
 // ---------------------------------------------------------------------------
 // Admin: cancel
@@ -431,9 +492,37 @@ export type SubmitShopperWireProofInput = z.infer<typeof submitShopperWireProofS
 // Migration 0023 — admin wire / ID review schemas
 // ---------------------------------------------------------------------------
 
+// Migration 0026 — per-request bank instructions. Admin can attach a
+// specific account to wire to at approval time (mirrors the shape of
+// the global `shopper_bank_instructions` config row so the buyer-side
+// renderer can stay one component). Only `accountNumber` is required;
+// every other field is optional so a domestic-only USD account, an
+// IBAN-only foreign account, or anything in between is representable.
+//
+// All fields are trimmed and length-capped to fit comfortably in an
+// email and on a chat receipt without spilling into multi-line wraps.
+export const shopperWireBankInstructionsSchema = z.object({
+  beneficiaryName: z.string().trim().max(120, "Beneficiary name too long.").optional(),
+  bankName: z.string().trim().max(120, "Bank name too long.").optional(),
+  accountNumber: z
+    .string()
+    .trim()
+    .min(4, "Account number is required.")
+    .max(80, "Account number too long."),
+  routingNumber: z.string().trim().max(40, "Routing number too long.").optional(),
+  swift: z.string().trim().max(40, "SWIFT/BIC too long.").optional(),
+  iban: z.string().trim().max(60, "IBAN too long.").optional(),
+  memo: z.string().trim().max(120, "Memo too long.").optional(),
+});
+export type ShopperWireBankInstructions = z.infer<typeof shopperWireBankInstructionsSchema>;
+
 export const adminApproveShopperIdSchema = z.object({
   // Optional admin note appended to the chat thread when approving.
   note: z.string().trim().max(2000).optional(),
+  // Migration 0026 — admin sends the buyer-facing account number(s)
+  // alongside the approval. Optional: when omitted, the buyer sees
+  // whatever's in the global `shopper_bank_instructions` config row.
+  bankInstructions: shopperWireBankInstructionsSchema.optional(),
 });
 export type AdminApproveShopperIdInput = z.infer<typeof adminApproveShopperIdSchema>;
 
