@@ -343,6 +343,65 @@ export class StripeService {
   }
 
   /**
+   * Migration 0027 — Stripe Checkout session for the shipping-only
+   * invoice the buyer pays after admin sets the freight cost. Same
+   * shape as the follow-up session but with `purpose: shopper.shipping`
+   * so the webhook handler can branch on it. Always single-line-item
+   * (the shipping charge) since the receipt panel in the chat thread
+   * already shows the full breakdown.
+   */
+  async createShopperShippingSession(args: CreateShopperFollowupSessionArgs): Promise<{
+    sessionId: string;
+    paymentIntentId: string | null;
+    url: string;
+  }> {
+    if (!this.stripe) throw new Error("Stripe is not configured.");
+    if (!Number.isInteger(args.amountCents) || args.amountCents <= 0) {
+      throw new Error("amountCents must be a positive integer for a shipping Checkout session.");
+    }
+
+    const session = await this.stripe.checkout.sessions.create(
+      {
+        mode: "payment",
+        customer_email: args.buyerEmail,
+        payment_method_types: ["card"],
+        line_items: [
+          {
+            quantity: 1,
+            price_data: {
+              currency: "usd",
+              unit_amount: args.amountCents,
+              product_data: { name: args.description ?? "Shipping & handling" },
+            },
+          },
+        ],
+        metadata: {
+          purpose: "shopper.shipping",
+          shopperRequestId: args.requestId,
+        },
+        payment_intent_data: {
+          metadata: {
+            purpose: "shopper.shipping",
+            shopperRequestId: args.requestId,
+          },
+          description: `USA Errands shopper shipping · ${args.requestId}`,
+        },
+        success_url: args.successUrl,
+        cancel_url: args.cancelUrl,
+      },
+      { idempotencyKey: args.idempotencyKey },
+    );
+    return {
+      sessionId: session.id,
+      paymentIntentId:
+        typeof session.payment_intent === "string"
+          ? session.payment_intent
+          : session.payment_intent?.id ?? null,
+      url: session.url ?? "",
+    };
+  }
+
+  /**
    * Issue a refund against the original intake PaymentIntent. Used when:
    *   - actual items + shipping came in UNDER the intake estimate, OR
    *   - the request is being cancelled with `issueRefund=true`.

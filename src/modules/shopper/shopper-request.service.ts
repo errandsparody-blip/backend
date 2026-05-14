@@ -668,6 +668,10 @@ export class ShopperRequestService {
         code: "shopper_warehouse_delivery_no_method",
       });
     }
+    // Migration 0027 — refuse to advance until the buyer has paid the
+    // shipping invoice (for freight-bearing methods). Zero-cost methods
+    // (BUYER_FREIGHT, PICKUP) bypass automatically.
+    this.assertShippingPaid(before, "warehouse_delivery");
     const nextStatus = method === "PICKUP" ? "READY_FOR_PICKUP" : "READY_TO_SHIP";
     return this.transition(args.requestId, {
       to: nextStatus as unknown as Parameters<typeof this.transition>[1]["to"],
@@ -1175,6 +1179,112 @@ export class ShopperRequestService {
   }
 
   // =========================================================================
+  // Shipping invoice (migration 0027)
+  //
+  // The shipping invoice is a separate Stripe Checkout session created when
+  // admin saves the shipping form for a freight-bearing method (cost > 0).
+  // It gates the downstream warehouse-delivery / ship / release actions
+  // until the buyer pays — the implicit "awaiting buyer to pay shipping"
+  // state lives entirely in the (shippingCostCents > 0) ∧ (shippingPaidAt
+  // IS NULL) tuple rather than a new status enum value so the rest of the
+  // machine stays simple.
+  // =========================================================================
+
+  /**
+   * Persist the Stripe Checkout session id + intent id + pay URL for the
+   * shipping invoice. Best-effort — caller has already validated the
+   * Stripe call succeeded. The session url is the one buyers click; we
+   * cache it so the admin UI and the buyer thread can both surface it
+   * without re-issuing a Checkout call.
+   */
+  async attachShippingSession(args: {
+    requestId: string;
+    sessionId: string;
+    intentId: string | null;
+    url: string;
+  }): Promise<void> {
+    await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: args.requestId },
+      data: {
+        shippingInvoiceSessionId: args.sessionId,
+        shippingInvoiceIntentId: args.intentId,
+        shippingInvoiceUrl: args.url,
+      },
+    });
+  }
+
+  /**
+   * Mark the shipping invoice as paid. Idempotent on the (requestId,
+   * stripeIntentId) tuple so the webhook can fire as many times as
+   * Stripe wants. Does NOT advance the status enum — the row simply
+   * stops being gated by `shippingPaidAt IS NULL`, freeing admin to
+   * call the downstream warehouse-delivery / ship / release / pickup
+   * actions.
+   */
+  async markShippingPaid(args: {
+    requestId: string;
+    stripeIntentId: string;
+    paidAt?: Date;
+  }): Promise<RequestRow> {
+    const row = await this.getById(args.requestId, { includeLines: false });
+    // Cast around stale Prisma client — migration 0027's columns may not
+    // be in the generated types yet on this build.
+    const rowAny = row as unknown as {
+      shippingPaidAt: Date | null;
+      shippingInvoiceIntentId: string | null;
+    };
+    if (rowAny.shippingPaidAt && rowAny.shippingInvoiceIntentId === args.stripeIntentId) {
+      return row; // Idempotent webhook replay.
+    }
+    const now = args.paidAt ?? new Date();
+    const updated = await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: args.requestId },
+      data: {
+        shippingPaidAt: now,
+        shippingInvoiceIntentId: args.stripeIntentId,
+      },
+    });
+    await this.audit.log({
+      action: "shopper.shipping.paid",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      afterState: { stripeIntentId: args.stripeIntentId, paidAt: now.toISOString() },
+    });
+    return updated;
+  }
+
+  /**
+   * Gate helper for the four downstream actions (warehouse-delivery,
+   * ship, release-with-buyer-label, mark-picked-up). Throws a 409 when
+   * the request is on a freight-bearing method with a positive shipping
+   * cost and the buyer hasn't paid the shipping invoice yet.
+   *
+   * Methods with `shippingCostCents === 0` (BUYER_FREIGHT, PICKUP, or
+   * pre-0027 rows where shipping was zero-rated) bypass the gate
+   * entirely — there's no invoice to wait for. Historical rows created
+   * before migration 0027 with `shippingPaidAt = NULL` are treated as
+   * paid for backward compatibility (we can't retroactively know
+   * whether they paid; admin would have already shipped them).
+   */
+  private assertShippingPaid(row: RequestRow, action: string): void {
+    const cost = (row as unknown as { shippingCostCents: number | null }).shippingCostCents ?? 0;
+    if (cost <= 0) return; // Freight-free method — no invoice required.
+    const paidAt = (row as unknown as { shippingPaidAt: Date | null }).shippingPaidAt;
+    if (paidAt) return;
+    throw new ConflictException({
+      message:
+        "Buyer hasn't paid the shipping invoice yet. Wait for the payment to clear before continuing.",
+      code: "shopper_shipping_not_paid",
+      action,
+      shippingCostCents: cost,
+    });
+  }
+
+  // =========================================================================
   // Shipping
   // =========================================================================
 
@@ -1191,6 +1301,8 @@ export class ShopperRequestService {
         status: row.status,
       });
     }
+    // Migration 0027 — gate on shipping-invoice payment.
+    this.assertShippingPaid(row, "ship");
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
     ).shopperRequest.update({
@@ -1260,6 +1372,10 @@ export class ShopperRequestService {
         code: "shopper_buyer_label_missing",
       });
     }
+    // Migration 0027 — gate on shipping-invoice payment. BUYER_FREIGHT is
+    // zero-cost so this is effectively a no-op for the happy path; kept
+    // as defence-in-depth in case admin manually set a non-zero cost.
+    this.assertShippingPaid(row, "release_with_buyer_label");
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
     ).shopperRequest.update({
@@ -1319,6 +1435,9 @@ export class ShopperRequestService {
         status,
       });
     }
+    // Migration 0027 — PICKUP is zero-cost so the gate is normally a
+    // no-op; defence-in-depth in case admin manually charged shipping.
+    this.assertShippingPaid(row, "mark_picked_up");
     const now = new Date();
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }

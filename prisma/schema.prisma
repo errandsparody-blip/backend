@@ -1189,6 +1189,18 @@ model ShopperRequest {
   //     swift?, iban?, memo? }
   wireBankInstructions        Json?                  @map("wire_bank_instructions")
 
+  // Migration 0027 — shipping-invoice payment cycle. When setShipping
+  // persists a non-zero freight cost, we create a Stripe Checkout
+  // session and persist the session/intent id + the pay link here.
+  // shipping_paid_at is stamped by the Stripe webhook when the buyer
+  // pays; the downstream actions (warehouse delivery, ship, release,
+  // mark-picked-up) refuse until it's set OR shipping_cost_cents is
+  // zero (BUYER_FREIGHT / PICKUP).
+  shippingInvoiceSessionId    String?                @map("shipping_invoice_session_id")
+  shippingInvoiceIntentId     String?                @map("shipping_invoice_intent_id")
+  shippingInvoiceUrl          String?                @map("shipping_invoice_url")
+  shippingPaidAt              DateTime?              @map("shipping_paid_at")
+
   // Shipping (optional at intake, captured later in chat if missing)
   shippingAddress             Json?                  @map("shipping_address")
   shippingMethod              ShopperShippingMethod? @map("shipping_method")

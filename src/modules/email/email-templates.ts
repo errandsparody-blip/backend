@@ -615,6 +615,64 @@ export function shopperFollowupOwedTemplate(args: {
   return withShopperReference(base, args.reference);
 }
 
+/**
+ * Migration 0027 — shipping invoice email.
+ *
+ * Fires when admin saves the shipping form for a freight-bearing method
+ * (PLATFORM_FREIGHT or BUYER_FORWARDER). The buyer is asked to pay the
+ * shipping line via Stripe Checkout before the warehouse releases the
+ * package. Pickup + buyer-freight methods skip this entirely.
+ *
+ * The receipt fragments come from ShopperReceiptService so the same
+ * itemised breakdown sits inline (HTML) and in plain text. The image
+ * link is offered as a "prefer the visual version" out, mirroring the
+ * follow-up + ship templates so the buyer's email stack feels uniform.
+ */
+export function shopperShippingInvoiceTemplate(args: {
+  reference: string;
+  threadToken: string;
+  shippingPayUrl: string;
+  amountCents: number;
+  shippingMethod: string;
+  receiptHtml?: string;
+  receiptText?: string;
+  receiptImageUrl?: string | null;
+}): RenderedEmail {
+  const amount = `$${(args.amountCents / 100).toFixed(2)}`;
+  const methodLabel =
+    args.shippingMethod === "PLATFORM_FREIGHT"
+      ? "USA Errands freight"
+      : args.shippingMethod === "BUYER_FORWARDER"
+        ? "Your nominated forwarder"
+        : args.shippingMethod;
+  const receiptBody = args.receiptHtml ?? "";
+  const receiptImgLink =
+    args.receiptImageUrl
+      ? `<p style="margin:8px 0 0 0;font-size:12px;color:#777270;">Prefer the visual version? <a href="${escape(args.receiptImageUrl)}" style="color:#777270;text-decoration:underline;">Open the receipt image</a> in your browser.</p>`
+      : "";
+  const base: RenderedEmail = {
+    subject: `Shipping invoice — ${amount}`,
+    html: shell({
+      eyebrow: "[08] Shipping invoice",
+      title: "One more step before we ship",
+      bodyHtml: `<p style="margin:0 0 12px 0;">Your items are at our warehouse. Pay the shipping line to release the package via <strong>${escape(methodLabel)}</strong>.</p>
+        <p style="margin:0 0 12px 0;color:#3A3A3A;font-size:16px;"><strong>Shipping &amp; handling: ${amount}</strong></p>
+        <p style="margin:0 0 16px 0;color:#9C9892;font-size:13px;">As soon as this is paid we'll dispatch your package and email tracking.</p>
+        ${receiptBody}
+        ${receiptImgLink}`,
+      cta: { label: `Pay ${amount} securely`, href: shopperPayUrl(args.shippingPayUrl) },
+    }),
+    text:
+      `Shipping invoice — ${amount}\n\n` +
+      `Shipping method: ${methodLabel}\n` +
+      `Amount: ${amount}\n\n` +
+      `Pay securely: ${args.shippingPayUrl}\n\n` +
+      (args.receiptText ? `${args.receiptText}\n\n` : "") +
+      `Thread: ${shopperThreadUrl(args.threadToken)}`,
+  };
+  return withShopperReference(base, args.reference);
+}
+
 export function shopperRefundIssuedTemplate(args: {
   reference: string;
   threadToken: string;

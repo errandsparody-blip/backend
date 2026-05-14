@@ -84,6 +84,7 @@ import {
   shopperNewMessageTemplate,
   shopperRefundIssuedTemplate,
   shopperShippedTemplate,
+  shopperShippingInvoiceTemplate,
 } from "../email/email-templates";
 import { R2Service } from "../integrations/r2/r2.service";
 import { StripeService } from "../integrations/stripe/stripe.service";
@@ -221,16 +222,190 @@ export class AdminShopperController {
     // Post the freshly-updated breakdown into the chat thread so the buyer
     // can preview the numbers BEFORE we send the follow-up invoice. This is
     // best-effort — a receipt failure must not undo the shipping save.
+    let receipt: { imageUrl: string | null; html: string; text: string } = {
+      imageUrl: null,
+      html: "",
+      text: "",
+    };
     try {
       const note =
         "Updated breakdown — shipping cost, sales tax, and parcel details have been finalised. " +
-        "The follow-up invoice (or refund) will reflect the totals shown in the receipt below.";
-      await this.buildAndPostReceipt(id, user.sub, note);
+        "The shipping invoice below covers freight only; pay it to release your package.";
+      receipt = await this.buildAndPostReceipt(id, user.sub, note);
     } catch (err) {
       this.logger.warn(
         { err, requestId: id },
         "shopper.shipping.receipt_post_failed",
       );
+    }
+
+    // Migration 0027 — shipping-invoice payment cycle.
+    //
+    // After saving the shipping form, if the row has a non-zero
+    // shipping cost AND the buyer hasn't already paid for shipping on
+    // this request, issue a Stripe Checkout session for the freight
+    // line. The session url is posted into the chat thread + emailed
+    // to the buyer so they can pay before admin advances the request
+    // toward shipment. The gate is enforced server-side in
+    // ShopperRequestService.assertShippingPaid (so a malicious admin
+    // can't fast-forward without payment).
+    //
+    // Zero-cost methods (BUYER_FREIGHT, PICKUP) skip this branch
+    // entirely — there's nothing to invoice. Re-saving with a different
+    // amount creates a fresh Checkout session (different idempotency
+    // key); re-saving with the SAME amount returns the existing session
+    // so the buyer's pay link doesn't churn.
+    const updatedAny = updated as unknown as {
+      shippingCostCents: number | null;
+      shippingPaidAt: Date | null;
+      shippingMethod: string | null;
+    };
+    const chargedCents = updatedAny.shippingCostCents ?? 0;
+    const shippingMethod = updatedAny.shippingMethod ?? "";
+    const NEEDS_INVOICE = ["PLATFORM_FREIGHT", "BUYER_FORWARDER"] as const;
+    const shouldInvoice =
+      chargedCents > 0 &&
+      !updatedAny.shippingPaidAt &&
+      (NEEDS_INVOICE as ReadonlyArray<string>).includes(shippingMethod);
+
+    if (shouldInvoice) {
+      const cfg = loadConfig();
+      // Fresh thread token for the email + success URLs. Same pattern
+      // as sendFollowup — we don't store plaintext, each issuance is
+      // independently valid until expiry/revocation.
+      let fresh: string;
+      try {
+        const issued = await this.tokens.issue(id);
+        fresh = issued.plaintext;
+      } catch (err) {
+        this.logger.error(
+          { err, requestId: id },
+          "shopper.shipping.token_issue_failed",
+        );
+        // Don't unwind the shipping save — admin can retry the
+        // invoice issuance by re-saving. Surface a partial-success
+        // signal so the UI knows to re-save if the buyer reports
+        // never receiving the pay link.
+        return {
+          ...updated,
+          shippingInvoiceWarning: "token_issue_failed" as const,
+        };
+      }
+
+      let session: { sessionId: string; paymentIntentId: string | null; url: string };
+      try {
+        session = await this.stripe.createShopperShippingSession({
+          requestId: id,
+          buyerEmail: updated.buyerEmail,
+          amountCents: chargedCents,
+          description: `Shipping & handling · ${updated.reference}`,
+          // Per-request + per-amount idempotency: changing the cost
+          // produces a new session; re-saving the same cost returns
+          // the existing one (no orphaned Checkout pages).
+          idempotencyKey: `shopper:shipping:${id}:${chargedCents}`,
+          successUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(fresh)}?shipping=paid`,
+          cancelUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(fresh)}?shipping=cancelled`,
+        });
+      } catch (err) {
+        this.logger.error(
+          {
+            err,
+            requestId: id,
+            errMessage: (err as Error)?.message,
+            errName: (err as Error)?.name,
+          },
+          "shopper.shipping.stripe_session_failed",
+        );
+        // Admin can re-save to retry the Stripe call. Don't unwind
+        // the shipping form save — the freight number is still
+        // useful for the receipt + admin overview.
+        throw new ServiceUnavailableException({
+          message:
+            "Shipping was saved but the buyer's pay link couldn't be created. Re-save the shipping form to retry the Stripe call.",
+          code: "shopper_shipping_stripe_failed",
+          stripeError: (err as Error)?.message ?? null,
+        });
+      }
+
+      try {
+        await this.requests.attachShippingSession({
+          requestId: id,
+          sessionId: session.sessionId,
+          intentId: session.paymentIntentId,
+          url: session.url,
+        });
+      } catch (err) {
+        this.logger.error(
+          { err, requestId: id, sessionId: session.sessionId },
+          "shopper.shipping.session_attach_failed",
+        );
+        throw new InternalServerErrorException({
+          message:
+            "Stripe session created but couldn't be saved on the request. Re-save the shipping form — Stripe will return the same session.",
+          code: "shopper_shipping_attach_failed",
+          stripeSessionId: session.sessionId,
+        });
+      }
+
+      const dollars = (cents: number): string =>
+        `$${(cents / 100).toFixed(2)}`;
+
+      // Post the pay link into the chat thread as a separate, focused
+      // message so it stands apart from the receipt note above. Best-
+      // effort — a chat-post failure must not undo the Stripe call.
+      const invoiceLine =
+        `Shipping invoice: ${dollars(chargedCents)}.\n\n` +
+        `Pay securely (Stripe): ${session.url}\n\n` +
+        `As soon as this is paid we'll release your package for shipment and email you tracking. ` +
+        `The receipt above shows how this number was calculated.`;
+      try {
+        await this.postAdminNote(id, invoiceLine, user.sub);
+      } catch (err) {
+        this.logger.warn(
+          { err, requestId: id },
+          "shopper.shipping.invoice_chat_failed",
+        );
+      }
+
+      // Email the buyer with the pay link + inline receipt. Best-
+      // effort — Resend failures are non-fatal for the action.
+      try {
+        const tpl = shopperShippingInvoiceTemplate({
+          reference: updated.reference,
+          threadToken: fresh,
+          shippingPayUrl: session.url,
+          amountCents: chargedCents,
+          shippingMethod,
+          receiptHtml: receipt.html || undefined,
+          receiptText: receipt.text || undefined,
+          receiptImageUrl: receipt.imageUrl,
+        });
+        void this.email.send({
+          to: updated.buyerEmail,
+          subject: tpl.subject,
+          html: tpl.html,
+          text: tpl.text,
+          // Per-request + per-amount key so a re-save with a NEW amount
+          // sends a fresh email, but two clicks with the same number
+          // don't spam the buyer.
+          idempotencyKey: `shopper:shipping_email:${id}:${chargedCents}`,
+          type: "shopper.shipping_invoice",
+        });
+      } catch (err) {
+        this.logger.warn(
+          { err, requestId: id },
+          "shopper.shipping.invoice_email_failed",
+        );
+      }
+
+      // Return the freshly attached session info so the admin UI can
+      // surface the pay link immediately without a follow-up fetch.
+      return {
+        ...updated,
+        shippingInvoiceSessionId: session.sessionId,
+        shippingInvoiceIntentId: session.paymentIntentId,
+        shippingInvoiceUrl: session.url,
+      };
     }
 
     return updated;

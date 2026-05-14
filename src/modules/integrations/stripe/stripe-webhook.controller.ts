@@ -176,6 +176,19 @@ export class StripeWebhookController {
       await this.shopper.markFollowupPaid({ requestId, stripeIntentId: intent.id });
       return;
     }
+    // Migration 0027 — shipping invoice paid via Stripe Checkout. Same
+    // safety-net pattern as intake/followup: both the PI event and the
+    // sibling checkout.session.completed event call the idempotent
+    // markShippingPaid so a double-fire is a no-op.
+    if (purpose === "shopper.shipping") {
+      const requestId = intent.metadata?.["shopperRequestId"];
+      if (!requestId) {
+        this.logger.error({ id: intent.id }, "Shopper shipping intent missing requestId.");
+        return;
+      }
+      await this.shopper.markShippingPaid({ requestId, stripeIntentId: intent.id });
+      return;
+    }
 
     if (purpose !== "wallet.fund") {
       // Future intents (e.g., onboarding fee deposits if we ever do them) go here.
@@ -259,6 +272,9 @@ export class StripeWebhookController {
       await this.shopper.markIntakePaid({ requestId, stripeIntentId: intentId });
     } else if (purpose === "shopper.followup") {
       await this.shopper.markFollowupPaid({ requestId, stripeIntentId: intentId });
+    } else if (purpose === "shopper.shipping") {
+      // Migration 0027 — shipping invoice paid via Stripe Checkout.
+      await this.shopper.markShippingPaid({ requestId, stripeIntentId: intentId });
     } else {
       this.logger.warn({ id: session.id, purpose }, "Unknown shopper checkout purpose.");
     }
