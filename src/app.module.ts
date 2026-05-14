@@ -32,6 +32,7 @@ import { KycModule } from "./modules/integrations/kyc/kyc.module";
 import { R2Module } from "./modules/integrations/r2/r2.module";
 import { StripeModule } from "./modules/integrations/stripe/stripe.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
+import { MarketingModule } from "./modules/marketing/marketing.module";
 import { NotificationModule } from "./modules/notifications/notification.module";
 import { OrderModule } from "./modules/orders/order.module";
 import { ProductModule } from "./modules/products/product.module";
@@ -114,6 +115,7 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     R2Module,
     StripeModule,
     JobsModule,
+    MarketingModule,
     AdminModule,
   ],
   providers: [

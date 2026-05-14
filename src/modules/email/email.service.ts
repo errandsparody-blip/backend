@@ -21,6 +21,15 @@ import { setTimeout as wait } from "node:timers/promises";
 import { loadConfig } from "../../common/config";
 import { AuditService } from "../audit/audit.service";
 
+export interface EmailAttachment {
+  /** Filename surfaced in the recipient's mail client (e.g., "guide.pdf"). */
+  filename: string;
+  /** Raw bytes — we base64-encode at send time for Resend's API. */
+  content: Buffer;
+  /** Optional MIME type. Most clients infer from the filename anyway. */
+  contentType?: string;
+}
+
 export interface EmailMessage {
   to: string;
   subject: string;
@@ -34,6 +43,12 @@ export interface EmailMessage {
   /** Optional related ids for audit context. */
   vendorId?: string;
   userId?: string;
+  /**
+   * Optional file attachments. Resend caps total payload at ~40 MB —
+   * callers should keep aggregate size under that. The audit log
+   * records filenames + sizes but never the bytes.
+   */
+  attachments?: EmailAttachment[];
 }
 
 interface ResendResponse {
@@ -95,6 +110,32 @@ export class EmailService {
       return { ok: false, error: "resend_api_key_missing" };
     }
 
+    // Encode attachments per Resend's API: { filename, content (base64), content_type? }.
+    // Defence: cap attachment payload at 25 MB aggregate so a misuse
+    // (e.g., a 50-page PDF passed by accident) doesn't blow our Resend
+    // quota or trip the API limit.
+    const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+    const totalAttachmentBytes = (msg.attachments ?? []).reduce(
+      (sum, a) => sum + a.content.length,
+      0,
+    );
+    if (totalAttachmentBytes > MAX_ATTACHMENT_BYTES) {
+      this.log.error(
+        {
+          type: msg.type,
+          totalAttachmentBytes,
+          maxBytes: MAX_ATTACHMENT_BYTES,
+        },
+        "Email rejected — attachment payload exceeds cap",
+      );
+      return { ok: false, error: "attachment_too_large" };
+    }
+    const encodedAttachments = (msg.attachments ?? []).map((a) => ({
+      filename: a.filename,
+      content: a.content.toString("base64"),
+      ...(a.contentType ? { content_type: a.contentType } : {}),
+    }));
+
     const body = {
       from: this.cfg.EMAIL_FROM,
       to: [msg.to],
@@ -102,6 +143,7 @@ export class EmailService {
       subject: msg.subject,
       html: msg.html,
       text: msg.text,
+      ...(encodedAttachments.length > 0 ? { attachments: encodedAttachments } : {}),
       ...(msg.idempotencyKey ? { headers: { "Idempotency-Key": msg.idempotencyKey } } : {}),
     };
 

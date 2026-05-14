@@ -1354,3 +1354,32 @@ model ShopperAccessToken {
   @@index([requestId])
   @@map("shopper_access_tokens")
 }
+
+// =============================================================================
+// Marketing — Pricing Guide leads
+// =============================================================================
+
+/// Lead-capture row for the public /pricing page "Get Our Full Price Guide"
+/// form. We email the visitor the PDF and keep a record so sales can follow
+/// up, finance can quantify funnel quality, and we can rate-limit duplicate
+/// requests from the same email. Independent of the user/vendor tables —
+/// these are pre-conversion prospects, not authenticated accounts.
+model PricingGuideLead {
+  id            String   @id @default(uuid()) @db.Uuid
+  businessName  String   @map("business_name")
+  email         String
+  /// ISO 3166-1 alpha-2 country code captured at submit time.
+  country       String   @db.VarChar(2)
+  /// Source IP (when available) — useful for fraud / spam triage.
+  /// Stored truncated (Cloudflare's CF-Connecting-IP).
+  sourceIp      String?  @map("source_ip")
+  /// User agent at submit time — same triage rationale as sourceIp.
+  userAgent     String?  @map("user_agent") @db.Text
+  /// True once the PDF email has been queued/sent successfully.
+  emailSentAt   DateTime? @map("email_sent_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([email])
+  @@index([createdAt])
+  @@map("pricing_guide_leads")
+}
