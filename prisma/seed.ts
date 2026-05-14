@@ -125,7 +125,7 @@ async function main(): Promise<void> {
   // production sign-up UX. Bump again any time the legal text materially
   // changes so the AgreementVersionGuard forces every active vendor to
   // re-accept on their next write.
-  await upsertConfig("agreement_version", "1.1", "Current Vendor Agreement version users must accept.");
+  await upsertConfig("agreement_version", "1.2", "Current Vendor Agreement version users must accept.");
   await upsertConfig(
     "reassessment_threshold",
     { utilizationPctMax: 80, consecutiveDaysMin: 60, autoApplyAfterDays: 14 },

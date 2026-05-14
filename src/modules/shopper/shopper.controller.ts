@@ -400,6 +400,26 @@ export class ShopperController {
       }
     }
 
+    // Migration 0027 follow-up — surface the warehouse "Ship From"
+    // address so the buyer can generate a prepaid label on their own
+    // carrier (BUYER_FREIGHT method). Pulled from env, never hardcoded
+    // — when we add a second warehouse this becomes a row lookup. We
+    // emit unconditionally because the data isn't sensitive (it's the
+    // address that ends up printed on every outbound parcel anyway)
+    // and the client decides when to display it.
+    const cfg = loadConfig();
+    const warehouseShipFrom = {
+      name: cfg.WAREHOUSE_FROM_NAME,
+      line1: cfg.WAREHOUSE_FROM_STREET1,
+      line2: cfg.WAREHOUSE_FROM_STREET2 ?? null,
+      city: cfg.WAREHOUSE_FROM_CITY,
+      state: cfg.WAREHOUSE_FROM_STATE,
+      postalCode: cfg.WAREHOUSE_FROM_ZIP,
+      country: "US" as const,
+      phone: cfg.WAREHOUSE_FROM_PHONE,
+      email: cfg.WAREHOUSE_FROM_EMAIL,
+    };
+
     return {
       request: {
         ...this.serializeBuyerRequest(request),
@@ -407,6 +427,7 @@ export class ShopperController {
         // Surface the bank instructions only on the wire-payment leg.
         // Null otherwise so the client UI never accidentally renders.
         bankInstructions,
+        warehouseShipFrom,
       },
       messages: messageRows.map((m) => ({
         id: m.id,
