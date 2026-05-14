@@ -234,6 +234,38 @@ export class AdminVendorService {
             lowBalanceThresholdCents: vendor.wallet.lowBalanceThresholdCents,
           }
         : null,
+      // Expanded KYC v2 — every structured field the vendor has filled in
+      // via the multi-step wizard. Returned verbatim so the admin review
+      // page can render a "full submission" card. No transformation
+      // because there's no privacy concern (admin-only endpoint, tenant
+      // scoping handled upstream). Null where the vendor hasn't filled
+      // the field in yet — the UI renders "Not provided" placeholders.
+      kycV2: {
+        businessType: vendor.businessType ?? null,
+        businessTypeOther: vendor.businessTypeOther ?? null,
+        businessRegistrationNumber: vendor.businessRegistrationNumber ?? null,
+        businessRegistrationCountry: vendor.businessRegistrationCountry ?? null,
+        businessIndustry: vendor.businessIndustry ?? null,
+        businessIndustryOther: vendor.businessIndustryOther ?? null,
+        contactFullName: vendor.contactFullName ?? null,
+        contactPosition: vendor.contactPosition ?? null,
+        contactPhone: vendor.contactPhone ?? null,
+        contactAddressLine1: vendor.contactAddressLine1 ?? null,
+        contactAddressLine2: vendor.contactAddressLine2 ?? null,
+        contactCountry: vendor.contactCountry ?? null,
+        idType: vendor.idType ?? null,
+        idNumber: vendor.idNumber ?? null,
+        idExpirationDate: vendor.idExpirationDate
+          ? vendor.idExpirationDate.toISOString().slice(0, 10)
+          : null,
+        productsStoredDescription: vendor.productsStoredDescription ?? null,
+        monthlyInventoryVolume: vendor.monthlyInventoryVolume ?? null,
+        monthlyOrderVolume: vendor.monthlyOrderVolume ?? null,
+        serviceIntent: vendor.serviceIntent ?? null,
+        primaryShippingCountries: vendor.primaryShippingCountries ?? null,
+        requiresReturnsHandling: vendor.requiresReturnsHandling ?? null,
+        productHazards: vendor.productHazards ?? [],
+      },
     };
   }
 

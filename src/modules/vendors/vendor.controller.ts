@@ -8,8 +8,10 @@ import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import {
   acceptAgreementSchema,
+  submitKycV2Schema,
   updateVendorSchema,
   type AcceptAgreementInput,
+  type SubmitKycV2Input,
   type UpdateVendorInput,
 } from "../../common/schemas/vendor.schema";
 
@@ -69,18 +71,24 @@ export class VendorController {
   }
 
   /**
-   * Vendor self-submits their account for KYC review. Flips kycStatus to
-   * IN_PROGRESS so the admin queue picks it up. Sub-users cannot submit —
-   * compliance attestation is the vendor admin's responsibility.
+   * Vendor self-submits their account for KYC review. The multi-step wizard
+   * calls this on every "Next" with the cumulative form state — partial
+   * payloads are accepted and persisted (each step is its own save point).
+   * The FINAL submission carries `submitForReview: true`; that flips
+   * kycStatus to IN_PROGRESS and stamps `kycSubmittedAt`. Sub-users cannot
+   * submit — compliance attestation is the vendor admin's responsibility.
    */
   @Post("kyc/submit")
-  async submitKyc(@CurrentUser() user: AuthenticatedUser) {
+  async submitKyc(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body(new ZodValidationPipe(submitKycV2Schema)) body: SubmitKycV2Input,
+  ) {
     if (user.role === Role.VENDOR_SUB_USER) {
       throw new ForbiddenException({
         message: "Only the vendor admin can submit KYC.",
         code: "vendor_kyc_admin_only",
       });
     }
-    return this.vendors.submitKyc(user.vendorId!, user.sub);
+    return this.vendors.submitKyc(user.vendorId!, user.sub, body);
   }
 }

@@ -7,10 +7,11 @@
  */
 
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
-import { KycStatus, VendorStatus } from "@prisma/client";
+import { KycStatus, Prisma, VendorStatus } from "@prisma/client";
 
 import { loadFeeSchedule, type FeeSchedule } from "../../common/fees";
 import { PrismaService } from "../../common/prisma.service";
+import type { SubmitKycV2Input } from "../../common/schemas/vendor.schema";
 import { AuditService } from "../audit/audit.service";
 import { opsNewKycTemplate } from "../email/email-templates";
 import { OpsAlertService } from "../notifications/ops-alert.service";
@@ -47,6 +48,37 @@ export interface VendorProfile {
   xHandle: string | null;
   websiteUrl: string | null;
   socialVerifiedAt: Date | null;
+
+  /**
+   * KYC v2 — structured data captured by the multi-step wizard. Every field
+   * is nullable; the wizard pre-fills from whatever the vendor has saved so
+   * far. See migration 0030 / the vendor.schema.ts SubmitKycV2Input for
+   * the field-level rules.
+   */
+  kycV2: {
+    businessType: string | null;
+    businessTypeOther: string | null;
+    businessRegistrationNumber: string | null;
+    businessRegistrationCountry: string | null;
+    businessIndustry: string | null;
+    businessIndustryOther: string | null;
+    contactFullName: string | null;
+    contactPosition: string | null;
+    contactPhone: string | null;
+    contactAddressLine1: string | null;
+    contactAddressLine2: string | null;
+    contactCountry: string | null;
+    idType: string | null;
+    idNumber: string | null;
+    idExpirationDate: string | null;
+    productsStoredDescription: string | null;
+    monthlyInventoryVolume: string | null;
+    monthlyOrderVolume: string | null;
+    serviceIntent: string | null;
+    primaryShippingCountries: string | null;
+    requiresReturnsHandling: boolean | null;
+    productHazards: string[];
+  };
 }
 
 /**
@@ -346,6 +378,33 @@ export class VendorService {
       xHandle: vendor.xHandle,
       websiteUrl: vendor.websiteUrl,
       socialVerifiedAt: vendor.socialVerifiedAt,
+      kycV2: {
+        businessType: vendor.businessType ?? null,
+        businessTypeOther: vendor.businessTypeOther ?? null,
+        businessRegistrationNumber: vendor.businessRegistrationNumber ?? null,
+        businessRegistrationCountry: vendor.businessRegistrationCountry ?? null,
+        businessIndustry: vendor.businessIndustry ?? null,
+        businessIndustryOther: vendor.businessIndustryOther ?? null,
+        contactFullName: vendor.contactFullName ?? null,
+        contactPosition: vendor.contactPosition ?? null,
+        contactPhone: vendor.contactPhone ?? null,
+        contactAddressLine1: vendor.contactAddressLine1 ?? null,
+        contactAddressLine2: vendor.contactAddressLine2 ?? null,
+        contactCountry: vendor.contactCountry ?? null,
+        idType: vendor.idType ?? null,
+        idNumber: vendor.idNumber ?? null,
+        // ISO date string for round-tripping with the wizard's <input type="date">.
+        idExpirationDate: vendor.idExpirationDate
+          ? vendor.idExpirationDate.toISOString().slice(0, 10)
+          : null,
+        productsStoredDescription: vendor.productsStoredDescription ?? null,
+        monthlyInventoryVolume: vendor.monthlyInventoryVolume ?? null,
+        monthlyOrderVolume: vendor.monthlyOrderVolume ?? null,
+        serviceIntent: vendor.serviceIntent ?? null,
+        primaryShippingCountries: vendor.primaryShippingCountries ?? null,
+        requiresReturnsHandling: vendor.requiresReturnsHandling ?? null,
+        productHazards: vendor.productHazards ?? [],
+      },
     };
   }
 
@@ -469,62 +528,140 @@ export class VendorService {
   /**
    * Vendor self-submits their account for KYC review.
    *
-   * Pre-conditions:
-   *   - Current kycStatus is PENDING or REQUIRES_RESUBMISSION (the only states
-   *     from which a vendor can submit for review). APPROVED vendors stay
-   *     approved; REJECTED vendors must contact support.
-   *   - At least one social handle is provided. Without any web presence the
-   *     reviewer has nothing to verify.
+   * The expanded KYC v2 form is collected by a multi-step wizard. The wizard
+   * calls this endpoint on every "Next" with the running set of fields so
+   * partial progress survives a tab close. The FINAL submission is signalled
+   * by `submitForReview: true` being present in the input — at that point we:
+   *   - stamp `kycSubmittedAt = now()` (never trust a client-supplied
+   *     timestamp),
+   *   - flip kycStatus PENDING/REQUIRES_RESUBMISSION/EXPIRED → IN_PROGRESS,
+   *   - require at least one social handle / business website (still the
+   *     reviewer's first-line check), and
+   *   - emit the ops alert + audit row so the admin queue picks it up.
    *
-   * Result: kycStatus → IN_PROGRESS, kycSubmittedAt set, audit entry written.
-   * The admin queue picks it up automatically.
+   * Partial saves only persist the supplied fields and do NOT change kyc
+   * status. Each supplied field overwrites the existing column; legacy
+   * vendors without any v2 data are left alone if nothing is supplied.
    */
-  async submitKyc(vendorId: string, actorId: string): Promise<VendorProfile> {
+  async submitKyc(
+    vendorId: string,
+    actorId: string,
+    input: SubmitKycV2Input = {},
+  ): Promise<VendorProfile> {
     const vendor = await this.prisma.vendor.findUnique({ where: { id: vendorId } });
     if (!vendor) throw new NotFoundException();
 
-    if (
-      vendor.kycStatus !== KycStatus.PENDING &&
-      vendor.kycStatus !== KycStatus.REQUIRES_RESUBMISSION &&
-      vendor.kycStatus !== KycStatus.EXPIRED
-    ) {
-      throw new BadRequestException({
-        message: "KYC cannot be submitted in the current state.",
-        code: "kyc_not_submittable",
-      });
+    const isFinalSubmit = input.submitForReview === true;
+
+    if (isFinalSubmit) {
+      if (
+        vendor.kycStatus !== KycStatus.PENDING &&
+        vendor.kycStatus !== KycStatus.REQUIRES_RESUBMISSION &&
+        vendor.kycStatus !== KycStatus.EXPIRED
+      ) {
+        throw new BadRequestException({
+          message: "KYC cannot be submitted in the current state.",
+          code: "kyc_not_submittable",
+        });
+      }
+
+      const hasAnyHandle =
+        !!vendor.instagramHandle ||
+        !!vendor.tiktokHandle ||
+        !!vendor.xHandle ||
+        !!vendor.websiteUrl;
+      if (!hasAnyHandle) {
+        throw new BadRequestException({
+          message: "Add at least one social handle or your business website before submitting.",
+          code: "kyc_needs_social_handles",
+        });
+      }
     }
 
-    const hasAnyHandle =
-      !!vendor.instagramHandle ||
-      !!vendor.tiktokHandle ||
-      !!vendor.xHandle ||
-      !!vendor.websiteUrl;
-    if (!hasAnyHandle) {
-      throw new BadRequestException({
-        message: "Add at least one social handle or your business website before submitting.",
-        code: "kyc_needs_social_handles",
-      });
+    // Build the persisted-fields object. We only set keys whose values are
+    // explicitly present in the input — `undefined` means "the wizard didn't
+    // surface this step yet, leave the existing column untouched". Empty
+    // strings should also not overwrite (they imply "cleared by the form
+    // reset"). Booleans and array fields are passed through as-is once
+    // they appear in the payload.
+    const data: Prisma.VendorUpdateInput = {};
+    const assign = <K extends keyof Prisma.VendorUpdateInput>(
+      key: K,
+      value: Prisma.VendorUpdateInput[K] | undefined,
+    ): void => {
+      if (value !== undefined) {
+        data[key] = value;
+      }
+    };
+
+    assign("businessType", input.businessType);
+    assign("businessTypeOther", input.businessTypeOther);
+    assign("businessRegistrationNumber", input.businessRegistrationNumber);
+    assign("businessRegistrationCountry", input.businessRegistrationCountry);
+    assign("businessIndustry", input.businessIndustry);
+    assign("businessIndustryOther", input.businessIndustryOther);
+
+    assign("contactFullName", input.contactFullName);
+    assign("contactPosition", input.contactPosition);
+    assign("contactPhone", input.contactPhone);
+    assign("contactAddressLine1", input.contactAddressLine1);
+    assign("contactAddressLine2", input.contactAddressLine2);
+    assign("contactCountry", input.contactCountry);
+
+    assign("idType", input.idType);
+    assign("idNumber", input.idNumber);
+    // Prisma expects a Date for @db.Date columns; Zod gives us an ISO string.
+    if (input.idExpirationDate !== undefined) {
+      data.idExpirationDate = new Date(`${input.idExpirationDate}T00:00:00.000Z`);
+    }
+
+    assign("productsStoredDescription", input.productsStoredDescription);
+    assign("monthlyInventoryVolume", input.monthlyInventoryVolume);
+    assign("monthlyOrderVolume", input.monthlyOrderVolume);
+    assign("serviceIntent", input.serviceIntent);
+
+    assign("primaryShippingCountries", input.primaryShippingCountries);
+    assign("requiresReturnsHandling", input.requiresReturnsHandling);
+    if (input.productHazards !== undefined) {
+      data.productHazards = { set: input.productHazards };
+    }
+
+    // Sections 7 & 8 omitted — no funding-method / billing-email /
+    // compliance-signature assignments here.
+
+    if (isFinalSubmit) {
+      data.kycStatus = KycStatus.IN_PROGRESS;
+      data.kycSubmittedAt = new Date();
+      // Clearing the previous reviewer note signals to the admin that this
+      // is a fresh submission, not a re-review of the same evidence.
+      data.kycRejectionReason = null;
     }
 
     await this.prisma.vendor.update({
       where: { id: vendorId },
-      data: {
-        kycStatus: KycStatus.IN_PROGRESS,
-        kycSubmittedAt: new Date(),
-        // Clearing the previous reviewer note signals to the admin that this
-        // is a fresh submission, not a re-review of the same evidence.
-        kycRejectionReason: null,
-      },
+      data,
     });
 
     await this.audit.log({
       actorId,
-      action: "vendor.kyc_submitted",
+      action: isFinalSubmit ? "vendor.kyc_v2_submitted" : "vendor.kyc_v2_progress_saved",
       resourceType: "vendor",
       resourceId: vendorId,
       beforeState: { kycStatus: vendor.kycStatus },
-      afterState: { kycStatus: KycStatus.IN_PROGRESS },
+      // Don't echo the entire payload — it contains contact PII / id numbers.
+      // Log the field keys that were touched so the audit log shows the
+      // shape of the change without recording the values themselves.
+      afterState: {
+        kycStatus: isFinalSubmit ? KycStatus.IN_PROGRESS : vendor.kycStatus,
+        fieldsTouched: Object.keys(data),
+        finalSubmit: isFinalSubmit,
+      },
     });
+
+    if (!isFinalSubmit) {
+      // Partial save — return the refreshed profile, don't fire the ops alert.
+      return this.getProfile(vendorId);
+    }
 
     // Ops alert — admin team needs to know to review.
     const ops = opsNewKycTemplate({

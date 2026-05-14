@@ -50,6 +50,63 @@ enum VendorStatus {
   CLOSED
 }
 
+// =============================================================================
+// KYC v2 — structured-data enums. Phase 1 of the expanded onboarding form;
+// uploads (ID front/back + selfie + business doc) land in a follow-up. Every
+// vendor column backed by these enums is NULLABLE so existing vendors keep
+// working without a forced re-KYC. See migration 0030 for the DB definitions.
+// =============================================================================
+
+enum KycBusinessType {
+  SOLE_PROPRIETORSHIP
+  REGISTERED_BUSINESS
+  LLC
+  CORPORATION
+  PARTNERSHIP
+  OTHER
+}
+
+enum KycIndustry {
+  FASHION_APPAREL
+  BEAUTY_COSMETICS
+  HAIR_WIGS
+  ELECTRONICS
+  ACCESSORIES
+  HOME_GOODS
+  OTHER
+}
+
+enum KycIdType {
+  PASSPORT
+  NATIONAL_ID
+  DRIVERS_LICENSE
+}
+
+enum KycInventoryVolume {
+  SMALL_1_10
+  MEDIUM_11_30
+  LARGE_31_100
+  XLARGE_100_PLUS
+  BULK_PALLET
+}
+
+enum KycOrderVolume {
+  V_1_20
+  V_21_100
+  V_101_500
+  V_500_PLUS
+}
+
+enum KycServiceIntent {
+  FULFILLMENT_ONLY
+  PERSONAL_SHOPPER
+  BOTH
+}
+
+// Note: KycFundingMethod (and the Section 7 / Section 8 columns) were
+// intentionally dropped from KYC v2 Phase 1. If they ever come back, add the
+// enum here and the matching columns in a new migration.
+
 enum StorageTier {
   SMALL
   MEDIUM
@@ -183,6 +240,57 @@ model Vendor {
 
   agreementAcceptedAt   DateTime? @map("agreement_accepted_at")
   agreementVersion      String?   @map("agreement_version")
+
+  // ---------------------------------------------------------------------------
+  // KYC v2 — structured fields collected by the multi-step /verification wizard.
+  // Every column is optional so legacy vendors and partial wizard progress are
+  // both valid. See migration 0030 for column definitions and the rationale on
+  // why we don't have a separate kyc_submissions table (single submission per
+  // vendor, idempotent re-edit until reviewer approves).
+  // ---------------------------------------------------------------------------
+
+  // Section 1 — Business information
+  businessType                KycBusinessType? @map("business_type")
+  businessTypeOther           String?          @map("business_type_other")
+  businessRegistrationNumber  String?          @map("business_registration_number")
+  /// ISO 3166-1 alpha-2 country of incorporation. Distinct from `country`
+  /// (the operating-region field) — a vendor may be incorporated in the UK
+  /// but ship from a US warehouse.
+  businessRegistrationCountry String?          @map("business_registration_country") @db.Char(2)
+  businessIndustry            KycIndustry?     @map("business_industry")
+  businessIndustryOther       String?          @map("business_industry_other")
+
+  // Section 2 — Primary contact information
+  contactFullName     String? @map("contact_full_name")
+  contactPosition     String? @map("contact_position")
+  contactPhone        String? @map("contact_phone")
+  contactAddressLine1 String? @map("contact_address_line1")
+  contactAddressLine2 String? @map("contact_address_line2")
+  /// ISO 3166-1 alpha-2 residential country of the primary contact.
+  contactCountry      String? @map("contact_country") @db.Char(2)
+
+  // Section 3 — Identity verification (structured fields only; uploads later)
+  idType           KycIdType? @map("id_type")
+  idNumber         String?    @map("id_number")
+  idExpirationDate DateTime?  @map("id_expiration_date") @db.Date
+
+  // Section 5 — Inventory information
+  productsStoredDescription String?             @map("products_stored_description")
+  monthlyInventoryVolume    KycInventoryVolume? @map("monthly_inventory_volume")
+  monthlyOrderVolume        KycOrderVolume?     @map("monthly_order_volume")
+  serviceIntent             KycServiceIntent?   @map("service_intent")
+
+  // Section 6 — Shipping & operations
+  primaryShippingCountries String?  @map("primary_shipping_countries")
+  requiresReturnsHandling  Boolean? @map("requires_returns_handling")
+  /// Multi-select hazard tags. Allowed values are enforced by the Zod schema
+  /// at the API layer (BATTERIES / LIQUIDS / FRAGILE / HAZARDOUS / NONE).
+  productHazards           String[] @default([]) @map("product_hazards")
+
+  // Sections 7 & 8 (Payment & Wallet / Compliance Signature) intentionally
+  // omitted from KYC v2 Phase 1. Final-submit is now triggered by a Review
+  // step that just stamps `kycSubmittedAt` and flips the vendor into the
+  // PENDING/IN_PROGRESS review queue — no typed-signature is collected here.
 
   status        VendorStatus  @default(PENDING_KYC)
 
