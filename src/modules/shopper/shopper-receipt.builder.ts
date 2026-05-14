@@ -650,11 +650,14 @@ export function buildReceiptSvg(d: ReceiptBreakdown): string {
   const SUM_ROW_H = 24;
   const sumBlockH = SUM_ROW_H * rows.length + 14;
 
+  const destLines = d.destinationAddressLines ?? [];
   const parcelRows =
     (d.parcelLengthIn != null || d.parcelWidthIn != null || d.parcelHeightIn != null || d.parcelWeightOz != null
       ? 3
       : 0) +
-    (d.carrier && d.trackingNumber ? 3 : 0);
+    (d.carrier && d.trackingNumber ? 3 : 0) +
+    // Phase 2 + 0027 — destination block: header row + one row per line.
+    (destLines.length > 0 ? 1 + destLines.length : 0);
   const parcelBlockH = parcelRows * SUM_ROW_H;
 
   const TOTAL_BAR_H = 50;
@@ -854,6 +857,30 @@ export function buildReceiptSvg(d: ReceiptBreakdown): string {
       }),
     );
     cursorY += SUM_ROW_H;
+  }
+
+  // Destination block — phase 2 redesign + migration 0027.
+  // Surface the shipping-to address right on the receipt so the buyer
+  // can audit where it's going before paying the shipping invoice.
+  if (destLines.length > 0) {
+    parts.push(line(PAD, cursorY, W - PAD, cursorY));
+    parts.push(
+      text(PAD, cursorY + 16, "SHIP TO", {
+        size: 10,
+        color: "#9C9892",
+        letterSpacing: 1.4,
+      }),
+    );
+    cursorY += SUM_ROW_H;
+    for (const addrLine of destLines) {
+      parts.push(
+        text(PAD, cursorY + 16, addrLine, {
+          size: 13,
+          color: "#3A3A3A",
+        }),
+      );
+      cursorY += SUM_ROW_H;
+    }
   }
 
   if (d.carrier && d.trackingNumber) {
