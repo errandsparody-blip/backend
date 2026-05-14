@@ -1038,13 +1038,21 @@ export function shopperCancelledTemplate(args: {
 // Marketing — Pricing guide delivery
 //
 // Sent in response to the public /pricing page "Get our full price guide"
-// form. The PDF rides along as an attachment so the recipient gets the
-// numbers directly in their inbox — no second-click required. Body is
-// short + warm; sales follow-up happens out-of-band.
+// form. The PDF lives in the Next.js web app's public/ folder (served by
+// Vercel's CDN), so the email carries a one-click download link rather
+// than a large attachment. Benefits:
+//   - email size stays small (link, not a 460 KB binary)
+//   - Gmail / Outlook preview the PDF inline via their own URL handlers
+//   - no backend-image bundling required
+//
+// `downloadUrl` MUST be an absolute https:// URL the recipient can hit
+// without authentication. It is escape()'d before landing in any href
+// attribute below.
 // ---------------------------------------------------------------------------
 
 export function pricingGuideTemplate(args: {
   businessName: string;
+  downloadUrl: string;
 }): RenderedEmail {
   const businessName = args.businessName.trim() || "there";
   return {
@@ -1054,7 +1062,7 @@ export function pricingGuideTemplate(args: {
       title: "Here's our full pricing guide",
       bodyHtml:
         `<p style="margin:0 0 12px 0;">Hi ${escape(businessName)},</p>` +
-        `<p style="margin:0 0 12px 0;">Thanks for your interest in USA Errands. The full pricing guide is attached to this email as a PDF — it covers per-box storage, pallet pricing, fulfillment, receiving, and our pallet rules.</p>` +
+        `<p style="margin:0 0 12px 0;">Thanks for your interest in USA Errands. Click the button below to download the full pricing guide as a PDF — it covers per-box storage, pallet pricing, fulfillment, receiving, and our pallet rules.</p>` +
         `<p style="margin:0 0 12px 0;">A few quick highlights:</p>` +
         `<ul style="margin:0 0 12px 18px;padding:0;color:#3A3A3A;font-size:14px;line-height:1.7;">` +
           `<li>Per-box monthly storage from <strong>$9 (Small)</strong> to <strong>$25 (X-Large)</strong></li>` +
@@ -1064,11 +1072,12 @@ export function pricingGuideTemplate(args: {
         `</ul>` +
         `<p style="margin:0 0 12px 0;">If you'd like a walk-through or a custom quote for higher volume, just reply to this email.</p>` +
         `<p style="margin:16px 0 0 0;color:#9C9892;font-size:13px;">— The USA Errands team</p>`,
-      cta: { label: "Create your account", href: `${cfg.WEB_PUBLIC_URL}/signup` },
+      cta: { label: "Download the price guide", href: args.downloadUrl },
     }),
     text:
       `Hi ${businessName},\n\n` +
-      `Thanks for your interest in USA Errands. The full pricing guide is attached to this email as a PDF.\n\n` +
+      `Thanks for your interest in USA Errands. Download the full pricing guide as a PDF here:\n` +
+      `${args.downloadUrl}\n\n` +
       `Quick highlights:\n` +
       `  - Per-box monthly storage from $9 (Small) to $25 (X-Large)\n` +
       `  - Onboarding fee = stocking + first month's storage, charged once per box\n` +

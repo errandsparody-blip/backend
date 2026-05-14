@@ -89,12 +89,11 @@ RUN pnpm install --frozen-lockfile --prod
 # The compiled application.
 COPY --from=builder /app/dist ./dist
 
-# Static assets bundled at runtime — currently the marketing pricing-guide
-# PDF, served as an email attachment via PricingGuideService. The service
-# resolves `process.cwd()/assets/...`, which is `/app/assets/...` in this
-# container. Without this COPY the email send would fail with
-# `pricing_guide.pdf_missing` on every request.
-COPY --from=builder /app/assets ./assets
+# Note: the marketing pricing-guide PDF used to be bundled here and shipped
+# as an email attachment. It now lives in the Next.js web app's public/
+# folder and is served by Vercel's CDN; PricingGuideService emails a link
+# instead of an attachment, so the API container no longer ships any
+# static assets.
 
 # Belt-and-braces regenerate. Postinstall handled it above; this is just
 # insurance against any caching surprises.

@@ -5,34 +5,32 @@
  * Flow:
  *   1. Validate input (Zod, upstream in the controller).
  *   2. Persist a row in `pricing_guide_leads` so sales has a record.
- *   3. Send the PDF (attached) to the visitor's email.
+ *   3. Send an email with a download link to the public PDF (served
+ *      by the marketing web app at `${WEB_PUBLIC_URL}/pricing-guide-2026.pdf`).
  *   4. Stamp `email_sent_at` on the row on successful send.
  *
- * The PDF lives at `assets/pricing-guide-2026.pdf` inside the repo. We
- * read it ONCE at boot (lazy) and keep the Buffer in memory — the file
- * is <500 KB and the read is hot-path-friendly. Replacing the PDF
- * requires a redeploy; that's fine for an asset that changes annually.
+ * Originally the service shipped the PDF as a Resend attachment loaded
+ * from disk. We switched to a public-URL link because the file already
+ * lives in the Next.js `public/` folder (served by Vercel's CDN), so:
+ *   - the backend no longer needs to bundle the PDF
+ *   - email size stays small (just a link, not a 460 KB attachment)
+ *   - Gmail / Outlook clients open the PDF inline via their own preview
  *
- * Anti-spam: rate-limited at the controller (3/hour per IP) and we
- * additionally bail out silently when the same email submits more than
- * once within 24 hours — keeps the inbox calm AND keeps us from
- * burning Resend quota on a bot replaying the form.
+ * Anti-spam: rate-limited at the controller (3/hour per IP). We also
+ * dedupe re-sends from the same email inside 24h to keep the inbox
+ * calm and conserve Resend quota.
  */
 
 import { Injectable, Logger } from "@nestjs/common";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 
+import { loadConfig } from "../../common/config";
 import { PrismaService } from "../../common/prisma.service";
 import { EmailService } from "../email/email.service";
 import { pricingGuideTemplate } from "../email/email-templates";
 
-const PDF_FILENAME = "USA Errands — Pricing Guide.pdf";
-// Resolved relative to the repo root. NestJS runs from `dist/` at runtime
-// but the assets folder sits at the project root, so we walk up from the
-// CWD. The fallback `process.cwd()` works for both local dev and the
-// Railway container (which sets cwd to the project root).
-const PDF_DISK_PATH = join(process.cwd(), "assets", "pricing-guide-2026.pdf");
+// Public path served by the Next.js web app — must match the filename
+// committed at `usa-errands-web/public/pricing-guide-2026.pdf`.
+const PDF_PUBLIC_PATH = "/pricing-guide-2026.pdf";
 
 // Throttle window for "same email submits repeatedly" defence. Resends
 // within this window silently no-op (the lead row is still recorded for
@@ -50,37 +48,11 @@ interface RequestArgs {
 @Injectable()
 export class PricingGuideService {
   private readonly logger = new Logger(PricingGuideService.name);
-  /** Cached PDF bytes — read once, reused on every send. */
-  private pdfBytes: Buffer | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly email: EmailService,
   ) {}
-
-  /**
-   * Lazy-load the PDF the first time someone requests it. Subsequent
-   * calls return the cached Buffer. If the file is missing at runtime
-   * we surface a structured error so the operator can fix the
-   * deployment — better than silently sending an email without the
-   * promised attachment.
-   */
-  private async loadPdfBytes(): Promise<Buffer> {
-    if (this.pdfBytes) return this.pdfBytes;
-    try {
-      const buf = await readFile(PDF_DISK_PATH);
-      this.pdfBytes = buf;
-      return buf;
-    } catch (err) {
-      this.logger.error(
-        { err: (err as Error).message, path: PDF_DISK_PATH },
-        "pricing_guide.pdf_missing",
-      );
-      throw new Error(
-        `Pricing-guide PDF is not deployed at ${PDF_DISK_PATH} — check that the assets/ folder is included in the build.`,
-      );
-    }
-  }
 
   async requestGuide(args: RequestArgs): Promise<{ delivered: boolean; deduped?: boolean }> {
     // Persist the lead first so sales sees the prospect even if the
@@ -90,11 +62,6 @@ export class PricingGuideService {
       this.prisma as unknown as {
         pricingGuideLead: {
           create: (args: { data: Record<string, unknown> }) => Promise<{ id: string }>;
-          findFirst: (args: {
-            where: Record<string, unknown>;
-            orderBy: Record<string, unknown>;
-          }) => Promise<{ emailSentAt: Date | null; createdAt: Date } | null>;
-          update: (args: { where: { id: string }; data: Record<string, unknown> }) => Promise<unknown>;
         };
       }
     ).pricingGuideLead.create({
@@ -135,10 +102,12 @@ export class PricingGuideService {
       return { delivered: true, deduped: true };
     }
 
-    // Load PDF (cached after first read).
-    const pdfBytes = await this.loadPdfBytes();
-
-    const tpl = pricingGuideTemplate({ businessName: args.businessName });
+    const cfg = loadConfig();
+    const downloadUrl = `${cfg.WEB_PUBLIC_URL.replace(/\/$/, "")}${PDF_PUBLIC_PATH}`;
+    const tpl = pricingGuideTemplate({
+      businessName: args.businessName,
+      downloadUrl,
+    });
     const result = await this.email.send({
       to: args.email,
       subject: tpl.subject,
@@ -147,13 +116,6 @@ export class PricingGuideService {
       // Idempotency key per lead so a Resend retry doesn't double-send.
       idempotencyKey: `pricing_guide:${lead.id}`,
       type: "marketing.pricing_guide",
-      attachments: [
-        {
-          filename: PDF_FILENAME,
-          content: pdfBytes,
-          contentType: "application/pdf",
-        },
-      ],
     });
 
     if (result.ok) {
