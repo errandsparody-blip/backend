@@ -89,6 +89,10 @@ export class ExportController {
           if (count >= MAX_ROWS) break;
           yield [
             o.id,
+            // Platform-assigned numeric order number — present in the export
+            // alongside the vendor's own external_reference so downstream
+            // spreadsheets can join either way.
+            String(o.orderNumber),
             o.externalReference ?? "",
             o.status,
             o.recipientName,
@@ -123,6 +127,7 @@ export class ExportController {
       res,
       [
         "id",
+        "order_number",
         "external_reference",
         "status",
         "recipient_name",

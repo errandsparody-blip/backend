@@ -72,6 +72,7 @@ export interface VendorOverview {
     lifetimeRevenueCents: number;
     recent: Array<{
       id: string;
+      orderNumber: number;
       externalReference: string | null;
       status: string;
       recipientName: string;
@@ -361,6 +362,7 @@ export class AdminVendorService {
           take: 10,
           select: {
             id: true,
+            orderNumber: true,
             externalReference: true,
             status: true,
             recipientName: true,
@@ -380,6 +382,7 @@ export class AdminVendorService {
           onErr("order.findMany")(
             [] as Array<{
               id: string;
+              orderNumber: number;
               externalReference: string | null;
               status: unknown;
               recipientName: string;
@@ -666,6 +669,7 @@ export class AdminVendorService {
         lifetimeRevenueCents: lifetimeOrderRevenueCents,
         recent: ordersRecent.map((o) => ({
           id: o.id,
+          orderNumber: o.orderNumber,
           externalReference: o.externalReference,
           status: o.status as string,
           recipientName: o.recipientName,

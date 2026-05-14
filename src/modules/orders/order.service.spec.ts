@@ -37,6 +37,7 @@ interface FakeOrder {
   id: string;
   vendorId: string;
   status: "DRAFT" | "SUBMITTED" | "ALLOCATED" | "SHIPPED" | "DELIVERED" | "CANCELLED";
+  orderNumber: number;
   externalReference: string | null;
   recipientName: string;
   recipientPhone: string | null;
@@ -151,6 +152,9 @@ describe("OrderService — tenant isolation + address rejection", () => {
       id,
       vendorId,
       status,
+      // Stable per-id pseudo-number — tests don't care about the actual
+      // value, only that the column exists and is numeric.
+      orderNumber: 1000 + parseInt(id.slice(-4), 16) % 9000,
       externalReference: null,
       recipientName: validRecipient.recipientName,
       recipientPhone: null,
