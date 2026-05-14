@@ -86,11 +86,18 @@ export const resetPasswordSchema = z.object({
 });
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 
-// Email verification — 6-digit code typed into the form, not a click-through
+// Email verification — numeric code typed into the form, not a click-through
 // link. Code is delivered via email; the form posts (email, code) back here.
+//
+// The TokenService defaults to 8 digits as of the M-4 hardening (100M search
+// space, well past what an opportunistic attacker can brute-force against the
+// /auth/verify-email rate limit). We accept the 6–8 digit range so any
+// legacy 6-digit codes that were already in flight when the change rolled out
+// still verify cleanly; once those expire (≤ 15 min after the deploy that
+// flipped the default) this can be tightened to `^\d{8}$`.
 export const verifyEmailCodeSchema = z
   .string()
-  .regex(/^\d{6}$/, "Enter the 6-digit code from your email.");
+  .regex(/^\d{6,8}$/, "Enter the code from your email.");
 
 export const verifyEmailSchema = z.object({
   email: emailSchema,
