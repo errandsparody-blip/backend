@@ -116,6 +116,13 @@ export interface QuoteResult {
 
 export interface PublicOrder {
   id: string;
+  /**
+   * Monotonic, platform-assigned order number. Rendered as `#${orderNumber}`
+   * in the portal and emails (migration 0029). The PRIMARY identifier shown
+   * to vendors — externalReference below is their own optional bookkeeping
+   * id and is surfaced as a secondary "Your reference" field.
+   */
+  orderNumber: number;
   externalReference: string | null;
   status: OrderStatus;
   recipient: {
@@ -632,7 +639,14 @@ export class OrderService {
     const where: Prisma.OrderWhereInput = { vendorId };
     if (input.status) where.status = input.status;
     if (input.search) {
+      // Numeric matches go against orderNumber so "#1625" or "1625" both
+      // find order #1625. Strip a leading "#" if the user pasted the
+      // rendered form; coerce only fully-numeric tokens so a search for
+      // "shop-42" doesn't accidentally bind to the integer column.
+      const trimmed = input.search.trim().replace(/^#/, "");
+      const numericMatch = /^\d+$/.test(trimmed) ? Number(trimmed) : null;
       where.OR = [
+        ...(numericMatch !== null ? [{ orderNumber: numericMatch }] : []),
         { externalReference: { contains: input.search, mode: "insensitive" } },
         { trackingNumber: { contains: input.search, mode: "insensitive" } },
         { recipientName: { contains: input.search, mode: "insensitive" } },
@@ -877,6 +891,7 @@ export class OrderService {
   private toPublic(o: Order & { lines: OrderLine[] }): PublicOrder {
     return {
       id: o.id,
+      orderNumber: o.orderNumber,
       externalReference: o.externalReference,
       status: o.status,
       recipient: {

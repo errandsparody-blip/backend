@@ -764,8 +764,18 @@ model Order {
   vendorId                 String          @map("vendor_id") @db.Uuid
   vendor                   Vendor          @relation(fields: [vendorId], references: [id], onDelete: Cascade)
 
+  // Human-friendly, monotonic order number — rendered as "#1625" in the
+  // portal, emails, and labels. Globally unique across the platform, backed
+  // by Postgres sequence `orders_order_number_seq` (migration 0029). The
+  // application omits this field on create so the DB default populates it
+  // atomically; we never compute it in app code to avoid races.
+  orderNumber              Int             @unique @default(dbgenerated("nextval('orders_order_number_seq'::regclass)")) @map("order_number")
+
   // Vendor's external order id (their Shopify/WooCommerce/etc. number). Indexed
   // for lookup; uniqueness scoped to vendor so two vendors can share an id.
+  // Optional informational field — the PRIMARY identifier shown to vendors is
+  // `orderNumber` above. external_reference exists for vendors who want to
+  // cross-reference back to their own store / OMS.
   externalReference        String?         @map("external_reference")
 
   status                   OrderStatus     @default(DRAFT)

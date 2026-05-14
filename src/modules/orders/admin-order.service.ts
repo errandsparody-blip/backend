@@ -20,6 +20,7 @@ import { ConflictException, Injectable, NotFoundException } from "@nestjs/common
 import { Prisma } from "@prisma/client";
 import type { Order, OrderStatus, PrismaClient } from "@prisma/client";
 
+import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import { orderShippedTemplate } from "../email/email-templates";
@@ -394,8 +395,12 @@ export class AdminOrderService {
     // Side-effect after the transaction commits — notification + email parity.
     // Failures here MUST NOT roll back the carrier hand-off above.
     if (updated.trackingNumber && updated.carrier) {
+      // The portal-facing identifier is the platform-assigned, sequential
+      // order number ("#1625"). external_reference is the vendor's own
+      // bookkeeping id and is only surfaced as a secondary label.
+      const ref = formatOrderRef(updated.orderNumber);
       const tpl = orderShippedTemplate({
-        orderRef: updated.externalReference ?? updated.id.slice(0, 8),
+        orderRef: ref,
         carrier: updated.carrier,
         trackingNumber: updated.trackingNumber,
         orderId: updated.id,
@@ -404,7 +409,7 @@ export class AdminOrderService {
         vendorId: updated.vendorId,
         type: "order.shipped",
         severity: "INFO",
-        title: `Order ${updated.externalReference ?? updated.id.slice(0, 8)} shipped`,
+        title: `Order ${ref} shipped`,
         body: `${updated.carrier} picked it up. Tracking: ${updated.trackingNumber}.`,
         href: `/orders/${updated.id}`,
         email: { subject: tpl.subject, html: tpl.html, text: tpl.text },

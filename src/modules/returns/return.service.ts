@@ -29,6 +29,7 @@ import { Prisma } from "@prisma/client";
 import { randomBytes } from "node:crypto";
 import type { PrismaClient, Return, ReturnStatus } from "@prisma/client";
 
+import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
 import type {
   CreateReturnInput,
@@ -179,7 +180,7 @@ export class ReturnService {
     // before forwarding it to their customer.
     const tpl = returnAuthorizedTemplate({
       rmaCode: finalRet.rmaCode,
-      orderRef: order.externalReference ?? order.id.slice(0, 8),
+      orderRef: formatOrderRef(order.orderNumber),
       trackingNumber: finalRet.inboundTracking,
       inboundLabelUrl: finalRet.inboundLabelUrl,
     });

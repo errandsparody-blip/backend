@@ -36,6 +36,7 @@ import { Throttle } from "@nestjs/throttler";
 import type { OrderStatus } from "@prisma/client";
 
 import { Public } from "../../../common/decorators/public.decorator";
+import { formatOrderRef } from "../../../common/order-ref";
 import { PrismaService } from "../../../common/prisma.service";
 import { orderDeliveredTemplate } from "../../email/email-templates";
 import { NotificationService } from "../../notifications/notification.service";
@@ -256,18 +257,19 @@ export class ShippoWebhookController {
   private async notifyOrderDelivered(orderId: string): Promise<void> {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
-      select: { id: true, externalReference: true, vendorId: true },
+      select: { id: true, orderNumber: true, vendorId: true },
     });
     if (!order) return;
+    const ref = formatOrderRef(order.orderNumber);
     const tpl = orderDeliveredTemplate({
-      orderRef: order.externalReference ?? order.id.slice(0, 8),
+      orderRef: ref,
       orderId: order.id,
     });
     await this.notifications.emit({
       vendorId: order.vendorId,
       type: "order.delivered",
       severity: "INFO",
-      title: `Order ${order.externalReference ?? order.id.slice(0, 8)} delivered`,
+      title: `Order ${ref} delivered`,
       body: "The carrier confirmed delivery.",
       href: `/orders/${order.id}`,
       email: { subject: tpl.subject, html: tpl.html, text: tpl.text },
