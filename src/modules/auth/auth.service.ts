@@ -218,9 +218,11 @@ export class AuthService {
   }
 
   /**
-   * Verify a user's email by 6-digit code. Looks up the user by email,
-   * compares the stored sha256 hash to the hash of the submitted code, and on
-   * match flips status → ACTIVE.
+   * Verify a user's email by numeric code (8 digits as of the M-4 hardening;
+   * the Zod schema also accepts 6 transitionally for any legacy codes still in
+   * flight at deploy time). Looks up the user by email, compares the stored
+   * sha256 hash to the hash of the submitted code, and on match flips status
+   * → ACTIVE.
    *
    * Security:
    *   - Constant-time comparison via timingSafeEqual on the SHA-256 hashes.
