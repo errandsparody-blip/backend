@@ -137,11 +137,40 @@ export class StripeWebhookController {
         data: { processedAt: new Date() },
       });
     } catch (err) {
-      // On dispatch failure, capture the error on the row so support can replay.
-      await this.prisma.webhookEvent.updateMany({
-        where: { provider: "stripe", eventId: event.id },
-        data: { error: (err as Error).message },
-      });
+      // Security audit M-2 — on dispatch failure, DELETE the
+      // webhook_events row so the next Stripe retry can reprocess
+      // instead of being silently marked `deduped`. We still emit a
+      // structured log so finance can investigate transient failures
+      // (the deletion erases the audit-log forensic trail otherwise).
+      this.logger.error(
+        {
+          err,
+          eventId: event.id,
+          eventType: event.type,
+          errMessage: (err as Error).message,
+        },
+        "stripe.webhook.dispatch_failed_row_deleted_for_retry",
+      );
+      try {
+        await this.prisma.webhookEvent.deleteMany({
+          where: { provider: "stripe", eventId: event.id },
+        });
+      } catch (delErr) {
+        // If the cleanup fails, fall back to the old behaviour — leave
+        // the row in place with the error captured. Stripe will give
+        // up after its retry budget; finance can then manually
+        // reconcile via the audit log.
+        this.logger.error(
+          { err: delErr, eventId: event.id },
+          "stripe.webhook.failure_row_cleanup_failed",
+        );
+        await this.prisma.webhookEvent
+          .updateMany({
+            where: { provider: "stripe", eventId: event.id },
+            data: { error: (err as Error).message },
+          })
+          .catch(() => undefined);
+      }
       throw err;
     }
 

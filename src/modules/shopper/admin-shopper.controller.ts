@@ -327,6 +327,22 @@ export class AdminShopperController {
         });
       }
 
+      // Security audit M-3 — if the row already pointed at a different
+      // Checkout session, expire it on Stripe's side so any stale
+      // pay-link the buyer might still have (email, chat history)
+      // becomes inert. Best-effort: a failure here is non-fatal
+      // because the new session is the only one we'll surface in the
+      // UI going forward, and stale links naturally expire in 24h
+      // even without our help.
+      const previousSessionId = (updated as unknown as {
+        shippingInvoiceSessionId?: string | null;
+      }).shippingInvoiceSessionId;
+      if (previousSessionId && previousSessionId !== session.sessionId) {
+        await this.stripe
+          .expireCheckoutSession(previousSessionId)
+          .catch(() => undefined);
+      }
+
       try {
         await this.requests.attachShippingSession({
           requestId: id,

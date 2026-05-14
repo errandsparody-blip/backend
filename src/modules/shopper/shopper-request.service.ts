@@ -1461,6 +1461,8 @@ export class ShopperRequestService {
         note: args.input.note ?? null,
       },
     });
+    // Security audit L-1 — terminal state, revoke active magic-links.
+    void this.tokens.revokeAllForRequest(args.requestId).catch(() => undefined);
     return updated;
   }
 
@@ -1484,6 +1486,12 @@ export class ShopperRequestService {
     });
     // Buyer delivery confirmation. Best-effort.
     void this.notifyDelivered(updated).catch(() => undefined);
+    // Security audit L-1 — revoke any active magic-link tokens on
+    // terminal state. The buyer can still receive a fresh link by
+    // contacting support if they need to reopen the thread; what we
+    // close is the ambient "anyone with this URL can read the order"
+    // exposure.
+    void this.tokens.revokeAllForRequest(args.requestId).catch(() => undefined);
     return updated;
   }
 
@@ -1552,6 +1560,10 @@ export class ShopperRequestService {
         refundedAmountCents: args.refundedAmountCents ?? 0,
       },
     });
+    // Security audit L-1 — terminal state, revoke active magic-links so
+    // the cancelled request can no longer be reopened from a bookmarked
+    // URL or forwarded email.
+    void this.tokens.revokeAllForRequest(args.requestId).catch(() => undefined);
     // Buyer cancel/refund email. Best-effort. The reason field IS shown to
     // the buyer — admin sees this warning in the UI before clicking cancel.
     void this.notifyCancelled(updated, {

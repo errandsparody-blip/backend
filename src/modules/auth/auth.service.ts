@@ -149,11 +149,13 @@ export class AuthService {
     await this.hibp.assertNotPwned(input.password);
     const passwordHash = await argon2.hash(input.password, ARGON2_OPTIONS);
 
-    // 6-digit numeric code, hashed for storage. Plaintext goes in the email
+    // 8-digit numeric code, hashed for storage. Plaintext goes in the email
     // body; the user types it back into the verify form. Expires in 15 minutes
     // — short enough to limit a leaked code's usefulness, long enough that an
-    // email queued or briefly delayed still arrives in time.
-    const { plaintext: emailCode, hash: emailTokenHash } = this.tokens.generateNumericCode(6);
+    // email queued or briefly delayed still arrives in time. Length bumped
+    // from 6 → 8 (security audit M-4) to raise distributed-brute-force cost
+    // by ~100×.
+    const { plaintext: emailCode, hash: emailTokenHash } = this.tokens.generateNumericCode(8);
 
     // Create the vendor + wallet + user atomically. If any fails, none persist.
     const { userId } = await this.prisma.$transaction(async (tx) => {
@@ -288,7 +290,8 @@ export class AuthService {
       return; // silent no-op — never enumerate
     }
 
-    const { plaintext: code, hash: codeHash } = this.tokens.generateNumericCode(6);
+    // 8-digit code (security audit M-4 — same rationale as signup).
+    const { plaintext: code, hash: codeHash } = this.tokens.generateNumericCode(8);
     await this.prisma.user.update({
       where: { id: user.id },
       data: {
@@ -519,8 +522,15 @@ export class AuthService {
   // ---------------------------------------------------------------------------
 
   async refresh(refreshToken: string, meta: RequestMeta) {
-    const { token, expiresAt, user } = await this.tokens.rotateRefreshToken(refreshToken, meta);
-    const access = this.tokens.signAccessToken(user, "1"); // baseline acr; step-up requires re-auth
+    const { token, expiresAt, user, sessionId } = await this.tokens.rotateRefreshToken(
+      refreshToken,
+      meta,
+    );
+    // Bind the new access token to the rotated session id so the JWT
+    // strategy can verify the session is still active on every request
+    // (security audit H-1 — closes the post-logout / post-revocation
+    // residual window).
+    const access = this.tokens.signAccessToken(user, "1", sessionId); // baseline acr; step-up requires re-auth
     return {
       user: this.toPublicUser(user),
       accessToken: access.token,
@@ -707,8 +717,11 @@ export class AuthService {
     acr: "1" | "2",
     meta: RequestMeta,
   ): Promise<Extract<AuthResult, { kind: "authenticated" }>> {
-    const access = this.tokens.signAccessToken(user, acr);
+    // Issue the refresh token first so we know the session id, then
+    // bind that into the access token's `sessionId` claim (security
+    // audit H-1 — enables per-request session-revocation enforcement).
     const refresh = await this.tokens.issueRefreshToken({ id: user.id }, meta);
+    const access = this.tokens.signAccessToken(user, acr, refresh.sessionId);
 
     await this.prisma.user.update({
       where: { id: user.id },

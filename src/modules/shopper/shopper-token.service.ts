@@ -133,4 +133,27 @@ export class ShopperTokenService {
       data: { revokedAt: new Date() },
     });
   }
+
+  /**
+   * Bulk-revoke every active token for a request. Called when the
+   * request transitions to a terminal state (CANCELLED, REFUNDED,
+   * DELIVERED, or in-person PICKUP) so any stale magic-link the
+   * buyer's email account might still hold becomes inert (security
+   * audit L-1).
+   *
+   * Best-effort: a failure here mustn't block the state transition.
+   * The default 60-day token expiry caps residual exposure anyway,
+   * but immediate revocation removes the window entirely.
+   */
+  async revokeAllForRequest(requestId: string): Promise<number> {
+    const res = await (this.prisma as unknown as {
+      shopperAccessToken: {
+        updateMany: (args: unknown) => Promise<{ count: number }>;
+      };
+    }).shopperAccessToken.updateMany({
+      where: { requestId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    return res.count;
+  }
 }

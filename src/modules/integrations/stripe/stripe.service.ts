@@ -475,12 +475,46 @@ export class StripeService {
    * Verify the Stripe webhook signature. Throws on tamper or expired timestamp.
    * Returns the parsed Stripe event on success.
    */
+  /**
+   * Expire a Checkout session early so any outstanding pay-link the
+   * buyer might still hold becomes inert. Best-effort: returns `false`
+   * (and never throws) when the session has already expired, been
+   * completed, or doesn't exist. Used by the shopper shipping-invoice
+   * flow (security audit M-3) to invalidate an old session whenever
+   * admin re-saves the form with a different amount.
+   */
+  async expireCheckoutSession(sessionId: string): Promise<boolean> {
+    if (!this.stripe) return false;
+    if (!sessionId) return false;
+    try {
+      await this.stripe.checkout.sessions.expire(sessionId);
+      return true;
+    } catch (err) {
+      // Common no-op cases: session already expired, already complete,
+      // or unknown id. We log at debug rather than warn — for the
+      // re-save path, "no old session to expire" is the happy path.
+      this.logger.debug(
+        { err: (err as Error).message, sessionId },
+        "stripe.checkout.expire_session_failed",
+      );
+      return false;
+    }
+  }
+
   verifyWebhook(rawBody: Buffer | string, signature: string | undefined): Stripe.Event {
     if (!this.stripe) throw new Error("Stripe is not configured.");
     if (!this.webhookSecret) {
       const cfg = loadConfig();
-      if (cfg.NODE_ENV === "production") {
-        throw new Error("STRIPE_WEBHOOK_SECRET is required in production.");
+      // Security audit M-1 — only bypass the signature check in
+      // `development`. Previously the bypass triggered for anything
+      // that wasn't strictly `production`, which left staging / test /
+      // CI exposed if the secret happened to be unset. Real non-dev
+      // environments must have a real `whsec_…` secret configured.
+      if (cfg.NODE_ENV !== "development") {
+        throw new Error(
+          "STRIPE_WEBHOOK_SECRET is required outside of development. " +
+            "Set it in the environment before accepting webhook traffic.",
+        );
       }
       this.logger.warn("STRIPE_WEBHOOK_SECRET not set — accepting unsigned webhook (dev only).");
       return JSON.parse(typeof rawBody === "string" ? rawBody : rawBody.toString("utf8")) as Stripe.Event;

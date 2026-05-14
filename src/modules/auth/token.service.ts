@@ -27,6 +27,14 @@ export interface AccessTokenPayload {
   role: Role;
   /** "1" = password only, "2" = password + fresh MFA. Step-up auth checks this. */
   acr: "1" | "2";
+  /**
+   * Bound-session id. Embedded on every access-token issue so the JWT
+   * strategy can verify the session is still active on each request
+   * (closes the post-logout/revocation residual window). Optional in
+   * the type for backwards compatibility with any legacy tokens
+   * issued before this field existed.
+   */
+  sessionId?: string;
 }
 
 @Injectable()
@@ -41,7 +49,18 @@ export class TokenService {
   // Access tokens
   // ---------------------------------------------------------------------------
 
-  signAccessToken(user: Pick<User, "id" | "vendorId" | "role">, acr: "1" | "2"): {
+  signAccessToken(
+    user: Pick<User, "id" | "vendorId" | "role">,
+    acr: "1" | "2",
+    /**
+     * The session row this access token is bound to. Required for new
+     * issuances after May 2026; optional in the signature for legacy
+     * test paths that don't have a session row. Embedded as a JWT
+     * claim so the strategy can revoke individual access tokens by
+     * revoking the parent session row.
+     */
+    sessionId?: string,
+  ): {
     token: string;
     expiresAt: Date;
   } {
@@ -51,6 +70,7 @@ export class TokenService {
       vendorId: user.vendorId ?? null,
       role: user.role,
       acr,
+      ...(sessionId ? { sessionId } : {}),
     };
     const token = this.jwt.sign(payload, {
       secret: Buffer.from(cfg.JWT_ACCESS_SECRET, "base64"),
@@ -213,9 +233,17 @@ export class TokenService {
    *
    * Uses crypto.randomInt for a uniform distribution across the [0, 10^digits)
    * range. The plaintext is left-padded with zeros so a code starting with 0
-   * is rendered with all six digits — vital because users will type it in.
+   * is rendered with all `digits` characters — vital because users will type
+   * it in.
+   *
+   * Default raised from 6 → 8 digits (security audit M-4). At 8 digits the
+   * search space is 100M permutations; combined with the per-IP rate limit
+   * on `/auth/verify-email` (10/min) and the 15-minute expiry, a distributed
+   * brute-force attack would need roughly 10⁶ IP addresses to clear ~1%
+   * probability — outside the realistic capability of opportunistic
+   * attackers. 6-digit calls continue to work for legacy paths if any.
    */
-  generateNumericCode(digits = 6): { plaintext: string; hash: string } {
+  generateNumericCode(digits = 8): { plaintext: string; hash: string } {
     if (digits < 4 || digits > 10) {
       throw new Error("Numeric code length must be between 4 and 10 digits.");
     }

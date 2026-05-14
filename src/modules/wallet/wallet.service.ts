@@ -271,7 +271,31 @@ export class WalletService {
       _sum: { amountCents: true },
     });
     const ledger = sum._sum.amountCents ?? 0;
-    return { ok: ledger === wallet.balanceCents, materialized: wallet.balanceCents, ledger };
+    const ok = ledger === wallet.balanceCents;
+
+    // Security audit L-3 — write a permanent audit row whenever the
+    // materialized balance diverges from the ledger sum. Previously
+    // the cron only logged the warning via pino, which can be rotated
+    // out or sampled by Sentry — meaning a brief corruption event
+    // could resolve before anyone investigates and leave no trail.
+    // Now finance can SELECT FROM audit_logs WHERE action = '...' and
+    // see every reconciliation failure in chronological order.
+    if (!ok) {
+      await this.audit
+        .log({
+          action: "wallet.reconciliation.mismatch",
+          resourceType: "wallet",
+          resourceId: wallet.id,
+          onBehalfOfVendorId: vendorId,
+          beforeState: { materializedCents: wallet.balanceCents },
+          afterState: {
+            ledgerSumCents: ledger,
+            divergenceCents: ledger - wallet.balanceCents,
+          },
+        })
+        .catch(() => undefined);
+    }
+    return { ok, materialized: wallet.balanceCents, ledger };
   }
 
   // ---------------------------------------------------------------------------

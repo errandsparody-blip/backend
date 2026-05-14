@@ -24,6 +24,17 @@ export interface AuthenticatedUser {
   role: Role;
   /** "Authentication context reference": "1" = pwd only, "2" = pwd + mfa fresh. */
   acr: "1" | "2";
+  /**
+   * Session row id (sessions.id) this access token is bound to. Set on
+   * authentication and rotated on every refresh. The JWT strategy
+   * verifies the matching session is still active (`revoked_at IS NULL`)
+   * on every request — this closes the window where a stolen access
+   * token could outlive a logout / password-reset / admin revocation.
+   * Tokens issued before this field existed (legacy ≤ May 2026) will
+   * see `sessionId === undefined`; the strategy treats that as "session
+   * row check skipped" so the upgrade is non-breaking on rollout.
+   */
+  sessionId?: string;
   /** ISO time when the access token was issued. */
   iat: number;
   /** ISO time when the access token expires. */
