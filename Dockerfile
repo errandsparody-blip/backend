@@ -89,6 +89,13 @@ RUN pnpm install --frozen-lockfile --prod
 # The compiled application.
 COPY --from=builder /app/dist ./dist
 
+# Static assets bundled at runtime — currently the marketing pricing-guide
+# PDF, served as an email attachment via PricingGuideService. The service
+# resolves `process.cwd()/assets/...`, which is `/app/assets/...` in this
+# container. Without this COPY the email send would fail with
+# `pricing_guide.pdf_missing` on every request.
+COPY --from=builder /app/assets ./assets
+
 # Belt-and-braces regenerate. Postinstall handled it above; this is just
 # insurance against any caching surprises.
 RUN pnpm prisma generate
