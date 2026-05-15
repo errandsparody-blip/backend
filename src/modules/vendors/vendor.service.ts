@@ -71,10 +71,16 @@ export interface VendorProfile {
     idType: string | null;
     idNumber: string | null;
     idExpirationDate: string | null;
+    // KYC v2 Phase 2 — public R2 URLs for the four document uploads
+    // collected on the wizard's "Business verification" step (see
+    // migration 0032). Null until the vendor uploads each file.
+    idFrontUrl: string | null;
+    idBackUrl: string | null;
+    idSelfieUrl: string | null;
+    businessDocUrl: string | null;
     productsStoredDescription: string | null;
     monthlyInventoryVolume: string | null;
     monthlyOrderVolume: string | null;
-    serviceIntent: string | null;
     primaryShippingCountries: string | null;
     requiresReturnsHandling: boolean | null;
     productHazards: string[];
@@ -397,10 +403,13 @@ export class VendorService {
         idExpirationDate: vendor.idExpirationDate
           ? vendor.idExpirationDate.toISOString().slice(0, 10)
           : null,
+        idFrontUrl: vendor.idFrontUrl ?? null,
+        idBackUrl: vendor.idBackUrl ?? null,
+        idSelfieUrl: vendor.idSelfieUrl ?? null,
+        businessDocUrl: vendor.businessDocUrl ?? null,
         productsStoredDescription: vendor.productsStoredDescription ?? null,
         monthlyInventoryVolume: vendor.monthlyInventoryVolume ?? null,
         monthlyOrderVolume: vendor.monthlyOrderVolume ?? null,
-        serviceIntent: vendor.serviceIntent ?? null,
         primaryShippingCountries: vendor.primaryShippingCountries ?? null,
         requiresReturnsHandling: vendor.requiresReturnsHandling ?? null,
         productHazards: vendor.productHazards ?? [],
@@ -615,10 +624,17 @@ export class VendorService {
       data.idExpirationDate = new Date(`${input.idExpirationDate}T00:00:00.000Z`);
     }
 
+    // Section 4 — Business verification document URLs (migration 0032).
+    // The wizard PUTs each file to R2 with a presigned URL and posts the
+    // resulting publicUrl back through this endpoint; we just persist it.
+    assign("idFrontUrl", input.idFrontUrl);
+    assign("idBackUrl", input.idBackUrl);
+    assign("idSelfieUrl", input.idSelfieUrl);
+    assign("businessDocUrl", input.businessDocUrl);
+
     assign("productsStoredDescription", input.productsStoredDescription);
     assign("monthlyInventoryVolume", input.monthlyInventoryVolume);
     assign("monthlyOrderVolume", input.monthlyOrderVolume);
-    assign("serviceIntent", input.serviceIntent);
 
     assign("primaryShippingCountries", input.primaryShippingCountries);
     assign("requiresReturnsHandling", input.requiresReturnsHandling);

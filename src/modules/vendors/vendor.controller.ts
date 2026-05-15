@@ -1,5 +1,17 @@
-import { Body, Controller, ForbiddenException, Get, Patch, Post, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Patch,
+  Post,
+  ServiceUnavailableException,
+  UseGuards,
+} from "@nestjs/common";
 import { Role } from "@prisma/client";
+import { z } from "zod";
 
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
@@ -14,14 +26,67 @@ import {
   type SubmitKycV2Input,
   type UpdateVendorInput,
 } from "../../common/schemas/vendor.schema";
+import { R2Service } from "../integrations/r2/r2.service";
 
 import { VendorService } from "./vendor.service";
+
+// KYC document upload presign payload. Same shape as the product image
+// presign endpoint but with a stricter MIME allow-list (no GIF / HEIC —
+// reviewers want clean ID scans, not animated images), a higher PDF
+// allowance (business registration certificates are typically PDFs), and
+// a `kind` discriminator that the controller maps to the R2 key prefix.
+const KYC_UPLOAD_KINDS = [
+  "id_front",
+  "id_back",
+  "id_selfie",
+  "business_doc",
+] as const;
+type KycUploadKind = (typeof KYC_UPLOAD_KINDS)[number];
+
+const KYC_UPLOAD_ALLOWED_MIME = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "application/pdf",
+] as const;
+const KYC_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+
+const presignKycUploadSchema = z.object({
+  // Discriminator — drives the R2 key prefix so reviewers and audits can
+  // tell at a glance which document a given object is. Strict enum so a
+  // typo can't slip into the bucket as e.g. `kyc/<vendor>/foo/...`.
+  kind: z.enum(KYC_UPLOAD_KINDS),
+  contentType: z.enum(KYC_UPLOAD_ALLOWED_MIME),
+  // Filename optional — the R2 key is generated server-side; we only
+  // honour the extension hint so downloaded objects keep their suffix.
+  // Same character ban as product image / shopper attachment uploaders
+  // (path separators, shell metas, Windows-reserved chars).
+  filename: z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .regex(/^[^\\/<>:"|?*]+$/, "Filename contains invalid characters.")
+    .optional(),
+  sizeBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(
+      KYC_UPLOAD_MAX_BYTES,
+      `File too large — max ${KYC_UPLOAD_MAX_BYTES / (1024 * 1024)} MB.`,
+    ),
+});
+type PresignKycUploadInput = z.infer<typeof presignKycUploadSchema>;
 
 @Controller({ path: "vendors/me", version: "1" })
 @Roles(Role.VENDOR, Role.VENDOR_SUB_USER)
 @UseGuards(TenantGuard)
 export class VendorController {
-  constructor(private readonly vendors: VendorService) {}
+  constructor(
+    private readonly vendors: VendorService,
+    private readonly r2: R2Service,
+  ) {}
 
   @Get()
   async me(@CurrentUser() user: AuthenticatedUser) {
@@ -90,5 +155,60 @@ export class VendorController {
       });
     }
     return this.vendors.submitKyc(user.vendorId!, user.sub, body);
+  }
+
+  /**
+   * Presign an R2 PUT for one of the four KYC v2 document uploads.
+   *
+   * Mirrors the product-image / shopper-attachment presign flow: client
+   * POSTs the kind + contentType + sizeBytes; server picks an
+   * unguessable key under `kyc/<vendorId>/<kind>/<random>` and returns
+   * the signed URL + the public URL the wizard saves on the vendor row
+   * via the existing kyc/submit endpoint.
+   *
+   * Sub-users can't upload — same rationale as kyc/submit (compliance
+   * attestation is the vendor admin's responsibility, and an upload is a
+   * legal-evidence event we want pinned to the account owner).
+   */
+  @Post("kyc/uploads/presign")
+  @HttpCode(HttpStatus.OK)
+  presignKycUpload(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body(new ZodValidationPipe(presignKycUploadSchema)) body: PresignKycUploadInput,
+  ) {
+    if (user.role === Role.VENDOR_SUB_USER) {
+      throw new ForbiddenException({
+        message: "Only the vendor admin can upload KYC documents.",
+        code: "vendor_kyc_admin_only",
+      });
+    }
+    if (!this.r2.isConfigured()) {
+      throw new ServiceUnavailableException({
+        message: "Document uploads are not configured for this environment.",
+        code: "r2_not_configured",
+      });
+    }
+    // Scope keys under `kyc/<vendorId>/<kind>/...` so:
+    //   - tenant uploads can never collide,
+    //   - admin audits ("show me every file vendor X has submitted")
+    //     reduce to a prefix list, and
+    //   - the document type is recoverable from the key alone, even if
+    //     the DB reference is later cleared.
+    const kindPrefix: Record<KycUploadKind, string> = {
+      id_front: "id-front",
+      id_back: "id-back",
+      id_selfie: "id-selfie",
+      business_doc: "business-doc",
+    };
+    const filename = body.filename ?? `${kindPrefix[body.kind]}.bin`;
+    const key = this.r2.generateKey(
+      `kyc/${user.vendorId}/${kindPrefix[body.kind]}`,
+      filename,
+    );
+    return this.r2.presignPut({
+      key,
+      contentType: body.contentType,
+      contentLengthBytes: body.sizeBytes,
+    });
   }
 }

@@ -142,7 +142,8 @@ const inventoryVolumeEnum = z.enum([
 
 const orderVolumeEnum = z.enum(["V_1_20", "V_21_100", "V_101_500", "V_500_PLUS"]);
 
-const serviceIntentEnum = z.enum(["FULFILLMENT_ONLY", "PERSONAL_SHOPPER", "BOTH"]);
+// Note: `serviceIntentEnum` was removed in migration 0031 — vendors are no
+// longer asked which service track they intend to use during KYC.
 
 const hazardEnum = z.enum([
   "BATTERIES",
@@ -207,11 +208,26 @@ export const submitKycV2Schema = z
     idNumber: z.string().trim().min(2).max(60).optional(),
     idExpirationDate: isoFutureDate.optional(),
 
-    // Section 5 — Inventory
+    // Section 4 — Business verification documents (migration 0032).
+    //
+    // Files are uploaded out-of-band via the existing R2 presign flow
+    // (POST /v1/vendors/me/kyc/uploads/presign); the wizard PUTs each
+    // file directly to R2 and posts the resulting publicUrl back through
+    // the standard kyc/submit endpoint. We validate that each value is
+    // a well-formed URL and trim whitespace, but trust the upstream
+    // presign to have produced a URL inside our bucket — controllers
+    // reject anything that doesn't match the R2 host on save (same
+    // pattern as the shopper attachment uploader's
+    // assertUrlBelongsToOurBucket helper).
+    idFrontUrl: z.string().trim().url().max(500).optional(),
+    idBackUrl: z.string().trim().url().max(500).optional(),
+    idSelfieUrl: z.string().trim().url().max(500).optional(),
+    businessDocUrl: z.string().trim().url().max(500).optional(),
+
+    // Section 5 — Inventory (serviceIntent dropped in migration 0031)
     productsStoredDescription: z.string().trim().min(2).max(1000).optional(),
     monthlyInventoryVolume: inventoryVolumeEnum.optional(),
     monthlyOrderVolume: orderVolumeEnum.optional(),
-    serviceIntent: serviceIntentEnum.optional(),
 
     // Section 6 — Shipping & ops
     primaryShippingCountries: z.string().trim().min(2).max(400).optional(),
@@ -246,7 +262,6 @@ export const submitKycV2Schema = z
       "productsStoredDescription",
       "monthlyInventoryVolume",
       "monthlyOrderVolume",
-      "serviceIntent",
       "primaryShippingCountries",
       "requiresReturnsHandling",
       "productHazards",

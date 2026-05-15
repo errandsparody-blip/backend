@@ -258,10 +258,17 @@ export class AdminVendorService {
         idExpirationDate: vendor.idExpirationDate
           ? vendor.idExpirationDate.toISOString().slice(0, 10)
           : null,
+        // KYC v2 Phase 2 — public R2 URLs for the four document uploads
+        // (migration 0032). Reviewers click straight through from the
+        // admin vendor detail page; these fields are NULL until the
+        // vendor uploads each file in the wizard.
+        idFrontUrl: vendor.idFrontUrl ?? null,
+        idBackUrl: vendor.idBackUrl ?? null,
+        idSelfieUrl: vendor.idSelfieUrl ?? null,
+        businessDocUrl: vendor.businessDocUrl ?? null,
         productsStoredDescription: vendor.productsStoredDescription ?? null,
         monthlyInventoryVolume: vendor.monthlyInventoryVolume ?? null,
         monthlyOrderVolume: vendor.monthlyOrderVolume ?? null,
-        serviceIntent: vendor.serviceIntent ?? null,
         primaryShippingCountries: vendor.primaryShippingCountries ?? null,
         requiresReturnsHandling: vendor.requiresReturnsHandling ?? null,
         productHazards: vendor.productHazards ?? [],

@@ -97,11 +97,8 @@ enum KycOrderVolume {
   V_500_PLUS
 }
 
-enum KycServiceIntent {
-  FULFILLMENT_ONLY
-  PERSONAL_SHOPPER
-  BOTH
-}
+// Note: KycServiceIntent enum was dropped in migration 0031 — vendors are no
+// longer asked which service track they intend to use during KYC.
 
 // Note: KycFundingMethod (and the Section 7 / Section 8 columns) were
 // intentionally dropped from KYC v2 Phase 1. If they ever come back, add the
@@ -274,11 +271,27 @@ model Vendor {
   idNumber         String?    @map("id_number")
   idExpirationDate DateTime?  @map("id_expiration_date") @db.Date
 
+  // Section 4 — Business verification document uploads (migration 0032).
+  //
+  // Public R2 object URLs for the four KYC documents the vendor uploads
+  // through the wizard's "Business verification" step. Files are PUT
+  // directly to R2 from the browser with a presigned URL; only the
+  // resulting public URL is persisted here. Reviewers open these
+  // straight from the admin vendor detail page.
+  //
+  // All four are nullable to match the rest of KYC v2 (legacy vendors
+  // remain valid; the wizard enforces "all four required" at final
+  // submit only, mirrored on the backend by submitKycV2Schema).
+  idFrontUrl      String? @map("id_front_url")
+  idBackUrl       String? @map("id_back_url")
+  idSelfieUrl     String? @map("id_selfie_url")
+  businessDocUrl  String? @map("business_doc_url")
+
   // Section 5 — Inventory information
   productsStoredDescription String?             @map("products_stored_description")
   monthlyInventoryVolume    KycInventoryVolume? @map("monthly_inventory_volume")
   monthlyOrderVolume        KycOrderVolume?     @map("monthly_order_volume")
-  serviceIntent             KycServiceIntent?   @map("service_intent")
+  // serviceIntent dropped in migration 0031 — see note near the enum block.
 
   // Section 6 — Shipping & operations
   primaryShippingCountries String?  @map("primary_shipping_countries")
