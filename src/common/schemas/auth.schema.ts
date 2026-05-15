@@ -42,6 +42,17 @@ export const signupSchema = z.object({
   password: passwordSchema,
   businessName: z.string().min(2).max(120),
   country: z.string().length(2).toUpperCase(),
+  // Vendor must positively accept the current versioned vendor agreement at
+  // signup. `z.literal(true)` makes the absence of `true` a validation error
+  // — anything other than `true` (including `false` or omitted) fails Zod.
+  // AuthService writes the timestamp + version onto the new Vendor row so
+  // the AgreementVersionGuard sees the vendor as up-to-date on first login,
+  // and the legally durable record is captured at the moment of consent.
+  agreementAccepted: z.literal(true, {
+    errorMap: () => ({
+      message: "You must accept the Vendor Agreement to continue.",
+    }),
+  }),
 });
 export type SignupInput = z.infer<typeof signupSchema>;
 

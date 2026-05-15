@@ -32,6 +32,7 @@ import {
   passwordResetTemplate,
 } from "../email/email-templates";
 import { EmailService } from "../email/email.service";
+import { AgreementService } from "../vendors/agreement.service";
 
 import type { LoginInput, SignupInput } from "../../common/schemas/auth.schema";
 import { MfaService } from "./mfa.service";
@@ -91,6 +92,7 @@ export class AuthService {
     private readonly crypto: CryptoService,
     private readonly hibp: HibpService,
     private readonly email: EmailService,
+    private readonly agreement: AgreementService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -149,6 +151,17 @@ export class AuthService {
     await this.hibp.assertNotPwned(input.password);
     const passwordHash = await argon2.hash(input.password, ARGON2_OPTIONS);
 
+    // Resolve the currently-published agreement version OUTSIDE the
+    // transaction so a slow config-row read doesn't extend the tx. The
+    // signup-form schema (`signupSchema`) already enforced `agreementAccepted
+    // === true`, so we record acceptance unconditionally below. Failing to
+    // resolve the version (config row missing) lets us bail BEFORE we've
+    // committed a user — better than a half-onboarded vendor with no
+    // agreement stamp who'd then bounce on the AgreementVersionGuard at
+    // first login.
+    const agreementVersion = await this.agreement.getCurrentVersion();
+    const agreementAcceptedAt = new Date();
+
     // 8-digit numeric code, hashed for storage. Plaintext goes in the email
     // body; the user types it back into the verify form. Expires in 15 minutes
     // — short enough to limit a leaked code's usefulness, long enough that an
@@ -163,6 +176,14 @@ export class AuthService {
         data: {
           businessName: input.businessName,
           country: input.country,
+          // Vendor positively accepted the agreement on the signup form
+          // (validated by `signupSchema.agreementAccepted: z.literal(true)`).
+          // Stamping the timestamp + version here means the
+          // AgreementVersionGuard sees the vendor as up-to-date on first
+          // login — no 412 → /legal/vendor-agreement?reaccept=1 redirect.
+          // The audit log entry below captures the same fact for compliance.
+          agreementAcceptedAt,
+          agreementVersion,
         },
         select: { id: true },
       });
@@ -212,6 +233,14 @@ export class AuthService {
       resourceId: user.id,
       sourceIp: meta.ip,
       userAgent: meta.userAgent,
+      // Capture the signed-version + timestamp so the durable audit trail
+      // matches what's persisted on the Vendor row. If Legal later disputes
+      // a vendor's account of which version they accepted, both records
+      // line up to the same instant.
+      afterState: {
+        agreementVersion,
+        agreementAcceptedAt: agreementAcceptedAt.toISOString(),
+      },
     });
 
     return { userId: user.id };
