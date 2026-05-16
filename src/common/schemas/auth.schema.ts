@@ -42,12 +42,17 @@ export const signupSchema = z.object({
   password: passwordSchema,
   businessName: z.string().min(2).max(120),
   country: z.string().length(2).toUpperCase(),
-  // No `agreementAccepted` field. The signup form does not collect explicit
-  // consent — AuthService still stamps `agreementAcceptedAt` + the current
-  // version on the new Vendor row so the AgreementVersionGuard sees the
-  // vendor as up-to-date on first login (avoids the post-sign-in
-  // /legal/vendor-agreement?reaccept=1 redirect). Continued use of the
-  // platform constitutes acceptance per the agreement's own preamble.
+  // Vendor must positively tick the agreement checkbox above the "Create
+  // account" button. `z.literal(true)` rejects anything that isn't true.
+  // AuthService writes `agreementAcceptedAt = now()` + the current version
+  // onto the new Vendor row so the post-login AgreementVersionGuard sees
+  // the vendor as up-to-date and never redirects them to
+  // /legal/vendor-agreement?reaccept=1.
+  agreementAccepted: z.literal(true, {
+    errorMap: () => ({
+      message: "You must accept the Vendor Agreement to continue.",
+    }),
+  }),
 });
 export type SignupInput = z.infer<typeof signupSchema>;
 
