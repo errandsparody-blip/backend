@@ -152,13 +152,16 @@ export class AuthService {
     const passwordHash = await argon2.hash(input.password, ARGON2_OPTIONS);
 
     // Resolve the currently-published agreement version OUTSIDE the
-    // transaction so a slow config-row read doesn't extend the tx. The
-    // signup-form schema (`signupSchema`) already enforced `agreementAccepted
-    // === true`, so we record acceptance unconditionally below. Failing to
-    // resolve the version (config row missing) lets us bail BEFORE we've
-    // committed a user — better than a half-onboarded vendor with no
-    // agreement stamp who'd then bounce on the AgreementVersionGuard at
-    // first login.
+    // transaction so a slow config-row read doesn't extend the tx.
+    //
+    // The signup form does NOT collect an explicit "I accept" checkbox any
+    // more — continued use of the platform after signup constitutes
+    // acceptance per the agreement's preamble. We still stamp the version
+    // + timestamp on the new Vendor row so the AgreementVersionGuard sees
+    // the vendor as up-to-date and the post-login flow never bounces them
+    // to /legal/vendor-agreement?reaccept=1. Failing to resolve the
+    // version lets us bail BEFORE we've committed a user — better than a
+    // half-onboarded vendor with no agreement stamp.
     const agreementVersion = await this.agreement.getCurrentVersion();
     const agreementAcceptedAt = new Date();
 
@@ -176,12 +179,10 @@ export class AuthService {
         data: {
           businessName: input.businessName,
           country: input.country,
-          // Vendor positively accepted the agreement on the signup form
-          // (validated by `signupSchema.agreementAccepted: z.literal(true)`).
-          // Stamping the timestamp + version here means the
-          // AgreementVersionGuard sees the vendor as up-to-date on first
-          // login — no 412 → /legal/vendor-agreement?reaccept=1 redirect.
-          // The audit log entry below captures the same fact for compliance.
+          // Implicit acceptance — see the comment on `agreementVersion` above.
+          // Stamping at create time keeps the AgreementVersionGuard from
+          // firing for new vendors, so the post-login flow never lands them
+          // on /legal/vendor-agreement?reaccept=1.
           agreementAcceptedAt,
           agreementVersion,
         },
