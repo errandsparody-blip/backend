@@ -1,7 +1,7 @@
 -- =============================================================================
 -- 0016 — Personal Shopper actual weight + packed-parcel dimensions.
 --
--- The shopper flow is different from the vendor 3PL flow: in 3PL we know
+-- The shopper flow is different from the vendor  flow: in  we know
 -- the weight of every product upfront (vendors declare it on the Product
 -- row). For shopper requests we're buying random items from random
 -- retailers, so weight is unknown until the items physically arrive at

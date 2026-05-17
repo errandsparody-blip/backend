@@ -1,7 +1,7 @@
 -- =============================================================================
 -- 0011 — Personal Shopper feature.
 --
--- A separate product line from the vendor 3PL: any visitor pastes a product
+-- A separate product line from the vendor : any visitor pastes a product
 -- link, pays upfront for items + commission, the platform procures and
 -- ships, all coordinated through an email-tied chat thread.
 --
