@@ -16,6 +16,15 @@
  * money ledger must be append-only. They are doing exactly what they're
  * supposed to do.
  *
+ * Additionally, `shopper_messages` and `psn_messages` carry a CHECK
+ * constraint that says "if sender = ADMIN then sender_user_id IS NOT
+ * NULL" — admin messages must be attributable. The `sender_user_id` FK
+ * is `ON DELETE SET NULL`, so deleting an admin user who authored any
+ * such message triggers a CHECK violation as the cascade tries to NULL
+ * the column. We can't DISABLE a CHECK constraint the way we can a
+ * trigger, so we pre-emptively DELETE the admin-authored messages
+ * inside the same transaction before the user delete runs.
+ *
  * For dev/staging cleanup of dummy signups you genuinely want to wipe,
  * this script:
  *   - Refuses to run unless NODE_ENV != 'production' OR ALLOW_DESTRUCTIVE_DELETE=true
@@ -129,6 +138,27 @@ async function main(): Promise<void> {
         await tx.$executeRawUnsafe(
           `ALTER TABLE ledger_entries DISABLE TRIGGER trg_ledger_no_delete`,
         );
+
+        // Pre-emptive chat-message cleanup. `shopper_messages` and
+        // `psn_messages` carry a CHECK that admin messages must have a
+        // non-null sender_user_id. The FK on that column is
+        // `ON DELETE SET NULL`, so the user delete cascade would try to
+        // NULL admin-authored rows and trip the CHECK. Wiping the
+        // user's admin-authored chat history first sidesteps the
+        // problem without weakening the production constraint. Buyer
+        // and vendor messages are left untouched — their thread
+        // history stays intact.
+        const shopperMsgsRemoved = await tx.shopperMessage.deleteMany({
+          where: { senderUserId: { in: userIds }, sender: "ADMIN" },
+        });
+        const psnMsgsRemoved = await tx.psnMessage.deleteMany({
+          where: { senderUserId: { in: userIds } },
+        });
+        if (shopperMsgsRemoved.count > 0 || psnMsgsRemoved.count > 0) {
+          console.log(
+            `Pre-cleaned ${shopperMsgsRemoved.count} shopper_messages and ${psnMsgsRemoved.count} psn_messages authored by these users (CHECK-constraint workaround).`,
+          );
+        }
 
         const deleted = await tx.user.deleteMany({ where: { id: { in: userIds } } });
         console.log(`Deleted ${deleted.count} user row(s); cascades flowed from there.`);

@@ -16,7 +16,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import type { Prisma, Psn, PsnStatus } from "@prisma/client";
+import type { Prisma, Psn, PsnStatus, ShippingMode } from "@prisma/client";
 
 import { computeOnboardingFeeCents, loadFeeSchedule, type DeclaredBoxCounts } from "../../common/fees";
 import { PrismaService } from "../../common/prisma.service";
@@ -37,6 +37,10 @@ import { WalletService } from "../wallet/wallet.service";
 export interface PublicPsn {
   id: string;
   status: PsnStatus;
+  // Migration 0033 — exposed so the vendor portal can render the right
+  // detail view (loose / pallet / add-to-pallet) and the admin receive
+  // page can show the matching badge.
+  shippingMode: ShippingMode;
   expectedArrivalDate: Date | null;
   carrier: string | null;
   masterTracking: string | null;
@@ -124,6 +128,9 @@ export class PsnService {
       data: {
         vendorId,
         status: "DRAFT",
+        // Falls back to the Prisma default (LOOSE) when omitted — preserves
+        // pre-migration behaviour for any client still on the old payload.
+        shippingMode: input.shippingMode ?? "LOOSE",
         expectedArrivalDate: input.expectedArrivalDate ?? null,
         carrier: input.carrier ?? null,
         masterTracking: input.masterTracking ?? null,
@@ -180,6 +187,7 @@ export class PsnService {
       return tx.psn.update({
         where: { id },
         data: {
+          ...(patch.shippingMode !== undefined ? { shippingMode: patch.shippingMode } : {}),
           ...(patch.expectedArrivalDate !== undefined ? { expectedArrivalDate: patch.expectedArrivalDate } : {}),
           ...(patch.carrier !== undefined ? { carrier: patch.carrier } : {}),
           ...(patch.masterTracking !== undefined ? { masterTracking: patch.masterTracking } : {}),
@@ -227,6 +235,7 @@ export class PsnService {
     const { totalCents } = computeOnboardingFeeCents(
       schedule,
       before.declaredBoxCounts as DeclaredBoxCounts,
+      before.shippingMode,
     );
 
     // Debit the wallet for the onboarding fee + flip the PSN status atomically.
@@ -369,6 +378,7 @@ export class PsnService {
     return {
       id: p.id,
       status: p.status,
+      shippingMode: p.shippingMode,
       expectedArrivalDate: p.expectedArrivalDate,
       carrier: p.carrier,
       masterTracking: p.masterTracking,

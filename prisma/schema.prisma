@@ -112,6 +112,17 @@ enum StorageTier {
   PALLET
 }
 
+// Migration 0033 — explicit PSN shipping mode. Before this, "loose vs
+// pallet" was a frontend-only concept and the backend inferred pallet-mode
+// from `declared_box_counts.PALLET > 0`. ADD_TO_PALLET ships with the same
+// declared shape as LOOSE (box tiers, no PALLET key) so the mode has to
+// be carried explicitly. See the migration for full semantics.
+enum ShippingMode {
+  LOOSE
+  PALLET
+  ADD_TO_PALLET
+}
+
 enum SkuStatus {
   ACTIVE
   RESERVED
@@ -466,6 +477,13 @@ model Psn {
   vendor              Vendor     @relation(fields: [vendorId], references: [id], onDelete: Cascade)
 
   status              PsnStatus  @default(DRAFT)
+
+  // Migration 0033 — explicit shipping mode. LOOSE is the historical
+  // default and matches the pre-migration inferred behaviour for any
+  // PSN without a PALLET-tier declaration. PALLET / ADD_TO_PALLET are
+  // distinguished by this column because they can have identical
+  // `declaredBoxCounts` shapes.
+  shippingMode        ShippingMode @default(LOOSE) @map("shipping_mode")
 
   expectedArrivalDate DateTime?  @map("expected_arrival_date")
   carrier             String?

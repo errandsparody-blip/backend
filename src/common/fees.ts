@@ -4,7 +4,7 @@
  */
 
 import { BadRequestException, InternalServerErrorException } from "@nestjs/common";
-import type { StorageTier } from "@prisma/client";
+import type { ShippingMode, StorageTier } from "@prisma/client";
 
 import type { PrismaService } from "./prisma.service";
 
@@ -58,50 +58,111 @@ export interface FeeSchedule {
 export type DeclaredBoxCounts = Partial<Record<StorageTier, number>>;
 
 /**
- * Sum onboarding fees for a declared mix of boxes.
+ * Thrown when a PSN declaration is inconsistent with its shipping mode
+ * (e.g. PALLET mode with no PALLET tier, ADD_TO_PALLET with multiple
+ * box tiers, or ADD_TO_PALLET with a PALLET tier). These shouldn't be
+ * reachable from a well-behaved client — the frontend gates each mode's
+ * inputs — but the server validates explicitly so a malformed POST or
+ * a future client bug surfaces with a structured 400 instead of silently
+ * producing the wrong charge.
+ */
+export class InvalidShippingDeclarationError extends BadRequestException {
+  constructor(message: string) {
+    super({ message, code: "psn_invalid_shipping_declaration" });
+  }
+}
+
+/**
+ * Sum onboarding fees for a declared mix of boxes under an explicit
+ * shipping mode. The mode used to be inferred from `declared.PALLET > 0`
+ * but ADD_TO_PALLET ships with the same shape as LOOSE (box tiers, no
+ * PALLET key), so the mode is now passed in explicitly. See migration
+ * 0033 for the full history.
  *
- * Two modes, distinguished by whether the vendor declared any pallets:
- *
- *   LOOSE MODE (declared.PALLET is 0 or absent)
+ *   LOOSE
  *     Each box contributes stocking + first-month storage (the full
  *     `totalCents` from the schedule). Monthly storage rolls per-SKU
- *     starting on the 1st.
+ *     starting on the 1st. PALLET tier in the declaration is rejected
+ *     as an inconsistent declaration (use PALLET mode for that).
  *
- *   PALLET MODE (declared.PALLET >= 1)
+ *   PALLET
  *     Each box on a pallet contributes ONLY its stocking fee — the
- *     pallet's $45/month covers storage going forward, so charging
+ *     pallet's monthly $45 covers storage going forward, so charging
  *     per-box first-month storage on top would double-bill. PALLET
  *     itself contributes its monthly-storage rate × pallet count as
- *     the pallet's first-month charge (the "first month included in
- *     onboarding" pattern, just at the pallet rate). PALLET stays in
- *     `schedule.onboarding` as `{ negotiated: true }` so we read the
- *     storage figure from `schedule.monthlyStorage.PALLET` instead.
+ *     the pallet's first-month charge. Must declare at least 1 PALLET
+ *     and at least 1 box tier.
  *
- * Throws NegotiatedTierError (400, code = `psn_negotiated_tier`) for
- * non-PALLET tiers that are marked negotiated — those still need a
- * manual quote regardless of mode.
+ *   ADD_TO_PALLET
+ *     Vendor is shipping boxes onto an existing pallet they already
+ *     have at the warehouse. Each box pays stocking only — no new
+ *     pallet line, no per-box first-month storage. The existing
+ *     pallet's $45/mo continues to cover storage. Must declare EXACTLY
+ *     ONE box tier (pallets are uniform-tier per policy) and zero
+ *     PALLET tier (no new pallet is being created). Capacity + tier
+ *     match are confirmed off-platform with admin; admin rejects at
+ *     receive if the boxes don't fit / don't match the existing pallet.
+ *
+ * Throws NegotiatedTierError (400) for non-PALLET tiers marked negotiated
+ * and InvalidShippingDeclarationError (400) for mode/declaration mismatches.
  */
 export function computeOnboardingFeeCents(
   schedule: FeeSchedule,
   declared: DeclaredBoxCounts,
+  mode: ShippingMode,
 ): { totalCents: number; perTier: Array<{ tier: StorageTier; count: number; subtotalCents: number }> } {
   const perTier: Array<{ tier: StorageTier; count: number; subtotalCents: number }> = [];
   let totalCents = 0;
 
   const palletCount = Math.max(0, Number(declared.PALLET ?? 0));
-  const isPalletMode = palletCount > 0;
+  const boxTiersDeclared = (Object.entries(declared) as Array<[StorageTier, number]>).filter(
+    ([t, c]) => t !== "PALLET" && Number(c) > 0,
+  );
+
+  // Mode-specific declaration validation. Each branch enforces the shape
+  // it expects so an inconsistent POST fails fast with a stable code
+  // rather than producing a silently-wrong total.
+  if (mode === "PALLET" && palletCount === 0) {
+    throw new InvalidShippingDeclarationError(
+      "PALLET mode requires at least 1 pallet in the declaration.",
+    );
+  }
+  if (mode === "LOOSE" && palletCount > 0) {
+    throw new InvalidShippingDeclarationError(
+      "LOOSE mode cannot include a PALLET tier — switch to PALLET mode to create a pallet.",
+    );
+  }
+  if (mode === "ADD_TO_PALLET") {
+    if (palletCount > 0) {
+      throw new InvalidShippingDeclarationError(
+        "ADD_TO_PALLET mode cannot create a new pallet — remove the PALLET tier from the declaration.",
+      );
+    }
+    if (boxTiersDeclared.length === 0) {
+      throw new InvalidShippingDeclarationError(
+        "ADD_TO_PALLET mode requires exactly one box tier with a positive count.",
+      );
+    }
+    if (boxTiersDeclared.length > 1) {
+      throw new InvalidShippingDeclarationError(
+        "ADD_TO_PALLET mode requires exactly one box tier — pallets are uniform-tier per policy.",
+      );
+    }
+  }
+
+  const isPalletMode = mode === "PALLET";
+  const isAddToPalletMode = mode === "ADD_TO_PALLET";
 
   for (const [tier, count] of Object.entries(declared) as Array<[StorageTier, number]>) {
     if (!count || count <= 0) continue;
 
-    // PALLET tier — only charged in pallet mode (loose mode shouldn't
-    // include it; if it does, that's a misuse and we ignore it). The
-    // pallet's first-month storage uses the monthly rate from the
-    // schedule's monthlyStorage table, NOT the onboarding table (which
-    // keeps PALLET as `negotiated` so the box loop below doesn't try
-    // to read totalCents off it).
+    // PALLET tier — only the PALLET mode creates a new pallet, which is
+    // billed at the monthly-storage rate (the "first month included in
+    // onboarding" pattern). LOOSE and ADD_TO_PALLET both rejected any
+    // PALLET tier above, so by the time we get here in those modes the
+    // count is guaranteed zero and we never enter this branch.
     if (tier === "PALLET") {
-      if (!isPalletMode) continue;
+      if (!isPalletMode) continue; // belt-and-braces — should be unreachable
       const palletFirstMonth = schedule.monthlyStorage?.PALLET;
       if (typeof palletFirstMonth !== "number" || !Number.isFinite(palletFirstMonth)) {
         // PALLET monthly rate isn't configured. Fall back to surfacing
@@ -128,8 +189,11 @@ export function computeOnboardingFeeCents(
       throw new NegotiatedTierError(tier);
     }
 
-    if (isPalletMode) {
-      // Stocking only — the pallet's monthly storage covers the rest.
+    if (isPalletMode || isAddToPalletMode) {
+      // Stocking only — either the new pallet's monthly $45 (PALLET mode)
+      // or the existing pallet's already-billed $45/mo (ADD_TO_PALLET mode)
+      // covers storage for these boxes. Charging per-box first-month
+      // storage on top would double-bill the vendor.
       const stocking = (fee as { stockingCents?: number }).stockingCents;
       if (typeof stocking !== "number" || !Number.isFinite(stocking)) {
         throw new MissingTierFeeError(tier);

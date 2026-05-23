@@ -2,6 +2,14 @@ import { z } from "zod";
 
 const tierSchema = z.enum(["SMALL", "MEDIUM", "LARGE", "X_LARGE", "PALLET"]);
 
+// Migration 0033 — explicit shipping mode. LOOSE is the default so any
+// client that hasn't been updated to send the field continues to work
+// identically to the pre-migration behaviour (per-box stocking + first-
+// month storage). The fee math layer validates the declaration shape
+// against the mode and surfaces a structured 400 on mismatch.
+export const shippingModeSchema = z.enum(["LOOSE", "PALLET", "ADD_TO_PALLET"]);
+export type ShippingModeInput = z.infer<typeof shippingModeSchema>;
+
 export const psnLineInputSchema = z.object({
   productId: z.string().uuid(),
   declaredQty: z.number().int().positive().max(100_000),
@@ -19,6 +27,7 @@ export const createPsnSchema = z.object({
   expectedArrivalDate: z.coerce.date().optional(),
   carrier: z.string().min(2).max(60).optional(),
   masterTracking: z.string().min(3).max(80).optional(),
+  shippingMode: shippingModeSchema.default("LOOSE"),
   declaredBoxCounts: declaredBoxCountsSchema,
   notes: z.string().max(1000).optional(),
   lines: z.array(psnLineInputSchema).min(1, "At least one line is required."),
