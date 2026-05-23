@@ -134,6 +134,12 @@ export class SkuService {
           quantityAvailable: args.qty,
           quantityReserved: 0,
           storageTier: args.storageTier ?? "SMALL",
+          // Migration 0034 — Model B: the first-month storage fee paid
+          // at PSN submit covers this SKU's first cron cycle. Skip the
+          // next cron run by setting nextBillingDate to the first of
+          // the month AFTER receive. From then on the cron bills and
+          // bumps the date forward one month at a time.
+          nextBillingDate: computeFirstBillingDate(new Date()),
         },
       });
     } else {
@@ -145,6 +151,13 @@ export class SkuService {
         where: { id: skuId },
         data: { quantityAvailable: { increment: args.qty } },
       });
+      // Top-up of an existing SKU bucket: we deliberately do NOT reset
+      // nextBillingDate. The SKU's existing billing cadence continues
+      // unchanged. The first-month-storage component of the intake fee
+      // for the top-up is a known minor inequity (vendor pays it but
+      // doesn't get a fresh first-cycle skip on this bucket). The fix
+      // is a per-receive-event billing record rather than per-SKU,
+      // which is V2 territory.
     }
 
     await tx.inventoryMovement.create({
@@ -193,3 +206,38 @@ export class SkuService {
     };
   }
 }
+
+/**
+ * Migration 0034 — compute a new SKU's first billing date.
+ *
+ * Returns the first day of the month AFTER `receivedAt`'s month, in UTC.
+ * The cron runs at 02:00 UTC on the 1st of each month — when it ticks
+ * on that returned date, the SKU is eligible for its first storage
+ * debit. The previous month's cron has already passed and is skipped,
+ * which is the "first cycle included at intake" semantic.
+ *
+ * Example: receivedAt = 2026-05-25T14:30:00Z → returns 2026-07-01.
+ * Example: receivedAt = 2026-05-01T00:01:00Z → returns 2026-07-01.
+ * Example: receivedAt = 2026-12-31T23:59:00Z → returns 2027-02-01.
+ *
+ * Exported so the cron's "bump nextBillingDate forward one month" logic
+ * and the unit tests can share the same date arithmetic without
+ * duplicating month-rollover edge-case handling.
+ */
+export function computeFirstBillingDate(receivedAt: Date): Date {
+  // First of receive month (UTC), then add two months → first of
+  // month-after-next. Date.UTC clamps to a real calendar day so
+  // December rolls into February of the following year cleanly.
+  return new Date(Date.UTC(receivedAt.getUTCFullYear(), receivedAt.getUTCMonth() + 2, 1));
+}
+
+/**
+ * Bump a SKU's next billing date forward by exactly one month, used by
+ * the cron after a successful debit. Anchored to the first of the
+ * month, in UTC. Mirrors computeFirstBillingDate's date arithmetic so
+ * the two functions can't drift apart.
+ */
+export function advanceBillingDate(current: Date): Date {
+  return new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + 1, 1));
+}
+

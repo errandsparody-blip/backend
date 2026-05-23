@@ -455,6 +455,12 @@ model Sku {
 
   status            SkuStatus   @default(ACTIVE)
 
+  // Migration 0034 — Model B recurring storage. Set at receive time to
+  // "first of next-next month" so the first cron run after intake is
+  // SKIPPED (the intake fee covered that cycle). Cron bills SKUs where
+  // next_billing_date <= today, then bumps it forward one month.
+  nextBillingDate   DateTime    @map("next_billing_date") @db.Date
+
   createdAt         DateTime    @default(now()) @map("created_at")
   updatedAt         DateTime    @updatedAt @map("updated_at")
 

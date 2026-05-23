@@ -99,12 +99,27 @@ export interface VendorProfile {
  */
 export interface VendorRecurringStorage {
   vendorId: string;
-  /** Sum of rate × count across all tiers with a configured rate. */
+  /**
+   * What the NEXT cron run will debit. Computed from the same
+   * `nextBillingDate <= today` filter the cron uses, projected forward
+   * to the next cron's date (so SKUs whose first cycle is already
+   * covered at intake are EXCLUDED from this number — they'll start
+   * contributing on the cycle after).
+   */
   monthlyEstimateCents: number;
   /** SKU count sitting in negotiated tiers (e.g. PALLET) — excluded from the dollar total. */
   negotiatedTierSkuCount: number;
-  /** Total active SKUs (whether or not they have a configured rate). */
+  /** Total active SKUs eligible for billing on the next cron. */
   activeSkuCount: number;
+  /**
+   * Migration 0034 — SKUs that have stock but whose `nextBillingDate`
+   * is AFTER the next cron run. Their first storage cycle was prepaid
+   * via the intake fee at PSN submit, so they're skipped on the
+   * upcoming run and start contributing on the cycle after. Surfaced
+   * separately so the vendor sees "yes, you have more inventory than
+   * the bill suggests — the new boxes don't add to next week's debit."
+   */
+  coveredAtIntakeSkuCount: number;
   /** ISO timestamp of the next storage charge (1st of next month, 02:00 UTC). */
   nextChargeAt: string;
   perTier: Array<{
@@ -166,31 +181,54 @@ export class VendorService {
 
     const schedule = await this.safelyLoadFees();
 
-    const [tierAgg, skus, recentStorage, allPsnsForContribution] = await Promise.all([
-      // Per-tier current SKU count — the canonical input to the monthly bill.
+    // Migration 0034 — next cron tick date. The recurring view answers
+    // "what will I be charged on the next 1st?", which is the same
+    // question the cron answers when it runs. We filter SKUs that are
+    // eligible on or before that date — SKUs with a future
+    // `nextBillingDate` (their first cycle was prepaid at intake) are
+    // excluded from the dollar total and surfaced separately.
+    const now = new Date();
+    const nextCharge = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 2, 0, 0));
+
+    const [tierAgg, skus, deferredCount, recentStorage, allPsnsForContribution] = await Promise.all([
+      // Per-tier SKU count eligible for the next cron run.
       this.prisma.sku.groupBy({
         by: ["storageTier"],
         where: {
           vendorId,
           status: "ACTIVE",
           OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
+          nextBillingDate: { lte: nextCharge },
         },
         _count: { _all: true },
       }),
       // Per-SKU snapshot so the per-PSN contribution view can attribute
-      // monthly cost to the PSN(s) that filled the bucket. Limited to
-      // active buckets with stock so we don't query everything ever.
+      // monthly cost to the PSN(s) that filled the bucket. Same eligibility
+      // filter as the tier aggregation above.
       this.prisma.sku.findMany({
         where: {
           vendorId,
           status: "ACTIVE",
           OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
+          nextBillingDate: { lte: nextCharge },
         },
         select: {
           id: true,
           storageTier: true,
           quantityAvailable: true,
           quantityReserved: true,
+        },
+      }),
+      // Count of SKUs whose first cycle is prepaid at intake — has
+      // stock, but nextBillingDate is AFTER the upcoming cron tick.
+      // Vendor sees this on the dashboard so they understand that the
+      // upcoming bill doesn't include their just-added inventory.
+      this.prisma.sku.count({
+        where: {
+          vendorId,
+          status: "ACTIVE",
+          OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
+          nextBillingDate: { gt: nextCharge },
         },
       }),
       // Last twelve STORAGE ledger entries — the billing history list.
@@ -327,15 +365,12 @@ export class VendorService {
     }
     perPsn.sort((a, b) => b.monthlyEstimateCents - a.monthlyEstimateCents);
 
-    // 3. Next charge date — the 1st of next month at 02:00 UTC, matching the cron.
-    const now = new Date();
-    const nextCharge = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 2, 0, 0));
-
     return {
       vendorId,
       monthlyEstimateCents,
       negotiatedTierSkuCount,
       activeSkuCount: skus.length,
+      coveredAtIntakeSkuCount: deferredCount,
       nextChargeAt: nextCharge.toISOString(),
       perTier,
       perPsn,
