@@ -29,6 +29,7 @@ import request from "supertest";
 
 import { AppModule } from "../src/app.module";
 import { PrismaService } from "../src/common/prisma.service";
+import { computeFirstBillingDate } from "../src/modules/sku/sku.service";
 
 const TEST_EMAIL = "p5-shippo-e2e@usa-errands.test";
 const TEST_PASSWORD = "X7uFJ4G3!aD2qzA9Pm";
@@ -106,6 +107,9 @@ describe("Shippo webhook (e2e)", () => {
         quantityReserved: 0,
         storageTier: "SMALL",
         status: "ACTIVE",
+        // Migration 0034 — model B: first cron cycle is prepaid at intake,
+        // so seeded SKUs carry a future nextBillingDate (month-after-next, 1st UTC).
+        nextBillingDate: computeFirstBillingDate(new Date()),
       },
     });
     const order = await prisma.order.create({

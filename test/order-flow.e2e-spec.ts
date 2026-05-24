@@ -37,6 +37,7 @@ import request from "supertest";
 import { AppModule } from "../src/app.module";
 import { CryptoService } from "../src/common/crypto.service";
 import { PrismaService } from "../src/common/prisma.service";
+import { computeFirstBillingDate } from "../src/modules/sku/sku.service";
 
 const TEST_EMAIL = "p3-order-e2e@usa-errands.test";
 const TEST_PASSWORD = "X7uFJ4G3!aD2qzA9Pm";
@@ -155,6 +156,9 @@ describe("P3 Order flow (e2e)", () => {
         quantityReserved: 0,
         storageTier: "SMALL",
         status: "ACTIVE",
+        // Migration 0034 — model B: first cron cycle is prepaid at intake,
+        // so seeded SKUs carry a future nextBillingDate (month-after-next, 1st UTC).
+        nextBillingDate: computeFirstBillingDate(new Date()),
       },
     });
 
