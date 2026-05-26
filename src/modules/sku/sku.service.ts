@@ -208,36 +208,57 @@ export class SkuService {
 }
 
 /**
- * Migration 0034 — compute a new SKU's first billing date.
+ * Compute a new SKU's first billing date.
  *
- * Returns the first day of the month AFTER `receivedAt`'s month, in UTC.
- * The cron runs at 02:00 UTC on the 1st of each month — when it ticks
- * on that returned date, the SKU is eligible for its first storage
- * debit. The previous month's cron has already passed and is skipped,
- * which is the "first cycle included at intake" semantic.
+ * Per the 30-day-cycle billing model: every SKU is billed once every
+ * 30 days, anchored to the day it was received. The receiving fee paid
+ * at intake covers the first 30 days, so the first cron-triggered
+ * storage charge lands exactly 30 days after the SKU lands in our
+ * warehouse. After that, the cron advances the date forward by 30 days
+ * each successful run.
  *
- * Example: receivedAt = 2026-05-25T14:30:00Z → returns 2026-07-01.
- * Example: receivedAt = 2026-05-01T00:01:00Z → returns 2026-07-01.
- * Example: receivedAt = 2026-12-31T23:59:00Z → returns 2027-02-01.
+ * Returns a UTC-anchored Date at midnight on day-30. We zero the time
+ * component so two SKUs received on the same calendar day collapse to
+ * the same `nextBillingDate` value (their cohort groups correctly in
+ * the recurring-storage view).
  *
- * Exported so the cron's "bump nextBillingDate forward one month" logic
+ * Example: receivedAt = 2026-05-25T14:30:00Z → returns 2026-06-24T00:00:00Z.
+ * Example: receivedAt = 2026-05-01T00:01:00Z → returns 2026-05-31T00:00:00Z.
+ * Example: receivedAt = 2026-12-31T23:59:00Z → returns 2027-01-30T00:00:00Z.
+ *
+ * Exported so the cron's "bump nextBillingDate forward 30 days" logic
  * and the unit tests can share the same date arithmetic without
- * duplicating month-rollover edge-case handling.
+ * duplicating off-by-one rollover handling.
  */
+export const BILLING_CYCLE_DAYS = 30;
+
 export function computeFirstBillingDate(receivedAt: Date): Date {
-  // First of receive month (UTC), then add two months → first of
-  // month-after-next. Date.UTC clamps to a real calendar day so
-  // December rolls into February of the following year cleanly.
-  return new Date(Date.UTC(receivedAt.getUTCFullYear(), receivedAt.getUTCMonth() + 2, 1));
+  // Anchor on receivedAt's UTC calendar day (drop time-of-day), then
+  // add 30 calendar days. Using getUTCDate() + 30 lets Date normalise
+  // month/year rollovers correctly for arbitrary days (Jan 31 + 30 →
+  // Mar 2 in non-leap years, etc.).
+  return new Date(
+    Date.UTC(
+      receivedAt.getUTCFullYear(),
+      receivedAt.getUTCMonth(),
+      receivedAt.getUTCDate() + BILLING_CYCLE_DAYS,
+    ),
+  );
 }
 
 /**
- * Bump a SKU's next billing date forward by exactly one month, used by
- * the cron after a successful debit. Anchored to the first of the
- * month, in UTC. Mirrors computeFirstBillingDate's date arithmetic so
- * the two functions can't drift apart.
+ * Bump a SKU's next billing date forward by exactly one 30-day cycle,
+ * used by the cron after a successful debit. Mirrors
+ * computeFirstBillingDate's date arithmetic so the two functions can't
+ * drift apart.
  */
 export function advanceBillingDate(current: Date): Date {
-  return new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + 1, 1));
+  return new Date(
+    Date.UTC(
+      current.getUTCFullYear(),
+      current.getUTCMonth(),
+      current.getUTCDate() + BILLING_CYCLE_DAYS,
+    ),
+  );
 }
 
