@@ -791,6 +791,195 @@ export class AdminVendorService {
    * render "not configured" for the recurring estimate. Logging happens
    * inside `loadFeeSchedule`.
    */
+  // ---------------------------------------------------------------------------
+  // Storage-box consolidation (migration 0035)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * List every StorageBox for a vendor, including EMPTY and REMOVED
+   * rows so the consolidate UI can show recent history alongside the
+   * active billing inventory. Sorted oldest-first so admins can see
+   * which boxes have been on the floor the longest and are most
+   * likely candidates for consolidation.
+   */
+  async listStorageBoxes(vendorId: string): Promise<
+    Array<{
+      id: string;
+      psnId: string;
+      tier: string;
+      status: string;
+      receivedAt: string;
+      nextBillingDate: string;
+      palletContentTier: string | null;
+      palletContentCount: number | null;
+      statusNote: string | null;
+      statusChangedAt: string | null;
+    }>
+  > {
+    const vendor = await this.prisma.vendor.findUnique({
+      where: { id: vendorId },
+      select: { id: true },
+    });
+    if (!vendor) throw new NotFoundException();
+
+    const rows = await this.prisma.storageBox.findMany({
+      where: { vendorId },
+      orderBy: [{ status: "asc" }, { receivedAt: "asc" }],
+      select: {
+        id: true,
+        psnId: true,
+        tier: true,
+        status: true,
+        receivedAt: true,
+        nextBillingDate: true,
+        palletContentTier: true,
+        palletContentCount: true,
+        statusNote: true,
+        statusChangedAt: true,
+      },
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      psnId: r.psnId,
+      tier: String(r.tier),
+      status: String(r.status),
+      receivedAt: r.receivedAt.toISOString(),
+      nextBillingDate: r.nextBillingDate.toISOString(),
+      palletContentTier: r.palletContentTier ? String(r.palletContentTier) : null,
+      palletContentCount: r.palletContentCount,
+      statusNote: r.statusNote,
+      statusChangedAt: r.statusChangedAt?.toISOString() ?? null,
+    }));
+  }
+
+  /**
+   * Mark a box EMPTY — it stops accruing storage charges immediately
+   * but the row stays in `storage_boxes` for audit. Used when a
+   * vendor's stock has been fully shipped out of one specific box.
+   * The cron's eligibility filter (status = ACTIVE) skips it on the
+   * next daily run.
+   *
+   * Reverse via `restoreBox` if the operator marked the wrong row.
+   */
+  async markBoxEmpty(
+    boxId: string,
+    ctx: ActorContext & { note?: string },
+  ): Promise<{ id: string; status: string }> {
+    const box = await this.prisma.storageBox.findUnique({
+      where: { id: boxId },
+      select: { id: true, status: true, vendorId: true },
+    });
+    if (!box) throw new NotFoundException();
+    if (box.status !== "ACTIVE") {
+      throw new BadRequestException({
+        message: "Only ACTIVE boxes can be marked empty.",
+        code: "storage_box_not_active",
+      });
+    }
+    const updated = await this.prisma.storageBox.update({
+      where: { id: boxId },
+      data: {
+        status: "EMPTY",
+        statusNote: ctx.note ?? null,
+        statusChangedAt: new Date(),
+        statusChangedBy: ctx.actorId,
+      },
+      select: { id: true, status: true },
+    });
+    await this.audit.log({
+      actorId: ctx.actorId,
+      action: "storage_box.marked_empty",
+      resourceType: "storage_box",
+      resourceId: boxId,
+      beforeState: { status: box.status },
+      afterState: { status: "EMPTY", note: ctx.note ?? null, vendorId: box.vendorId },
+    });
+    return updated;
+  }
+
+  /**
+   * Permanently remove a box from the vendor's billing — used when an
+   * empty box is physically consolidated out of the warehouse. The
+   * row stays for audit; the cron's status filter excludes it.
+   */
+  async removeBox(
+    boxId: string,
+    ctx: ActorContext & { note?: string },
+  ): Promise<{ id: string; status: string }> {
+    const box = await this.prisma.storageBox.findUnique({
+      where: { id: boxId },
+      select: { id: true, status: true, vendorId: true },
+    });
+    if (!box) throw new NotFoundException();
+    if (box.status === "REMOVED") {
+      throw new BadRequestException({
+        message: "Box is already removed.",
+        code: "storage_box_already_removed",
+      });
+    }
+    const updated = await this.prisma.storageBox.update({
+      where: { id: boxId },
+      data: {
+        status: "REMOVED",
+        statusNote: ctx.note ?? null,
+        statusChangedAt: new Date(),
+        statusChangedBy: ctx.actorId,
+      },
+      select: { id: true, status: true },
+    });
+    await this.audit.log({
+      actorId: ctx.actorId,
+      action: "storage_box.removed",
+      resourceType: "storage_box",
+      resourceId: boxId,
+      beforeState: { status: box.status },
+      afterState: { status: "REMOVED", note: ctx.note ?? null, vendorId: box.vendorId },
+    });
+    return updated;
+  }
+
+  /**
+   * Restore an EMPTY or REMOVED box back to ACTIVE — fixes operator
+   * mistakes. Billing resumes from the existing `nextBillingDate`
+   * (no clock reset), so a box that was EMPTY for two days picks up
+   * where it left off rather than getting a fresh 30-day grace.
+   */
+  async restoreBox(
+    boxId: string,
+    ctx: ActorContext & { note?: string },
+  ): Promise<{ id: string; status: string }> {
+    const box = await this.prisma.storageBox.findUnique({
+      where: { id: boxId },
+      select: { id: true, status: true, vendorId: true },
+    });
+    if (!box) throw new NotFoundException();
+    if (box.status === "ACTIVE") {
+      throw new BadRequestException({
+        message: "Box is already active.",
+        code: "storage_box_already_active",
+      });
+    }
+    const updated = await this.prisma.storageBox.update({
+      where: { id: boxId },
+      data: {
+        status: "ACTIVE",
+        statusNote: ctx.note ?? null,
+        statusChangedAt: new Date(),
+        statusChangedBy: ctx.actorId,
+      },
+      select: { id: true, status: true },
+    });
+    await this.audit.log({
+      actorId: ctx.actorId,
+      action: "storage_box.restored",
+      resourceType: "storage_box",
+      resourceId: boxId,
+      beforeState: { status: box.status },
+      afterState: { status: "ACTIVE", note: ctx.note ?? null, vendorId: box.vendorId },
+    });
+    return updated;
+  }
+
   private async safelyLoadFees(): Promise<FeeSchedule | null> {
     try {
       return await loadFeeSchedule(this.prisma);

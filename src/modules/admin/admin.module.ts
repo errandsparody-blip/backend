@@ -12,14 +12,16 @@ import { AdminDashboardController } from "./admin-dashboard.controller";
 import { AdminFinanceController } from "./admin-finance.controller";
 import { AdminSkuController } from "./admin-sku.controller";
 import { AdminSkuService } from "./admin-sku.service";
+import { AdminStorageBoxController } from "./admin-storage-box.controller";
 import { AdminVendorController } from "./admin-vendor.controller";
 import { AdminVendorService } from "./admin-vendor.service";
 
 @Module({
-  // VendorModule exports AgreementService, which AdminConfigController uses
-  // to invalidate the cached agreement_version after a write.
-  // IdempotencyModule is exported by the common module — needed because
-  // SKU adjustments are idempotent.
+  // VendorModule exports AgreementService (used by AdminConfigController to
+  // invalidate the cached agreement_version after a write) AND VendorService
+  // (used by AdminVendorController to expose the per-vendor recurring-storage
+  // breakdown to staff). IdempotencyModule is exported by the common module —
+  // needed because SKU adjustments are idempotent.
   imports: [AuditModule, EmailModule, NotificationModule, VendorModule, IdempotencyModule],
   controllers: [
     AdminDashboardController,
@@ -28,6 +30,11 @@ import { AdminVendorService } from "./admin-vendor.service";
     AdminAuditController,
     AdminConfigController,
     AdminSkuController,
+    // Migration 0035 — per-box consolidation endpoints. Hosted in its
+    // own controller so the SUPER_ADMIN scoping is obvious from the
+    // route file and rate-limited independently of vendor-detail
+    // traffic.
+    AdminStorageBoxController,
   ],
   providers: [AdminVendorService, AdminSkuService],
 })

@@ -40,11 +40,20 @@ import {
   type VerifySocialInput,
 } from "../../common/schemas/admin-vendor.schema";
 
+import { VendorService } from "../vendors/vendor.service";
+
 import { AdminVendorService } from "./admin-vendor.service";
 
 @Controller({ path: "admin/vendors", version: "1" })
 export class AdminVendorController {
-  constructor(private readonly vendors: AdminVendorService) {}
+  constructor(
+    private readonly vendors: AdminVendorService,
+    // VendorService.getRecurringStorage is vendor-scoped but doesn't
+    // enforce "me" — the admin endpoint below passes whichever vendor
+    // id is in the URL after the route's FINANCE_ADMIN/SUPER_ADMIN
+    // role guard authorises it.
+    private readonly vendorReadonly: VendorService,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // Read
@@ -69,6 +78,32 @@ export class AdminVendorController {
   @Get(":id/overview")
   async overview(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.vendors.getVendorOverview(id);
+  }
+
+  /**
+   * Per-vendor recurring-storage breakdown — the same shape as the
+   * vendor-side /v1/vendors/me/recurring-storage endpoint but keyed
+   * to the path param. Admin sees what the vendor sees on
+   * /wallet/recurring, including the per-PSN box itemisation, so
+   * billing questions can be triaged without assuming the vendor.
+   */
+  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+  @Get(":id/recurring-storage")
+  async recurringStorage(@Param("id", new ParseUUIDPipe()) id: string) {
+    return this.vendorReadonly.getRecurringStorage(id);
+  }
+
+  /**
+   * Individual StorageBox rows for the consolidate UI on the admin
+   * vendor page. Returns each ACTIVE box's id, tier, anchor dates,
+   * and the PSN it came from, so the operator can mark specific
+   * boxes empty / remove them and have those exclusions reflect
+   * immediately in the next billing run.
+   */
+  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+  @Get(":id/storage-boxes")
+  async storageBoxes(@Param("id", new ParseUUIDPipe()) id: string) {
+    return this.vendors.listStorageBoxes(id);
   }
 
   // ---------------------------------------------------------------------------
