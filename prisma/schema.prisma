@@ -210,6 +210,10 @@ model User {
   // Migration 0024 — PSN chat. Vendor users + admins both sit on this
   // back-relation; the sender's role disambiguates them in the UI.
   psnMessages             PsnMessage[]     @relation("PsnMessageSender")
+  // Migration 0035 — admin who flagged a StorageBox as EMPTY or REMOVED.
+  // Audit trail; the FK is ON DELETE SET NULL so we don't lose box
+  // history when an operator is offboarded.
+  storageBoxStatusChanges StorageBox[]
 
   @@index([role])
   @@index([vendorId])
@@ -329,6 +333,9 @@ model Vendor {
   wallet        Wallet?
   ledgerEntries LedgerEntry[]
   orders        Order[]
+  // Migration 0035 — physical boxes held in the warehouse for this
+  // vendor; the per-box storage billing iterates these.
+  storageBoxes  StorageBox[]
 
   @@index([status])
   @@index([kycStatus])
@@ -526,10 +533,67 @@ model Psn {
   holds               PsnHold[]
   // Migration 0024 — per-PSN chat thread for vendor ↔ admin coordination.
   messages            PsnMessage[]
+  // Migration 0035 — physical boxes created from this PSN at receive
+  // time. Each StorageBox is one billable unit; the cron iterates
+  // these instead of SKUs so vendors are charged for what we actually
+  // hold (boxes), not for what they logically sell (SKUs).
+  storageBoxes        StorageBox[]
 
   @@index([vendorId, status])
   @@index([status, createdAt])
   @@map("psns")
+}
+
+// Migration 0035 — lifecycle for a physical box in our warehouse.
+enum StorageBoxStatus {
+  ACTIVE   // billed every 30 days on `next_billing_date`
+  EMPTY    // flagged by admin; excluded from billing but kept for audit
+  REMOVED  // consolidated out of the warehouse entirely; permanent
+}
+
+// Migration 0035 — one row per physical box we are holding for a
+// vendor. Replaces SKU-based storage billing.
+//
+// Sources from a PSN at receive time: for every `(tier, count)` entry
+// in `declaredBoxCounts` (or `actualBoxCounts` once admin has
+// inspected the shipment), we insert one StorageBox row. Each box
+// runs on its own 30-day billing cycle anchored to `received_at`; the
+// receiving fee paid at PSN submission covers the first 30 days.
+//
+// Pallets: when `tier = PALLET`, `pallet_content_tier` and
+// `pallet_content_count` describe what's inside the pallet so the
+// vendor / admin sees "PALLET — 8 LARGE boxes inside" rather than a
+// bare "PALLET" row with no context. Null for non-pallet tiers.
+model StorageBox {
+  id                  String           @id @default(uuid()) @db.Uuid
+  vendorId            String           @map("vendor_id") @db.Uuid
+  vendor              Vendor           @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  psnId               String           @map("psn_id") @db.Uuid
+  psn                 Psn              @relation(fields: [psnId], references: [id], onDelete: Restrict)
+
+  tier                StorageTier
+  receivedAt          DateTime         @map("received_at")
+  nextBillingDate     DateTime         @map("next_billing_date") @db.Date
+
+  status              StorageBoxStatus @default(ACTIVE)
+
+  // Pallet contents — only meaningful when tier = PALLET.
+  palletContentTier   StorageTier?     @map("pallet_content_tier")
+  palletContentCount  Int?             @map("pallet_content_count")
+
+  // Audit fields for consolidation actions (mark empty / remove).
+  statusNote          String?          @map("status_note")
+  statusChangedAt     DateTime?        @map("status_changed_at")
+  statusChangedBy     String?          @map("status_changed_by") @db.Uuid
+  statusChangedByUser User?            @relation(fields: [statusChangedBy], references: [id], onDelete: SetNull)
+
+  createdAt           DateTime         @default(now()) @map("created_at")
+  updatedAt           DateTime         @updatedAt @map("updated_at")
+
+  @@index([vendorId, status])
+  @@index([status, nextBillingDate])
+  @@index([psnId])
+  @@map("storage_boxes")
 }
 
 // Migration 0024 — sender of a PsnMessage.

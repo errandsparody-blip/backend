@@ -223,19 +223,18 @@ export class VendorService {
   ) {}
 
   /**
-   * Vendor-facing recurring storage breakdown.
+   * Vendor-facing recurring storage breakdown — per-box model
+   * (migration 0035).
    *
-   * Same math as the monthly cron (StorageBillingJob.computeVendorLiability)
-   * so what the vendor sees here is what they'll be charged on the 1st.
-   * The cron filters on `quantityAvailable > 0`; we widen the filter to
-   * include reserved-only buckets so a vendor whose stock is fully
-   * promised to in-flight orders still sees their bill — they're still
-   * occupying warehouse space.
+   * Reads from `storage_boxes`: every ACTIVE row is one physical box
+   * we are holding for the vendor, with its own tier (rate) and own
+   * 30-day billing anchor. EMPTY and REMOVED boxes are excluded —
+   * those are operator-flagged states for inventory that has been
+   * consolidated out of billing.
    *
-   * The per-PSN contribution map answers "which PSN brought this
-   * inventory?" by grouping accepted SKUs back to their originating
-   * PSN line. A single SKU bucket can be the target of multiple PSNs
-   * (restocks), so we attribute proportionally by accepted quantity.
+   * The shape mirrors what the cron does on its daily run, so what
+   * the vendor sees here is exactly what will be charged when the
+   * cron next picks up their boxes.
    */
   async getRecurringStorage(vendorId: string): Promise<VendorRecurringStorage> {
     const vendor = await this.prisma.vendor.findUnique({
@@ -246,34 +245,25 @@ export class VendorService {
 
     const schedule = await this.safelyLoadFees();
 
-    // 30-day rolling cycle model. Each SKU carries its own
-    // `nextBillingDate` anchored to the day it was received plus 30
-    // days. The vendor sees one or more upcoming charges, each on a
-    // specific day, not a single first-of-the-month total.
     const now = new Date();
-
     // Today at UTC midnight — the threshold the daily cron uses for
     // "due now". Anything with nextBillingDate <= today is overdue
     // and will bill on the next daily run.
     const todayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
-    // Pull every active SKU with stock + its nextBillingDate so we can
-    // (a) compute steady-state monthly cost across the full inventory
-    // and (b) group by the per-SKU billing date for the upcoming
-    // charges view.
-    const [allActiveSkus, recentStorage, allPsnsForContribution] = await Promise.all([
-      this.prisma.sku.findMany({
-        where: {
-          vendorId,
-          status: "ACTIVE",
-          OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
-        },
+    const [activeBoxes, recentStorage, ownerPsns] = await Promise.all([
+      // Every ACTIVE box this vendor owns. EMPTY / REMOVED are excluded
+      // by definition — those are flagged out of billing.
+      this.prisma.storageBox.findMany({
+        where: { vendorId, status: "ACTIVE" },
         select: {
           id: true,
-          storageTier: true,
-          quantityAvailable: true,
-          quantityReserved: true,
+          tier: true,
+          receivedAt: true,
           nextBillingDate: true,
+          psnId: true,
+          palletContentTier: true,
+          palletContentCount: true,
         },
       }),
       // Last twelve STORAGE ledger entries — the billing history list.
@@ -289,18 +279,18 @@ export class VendorService {
           createdAt: true,
         },
       }),
-      // Every PSN with received lines. We re-derive contribution at request
-      // time so a PSN that was later cancelled or had its lines reversed
-      // shows up correctly. Capped at 100 PSNs which is well above the
-      // active inventory size for any single vendor in v1 — well past 100
-      // the truncation degrades gracefully (we just lose history).
+      // PSN metadata for the boxes we have, so the per-PSN view can
+      // render carrier / tracking / receivedAt / status. Loaded
+      // separately rather than via Prisma include because we filter
+      // boxes on status and the include would bring back inactive
+      // boxes too.
       this.prisma.psn.findMany({
         where: {
           vendorId,
           status: { in: ["RECEIVED", "PARTIALLY_RECEIVED", "DISCREPANCY"] },
         },
         orderBy: { receivedAt: "desc" },
-        take: 100,
+        take: 200,
         select: {
           id: true,
           status: true,
@@ -308,72 +298,56 @@ export class VendorService {
           declaredBoxCounts: true,
           masterTracking: true,
           carrier: true,
-          lines: {
-            select: {
-              skuId: true,
-              acceptedQty: true,
-            },
-          },
         },
       }),
     ]);
 
-    // Count SKUs still inside their 30-day receiving-fee grace
-    // period — surfaced in the headline as "+ N more · first month
-    // covered" so the vendor isn't surprised by an inventory count
-    // higher than the next charge implies.
-    const deferredCount = allActiveSkus.filter((s) => s.nextBillingDate > todayUtc).length;
+    // Helper: look up the configured monthly rate for a tier, returning
+    // null for negotiated tiers (PALLET).
+    const rateFor = (tier: string): number | null =>
+      schedule?.monthlyStorage?.[
+        tier as keyof NonNullable<typeof schedule>["monthlyStorage"]
+      ] ?? null;
 
-    // Per-tier breakdown across ALL active inventory (not just due-now).
-    // This is the steady-state "what does my storage cost per month
-    // when everything is past its grace period" view — the answer to
-    // the question "I have a medium box and a large box, why does the
-    // tier table only show one?". Deferred SKUs still show up here at
-    // their full rate; the upcoming charges section below handles the
-    // separate question of WHEN each cohort actually bills.
+    // 1. Per-tier breakdown across every ACTIVE box. This is the
+    //    steady-state monthly cost view — answers "what does keeping
+    //    everything in storage cost me each month, regardless of
+    //    grace periods?".
     const perTierCounts = new Map<string, number>();
-    for (const s of allActiveSkus) {
-      const tier = String(s.storageTier);
+    for (const b of activeBoxes) {
+      const tier = String(b.tier);
       perTierCounts.set(tier, (perTierCounts.get(tier) ?? 0) + 1);
     }
     const perTier: VendorRecurringStorage["perTier"] = [];
     let monthlyTotalCents = 0;
-    let negotiatedTierSkuCount = 0;
+    let negotiatedTierBoxCount = 0;
     for (const [tier, count] of perTierCounts) {
-      const rateCents =
-        schedule?.monthlyStorage?.[tier as keyof NonNullable<typeof schedule>["monthlyStorage"]] ??
-        null;
+      const rateCents = rateFor(tier);
       const subtotalCents = rateCents != null ? rateCents * count : null;
       if (subtotalCents != null) monthlyTotalCents += subtotalCents;
-      if (rateCents == null) negotiatedTierSkuCount += count;
+      if (rateCents == null) negotiatedTierBoxCount += count;
+      // `skuCount` field name preserved for back-compat with the
+      // already-shipped frontend interface; the value is now the box
+      // count for that tier.
       perTier.push({ tier, skuCount: count, rateCents, subtotalCents });
     }
-    // Sort so the same tier ordering is stable across requests (matters
-    // for snapshot tests + a calm UI that doesn't reflow each refresh).
     perTier.sort((a, b) => a.tier.localeCompare(b.tier));
 
-    // Upcoming charges — group every active SKU by its own
-    // `nextBillingDate`, then itemise each group by storage tier.
-    // This is the receipt-style view the vendor needs: one card per
-    // billing date, each holding one line per box size with
-    // quantity, rate, and subtotal.
-    //
-    // Under the 30-day cycle every SKU carries its own anchor date,
-    // so each "cohort" naturally groups by received-day. SKUs that
-    // are past due (nextBillingDate <= today) all collapse into one
-    // group keyed by today's date — they'll bill on tonight's run.
-    //
-    // Pallet inventory carries a null rate (negotiated per quote);
-    // it still appears in its group's lines for visibility but is
-    // excluded from the group total.
+    // 2. Count boxes still inside their 30-day grace period — the
+    //    headline annotation tells the vendor how many boxes are
+    //    "joining later" so they aren't surprised when the next
+    //    charge is smaller than `monthlyTotalCents`.
+    const deferredCount = activeBoxes.filter((b) => b.nextBillingDate > todayUtc).length;
+
+    // 3. Upcoming charges — group every active box by its own
+    //    `nextBillingDate`. Past-due boxes collapse into a single
+    //    "today" group (they'll bill on tonight's cron run).
     const upcomingGroups = new Map<
       string,
       Map<string, { quantity: number; rateCents: number | null }>
     >();
-    for (const s of allActiveSkus) {
-      // Clamp past-due dates up to today so they group together as
-      // "next charge". Future dates keep their own anchor day.
-      const billingDate = s.nextBillingDate < todayUtc ? todayUtc : s.nextBillingDate;
+    for (const b of activeBoxes) {
+      const billingDate = b.nextBillingDate < todayUtc ? todayUtc : b.nextBillingDate;
       const groupKey = new Date(
         Date.UTC(
           billingDate.getUTCFullYear(),
@@ -381,11 +355,8 @@ export class VendorService {
           billingDate.getUTCDate(),
         ),
       ).toISOString();
-      const tier = String(s.storageTier);
-      const rate =
-        schedule?.monthlyStorage?.[
-          tier as keyof NonNullable<typeof schedule>["monthlyStorage"]
-        ] ?? null;
+      const tier = String(b.tier);
+      const rate = rateFor(tier);
       let tierMap = upcomingGroups.get(groupKey);
       if (!tierMap) {
         tierMap = new Map();
@@ -399,14 +370,10 @@ export class VendorService {
       }
     }
     const upcomingCharges: VendorRecurringStorage["upcomingCharges"] = [];
-    // Stable chronological order by start date so the cards render
-    // earliest-first regardless of Map insertion order.
     for (const startsBilling of Array.from(upcomingGroups.keys()).sort()) {
       const tierMap = upcomingGroups.get(startsBilling)!;
       const lines: VendorRecurringStorage["upcomingCharges"][number]["lines"] = [];
       let totalCents = 0;
-      // Order lines alphabetically by tier for stable diffs and
-      // predictable UI ordering across renders.
       for (const tier of Array.from(tierMap.keys()).sort()) {
         const { quantity, rateCents } = tierMap.get(tier)!;
         const subtotalCents = rateCents != null ? rateCents * quantity : null;
@@ -416,108 +383,75 @@ export class VendorService {
       upcomingCharges.push({ startsBilling, totalCents, lines });
     }
 
-    // 2. Per-PSN contribution. We need to map each SKU bucket → its monthly
-    //    cost (rate per slot, since billing is one row per SKU bucket), then
-    //    split that cost across the PSNs that filled the bucket. The cron
-    //    treats each SKU row as a single tier-priced slot — so the bucket's
-    //    monthly cost is exactly that rate, regardless of qty inside.
-    //
-    //    Attribution rule: each PSN line gets a share of its bucket's
-    //    monthly cost weighted by accepted_qty / sum(accepted_qty for bucket
-    //    across all PSNs). Old PSNs whose lines were fully shipped out (qty
-    //    is now somewhere else) still appear if there's anything left in
-    //    that bucket — the rule attributes by historical contribution to
-    //    the bucket, not current ownership.
-    //
-    //    Returns whole cents per PSN; rounding error totals to ≤ # of
-    //    contributing PSNs which is acceptable for a UI estimate.
-
-    // Maps cover ALL active SKUs (eligible + deferred) — the per-PSN
-    // attribution loop below needs to look up tier + rate + billing
-    // date for every SKU a PSN ever shipped, not just the ones eligible
-    // for the next cron run. Otherwise a PSN whose entire contribution
-    // is currently deferred would render as "0 SKUs" (wrong).
-    const skuToTier = new Map<string, string>();
-    const skuToRate = new Map<string, number | null>();
-    const skuToBillingDate = new Map<string, Date>();
-    for (const s of allActiveSkus) {
-      const tier = String(s.storageTier);
-      skuToTier.set(s.id, tier);
-      const rate =
-        schedule?.monthlyStorage?.[
-          tier as keyof NonNullable<typeof schedule>["monthlyStorage"]
-        ] ?? null;
-      skuToRate.set(s.id, rate);
-      skuToBillingDate.set(s.id, s.nextBillingDate);
-    }
-
-    // sum of acceptedQty per SKU (across all PSN lines we found)
-    const skuTotalAccepted = new Map<string, number>();
-    for (const p of allPsnsForContribution) {
-      for (const line of p.lines) {
-        if (!line.skuId || line.acceptedQty <= 0) continue;
-        skuTotalAccepted.set(line.skuId, (skuTotalAccepted.get(line.skuId) ?? 0) + line.acceptedQty);
+    // 4. Per-PSN — group boxes by their psnId, compute that PSN's
+    //    monthly cost (sum of box rates), find the earliest billing
+    //    date among its boxes. A PSN with all boxes flagged EMPTY /
+    //    REMOVED simply doesn't appear here because activeBoxes
+    //    won't contain any of its rows.
+    const psnIndex = new Map(ownerPsns.map((p) => [p.id, p]));
+    const perPsnAgg = new Map<
+      string,
+      {
+        monthlyCents: number;
+        boxCount: number;
+        tierCounts: Record<string, number>;
+        firstBillingDate: Date | null;
       }
+    >();
+    for (const b of activeBoxes) {
+      const tier = String(b.tier);
+      const rate = rateFor(tier);
+      const existing = perPsnAgg.get(b.psnId) ?? {
+        monthlyCents: 0,
+        boxCount: 0,
+        tierCounts: {} as Record<string, number>,
+        firstBillingDate: null as Date | null,
+      };
+      if (rate != null) existing.monthlyCents += rate;
+      existing.boxCount += 1;
+      existing.tierCounts[tier] = (existing.tierCounts[tier] ?? 0) + 1;
+      if (existing.firstBillingDate === null || b.nextBillingDate < existing.firstBillingDate) {
+        existing.firstBillingDate = b.nextBillingDate;
+      }
+      perPsnAgg.set(b.psnId, existing);
     }
 
     const perPsn: VendorRecurringStorage["perPsn"] = [];
-    for (const p of allPsnsForContribution) {
-      let psnMonthlyCents = 0;
-      let psnSkuCount = 0;
-      const tierCounts: Record<string, number> = {};
-      // Earliest nextBillingDate across the contributing SKUs — the
-      // "PSN starts billing on" date the vendor sees in the table. Kept
-      // as a Date during the loop and serialised once at the end.
-      let firstBillingDate: Date | null = null;
-      for (const line of p.lines) {
-        if (!line.skuId || line.acceptedQty <= 0) continue;
-        const rate = skuToRate.get(line.skuId);
-        if (rate == null) continue; // bucket is gone (no current stock) or negotiable
-        const total = skuTotalAccepted.get(line.skuId) ?? 0;
-        if (total <= 0) continue;
-        const share = line.acceptedQty / total;
-        psnMonthlyCents += Math.round(rate * share);
-        psnSkuCount += 1;
-        const tier = skuToTier.get(line.skuId);
-        if (tier) tierCounts[tier] = (tierCounts[tier] ?? 0) + 1;
-        const skuDate = skuToBillingDate.get(line.skuId);
-        if (skuDate && (firstBillingDate === null || skuDate < firstBillingDate)) {
-          firstBillingDate = skuDate;
-        }
-      }
-      if (psnMonthlyCents === 0 && psnSkuCount === 0) continue;
+    for (const [psnId, agg] of perPsnAgg) {
+      const p = psnIndex.get(psnId);
+      if (!p) continue;
       perPsn.push({
-        psnId: p.id,
+        psnId,
         status: String(p.status),
         receivedAt: p.receivedAt?.toISOString() ?? null,
         carrier: p.carrier ?? null,
         masterTracking: p.masterTracking ?? null,
         declaredBoxCounts: (p.declaredBoxCounts ?? {}) as Record<string, number>,
-        contributingSkuCount: psnSkuCount,
-        contributingTierCounts: tierCounts,
-        monthlyEstimateCents: psnMonthlyCents,
-        firstBillingDate: firstBillingDate?.toISOString() ?? null,
+        // `contributingSkuCount` / `contributingTierCounts` field names
+        // kept for back-compat with the already-shipped frontend
+        // interface; the values are now box counts.
+        contributingSkuCount: agg.boxCount,
+        contributingTierCounts: agg.tierCounts,
+        monthlyEstimateCents: agg.monthlyCents,
+        firstBillingDate: agg.firstBillingDate?.toISOString() ?? null,
       });
     }
     perPsn.sort((a, b) => b.monthlyEstimateCents - a.monthlyEstimateCents);
 
-    // Next charge = the earliest upcoming-charges group. If there's
-    // no inventory at all, fall back to today as the date with a $0
-    // amount — the page renders an empty state in that case.
+    // 5. Next charge — the soonest upcoming-charges group.
     const firstUpcoming = upcomingCharges[0];
-    const nextChargeAt = (firstUpcoming?.startsBilling ?? todayUtc.toISOString());
+    const nextChargeAt = firstUpcoming?.startsBilling ?? todayUtc.toISOString();
     const nextChargeAmountCents = firstUpcoming?.totalCents ?? 0;
 
     return {
       vendorId,
-      // monthlyTotalCents = steady-state recurring cost across all
-      // active inventory. monthlyEstimateCents is the legacy alias
-      // for nextChargeAmountCents (kept for older clients).
       monthlyTotalCents,
       nextChargeAmountCents,
       monthlyEstimateCents: nextChargeAmountCents,
-      negotiatedTierSkuCount,
-      activeSkuCount: allActiveSkus.length,
+      negotiatedTierSkuCount: negotiatedTierBoxCount,
+      // `activeSkuCount` field name preserved for back-compat; value
+      // is the active box count.
+      activeSkuCount: activeBoxes.length,
       coveredAtIntakeSkuCount: deferredCount,
       nextChargeAt,
       upcomingCharges,

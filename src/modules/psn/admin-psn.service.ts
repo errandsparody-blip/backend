@@ -26,7 +26,7 @@ import type { Prisma, PrismaClient, PsnStatus } from "@prisma/client";
 import { PrismaService } from "../../common/prisma.service";
 import type { CompleteReceivingInput, ListPsnsInput } from "../../common/schemas/psn.schema";
 import { AuditService } from "../audit/audit.service";
-import { SkuService } from "../sku/sku.service";
+import { computeFirstBillingDate, SkuService } from "../sku/sku.service";
 import { WalletService } from "../wallet/wallet.service";
 
 // Default window before a stale PsnHold auto-converts to RETURN_REQUESTED.
@@ -221,6 +221,30 @@ export class AdminPsnService {
         },
       });
 
+      // Migration 0035 — create one StorageBox row per physical box the
+      // vendor declared in this shipment. This is the new billing unit
+      // (replaces SKU-based storage billing): the daily cron iterates
+      // these rows, debits per box on its 30-day anchor, and admin can
+      // mark them empty / removed via the consolidate UI.
+      //
+      // Guards:
+      //   - Skip if boxes already exist for this PSN (idempotent on
+      //     re-submission of the receive form).
+      //   - Skip if shippingMode is ADD_TO_PALLET — those boxes are
+      //     folded into an existing pallet and don't create new billing
+      //     rows; the original pallet's StorageBox keeps billing.
+      //   - Pull declaredBoxCounts from the up-to-date PSN row so any
+      //     in-receive correction by the operator is honoured.
+      if (updated.shippingMode !== "ADD_TO_PALLET") {
+        await this.createStorageBoxesIfNeeded(
+          tx as unknown as Tx,
+          updated.id,
+          updated.vendorId,
+          (updated.declaredBoxCounts ?? {}) as Record<string, number>,
+          updated.receivedAt ?? new Date(),
+        );
+      }
+
       await this.audit.log({
         actorId,
         action: "psn.received",
@@ -232,6 +256,52 @@ export class AdminPsnService {
 
       return { status: updated.status, psnId: updated.id };
     });
+  }
+
+  /**
+   * Insert one StorageBox row per declared box, anchored to receivedAt.
+   * No-op when boxes already exist for this PSN (idempotent on retry).
+   */
+  private async createStorageBoxesIfNeeded(
+    tx: Tx,
+    psnId: string,
+    vendorId: string,
+    declaredBoxCounts: Record<string, number>,
+    receivedAt: Date,
+  ): Promise<void> {
+    const existing = await tx.storageBox.count({ where: { psnId } });
+    if (existing > 0) return;
+
+    const nextBillingDate = computeFirstBillingDate(receivedAt);
+    const rows: Array<{
+      vendorId: string;
+      psnId: string;
+      tier: "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET";
+      receivedAt: Date;
+      nextBillingDate: Date;
+    }> = [];
+
+    for (const [tier, rawCount] of Object.entries(declaredBoxCounts)) {
+      const count =
+        typeof rawCount === "number" ? rawCount : Number.parseInt(String(rawCount), 10);
+      if (!Number.isFinite(count) || count <= 0) continue;
+      // Defensive: skip any tier value that isn't a real StorageTier.
+      // The Zod schema on PSN create already guards the vendor input but
+      // we add a belt-and-braces check here for legacy rows.
+      if (!["SMALL", "MEDIUM", "LARGE", "X_LARGE", "PALLET"].includes(tier)) continue;
+      for (let i = 0; i < count; i++) {
+        rows.push({
+          vendorId,
+          psnId,
+          tier: tier as "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET",
+          receivedAt,
+          nextBillingDate,
+        });
+      }
+    }
+
+    if (rows.length === 0) return;
+    await tx.storageBox.createMany({ data: rows });
   }
 
   // ---------------------------------------------------------------------------

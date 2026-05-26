@@ -1,31 +1,33 @@
 /**
  * Storage billing — runs daily at 02:00 UTC.
  *
- * 30-day rolling cycle model: every SKU is billed once every 30 days,
- * anchored to the day it was received. The receiving fee paid at intake
- * covers the first 30 days, so SKUs received less than 30 days ago are
- * skipped on every daily run until their grace period ends.
+ * Per-box 30-day rolling cycle (migration 0035). The billing unit is
+ * the physical box, not the SKU. Every active StorageBox runs its own
+ * 30-day cycle anchored to the day its PSN was received; the receiving
+ * fee paid at intake covers the first 30 days, so a box is invisible
+ * to the cron until day 30. After each successful debit the box's
+ * `nextBillingDate` advances by exactly 30 days from its own current
+ * value (not from today), so a box that missed a daily run still stays
+ * on its true anchor.
  *
  * Per vendor:
- *   1. Find ACTIVE SKUs with stock whose `nextBillingDate` is on or
- *      before today (any SKU whose 30-day cycle has come due — may be
- *      zero, one, or many SKUs on any given day).
- *   2. Compute storage liability from the seeded fee_schedule.
- *   3. Inside a single transaction: debit the wallet AND advance each
- *      billed SKU's nextBillingDate forward by 30 days. Either both
- *      succeed or both roll back so a partial billing run never leaves
- *      the SKU dates ahead of the ledger.
+ *   1. Find ACTIVE boxes whose `nextBillingDate <= today`.
+ *   2. Compute storage liability — sum of monthly rates for each box's
+ *      tier. Pallets carry a null rate (negotiated per quote) and are
+ *      excluded from the dollar total but kept in the box list for
+ *      visibility on the recurring-storage page.
+ *   3. In a single transaction: debit the wallet AND advance each
+ *      billed box's nextBillingDate. Either both succeed or both roll
+ *      back — never leave the ledger and the box dates out of sync.
  *   4. Audit-log the outcome.
  *
- * Insufficient funds → vendor is marked STORAGE_OVERDUE and SKU dates
- * do NOT advance, so the next successful debit covers the missed cycle.
+ * Insufficient funds → vendor wallet is marked STORAGE_OVERDUE and box
+ * dates do NOT advance. The next successful run catches up the missed
+ * cycle automatically because advance(prior_date) = prior + 30.
  *
- * IMPORTANT: advancing on a per-SKU basis means each SKU's
- * nextBillingDate must be computed individually before the debit (each
- * SKU adds 30 days to its OWN current date, not to today). Otherwise a
- * SKU that missed yesterday's run and is now caught up today would
- * have its date set to today + 30 rather than its-prior-date + 30,
- * which would silently skip a cycle.
+ * EMPTY and REMOVED boxes are skipped — those are the operator-flagged
+ * states for empty / consolidated boxes that should no longer accrue
+ * storage charges.
  *
  * Implementation Plan §5.5, §6.3.2, §14.5.
  */
@@ -43,9 +45,9 @@ interface FeeSchedule {
   monthlyStorage: Record<StorageTier, number | null>;
 }
 
-interface EligibleSku {
+interface BillableBox {
   id: string;
-  storageTier: StorageTier;
+  tier: StorageTier;
   nextBillingDate: Date;
 }
 
@@ -59,7 +61,7 @@ export class StorageBillingJob {
     private readonly audit: AuditService,
   ) {}
 
-  /** 02:00 UTC every day. Each run only bills SKUs whose 30-day cycle has come due. */
+  /** 02:00 UTC every day. Bills any box whose 30-day cycle has come due. */
   @Cron("0 2 * * *", { name: "storage-billing", timeZone: "UTC" })
   async run(): Promise<void> {
     this.logger.log("Daily storage billing starting");
@@ -75,25 +77,16 @@ export class StorageBillingJob {
     let skipped = 0;
 
     for (const v of vendors) {
-      const { totalCents, eligibleSkus } = await this.computeVendorLiability(
+      const { totalCents, billableBoxes } = await this.computeVendorLiability(
         v.id,
         schedule,
         today,
       );
-      if (totalCents === 0 || eligibleSkus.length === 0) {
+      if (totalCents === 0 || billableBoxes.length === 0) {
         skipped++;
         continue;
       }
       try {
-        // Atomic: debit wallet + advance each SKU's nextBillingDate
-        // together. If either fails, both roll back. This prevents the
-        // "skipped on retry" failure mode where the ledger has the
-        // charge but the SKU dates weren't advanced (or vice versa).
-        //
-        // Each SKU is advanced from its OWN current date (not today),
-        // so a SKU whose cycle was missed once and is now being caught
-        // up still stays on its anchor; advance(prior_date) = prior + 30,
-        // which is what we want.
         await this.prisma.$transaction(async (tx) => {
           await this.wallet.debit(
             {
@@ -104,22 +97,21 @@ export class StorageBillingJob {
             },
             tx as unknown as Parameters<typeof this.wallet.debit>[1],
           );
-          // Per-SKU update so each one advances from its own anchor.
+          // Per-box update so each one advances from its OWN anchor.
           // updateMany with a single date would collapse them all to
-          // the same future date — incorrect for any vendor whose SKUs
-          // are on different cycles.
-          for (const sku of eligibleSkus) {
-            await tx.sku.update({
-              where: { id: sku.id },
-              data: { nextBillingDate: advanceBillingDate(sku.nextBillingDate) },
+          // the same future date — incorrect for any vendor whose
+          // boxes are on different cycles. The N-update overhead is
+          // small because the typical vendor has well under 100
+          // active boxes due on any given day.
+          for (const box of billableBoxes) {
+            await tx.storageBox.update({
+              where: { id: box.id },
+              data: { nextBillingDate: advanceBillingDate(box.nextBillingDate) },
             });
           }
         });
         billed++;
       } catch (err) {
-        // Insufficient funds → mark STORAGE_OVERDUE; do NOT debit
-        // (no negatives), do NOT advance SKU dates (so the missed
-        // cycle gets caught up on the next successful run).
         if ((err as { response?: { code?: string } }).response?.code === "insufficient_funds") {
           await this.prisma.wallet.update({
             where: { vendorId: v.id },
@@ -145,39 +137,38 @@ export class StorageBillingJob {
 
   /**
    * Compute a vendor's storage liability for today's run AND collect
-   * the SKUs that contributed, so the caller can atomically advance
+   * the boxes that contributed, so the caller can atomically advance
    * their `nextBillingDate` after a successful debit.
    *
-   * Eligibility filter: ACTIVE status, positive stock, AND
-   * `nextBillingDate <= today`. The last clause is what makes the
-   * 30-day cycle work — SKUs whose first 30-day cycle was prepaid at
-   * intake carry a future date and are excluded until their grace
-   * period ends.
+   * Filter: status = ACTIVE AND nextBillingDate <= today. EMPTY and
+   * REMOVED boxes are excluded.
+   *
+   * Pallets (rate = null) are skipped — they're priced per quote and
+   * billed manually outside this cron path.
    */
   private async computeVendorLiability(
     vendorId: string,
     schedule: FeeSchedule,
     today: Date,
-  ): Promise<{ totalCents: number; eligibleSkus: EligibleSku[] }> {
-    const where: Prisma.SkuWhereInput = {
+  ): Promise<{ totalCents: number; billableBoxes: BillableBox[] }> {
+    const where: Prisma.StorageBoxWhereInput = {
       vendorId,
       status: "ACTIVE",
-      quantityAvailable: { gt: 0 },
       nextBillingDate: { lte: today },
     };
-    const eligible = await this.prisma.sku.findMany({
+    const eligible = await this.prisma.storageBox.findMany({
       where,
-      select: { id: true, storageTier: true, nextBillingDate: true },
+      select: { id: true, tier: true, nextBillingDate: true },
     });
     let totalCents = 0;
-    const eligibleSkus: EligibleSku[] = [];
-    for (const sku of eligible) {
-      const per = schedule.monthlyStorage[sku.storageTier];
+    const billableBoxes: BillableBox[] = [];
+    for (const box of eligible) {
+      const per = schedule.monthlyStorage[box.tier];
       if (per === null || per === undefined) continue; // pallets are negotiated
       totalCents += per;
-      eligibleSkus.push(sku);
+      billableBoxes.push(box);
     }
-    return { totalCents, eligibleSkus };
+    return { totalCents, billableBoxes };
   }
 
   private async loadSchedule(): Promise<FeeSchedule> {
