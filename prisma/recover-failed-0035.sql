@@ -1,0 +1,45 @@
+-- One-time recovery for the failed 0035_storage_boxes migration.
+-- =============================================================================
+--
+-- Why this file exists.
+-- ---------------------
+-- The first attempt at 0035_storage_boxes declared the foreign-key
+-- columns (vendor_id, psn_id, status_changed_by) as TEXT. The parent
+-- tables (vendors, psns, users) use UUID primary keys, and Postgres
+-- refuses to create a foreign-key constraint between TEXT and UUID
+-- with error 42804:
+--
+--   ERROR: foreign key constraint "storage_boxes_vendor_id_fkey"
+--   cannot be implemented
+--   DETAIL: Key columns "vendor_id" of the referencing table and "id"
+--   of the referenced table are of incompatible types: text and uuid.
+--
+-- The CREATE TABLE rolled back atomically, so storage_boxes does not
+-- exist in the database. The CREATE TYPE inside the DO block ran in
+-- its own transaction and succeeded, so the StorageBoxStatus enum
+-- may already exist — the corrected migration's DO/IF-NOT-EXISTS
+-- guard handles that case automatically.
+--
+-- But Prisma also wrote a row to `_prisma_migrations` marking 0035 as
+-- "started but not finished", and that row blocks every future
+-- `migrate deploy` with:
+--
+--   Error: P3009
+--   migrate found failed migrations in the target database, new
+--   migrations will not be applied.
+--   The `0035_storage_boxes` migration started at … failed
+--
+-- This SQL is run by the Dockerfile CMD before `prisma migrate deploy`.
+-- It clears the failed row so Prisma re-applies the (now-corrected)
+-- 0035 SQL cleanly on the next boot.
+--
+-- Safe to leave in the deploy chain forever.
+-- ------------------------------------------
+-- Once the failed row is gone, the DELETE becomes a no-op on every
+-- subsequent boot. The `finished_at IS NULL` filter only matches
+-- migrations that haven't completed — successfully applied migrations
+-- have a non-null `finished_at` and are untouched.
+
+DELETE FROM "_prisma_migrations"
+ WHERE migration_name = '0035_storage_boxes'
+   AND finished_at IS NULL;

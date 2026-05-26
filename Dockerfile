@@ -110,12 +110,22 @@ EXPOSE 4000
 # the container exits and Railway's restartPolicy kicks in (configured in
 # railway.json).
 #
-# The first step (`prisma db execute --file recover-failed-0019.sql`) is a
-# one-time self-heal for the 0019_unified_ledger migration that originally
-# failed with "unsafe use of new enum value" (SQLSTATE 55P04). The SQL
-# inside deletes only the failed (unfinished) row from `_prisma_migrations`,
-# leaving the rest of the migration history intact. After it runs, Prisma
-# re-applies 0019 cleanly. The file is idempotent — once the failed row is
-# gone, the DELETE is a no-op on every subsequent boot, so it's safe to
-# leave in the deploy chain forever.
-CMD ["sh", "-c", "pnpm prisma db execute --schema prisma/schema.prisma --file prisma/recover-failed-0019.sql && pnpm prisma migrate deploy && node dist/main.js"]
+# Two one-time self-heals run before `prisma migrate deploy`:
+#
+#   1. recover-failed-0019.sql — for the 0019_unified_ledger migration
+#      that originally failed with "unsafe use of new enum value"
+#      (SQLSTATE 55P04).
+#
+#   2. recover-failed-0035.sql — for the 0035_storage_boxes migration
+#      that originally failed with "foreign key constraint cannot be
+#      implemented: incompatible types text and uuid" (SQLSTATE 42804).
+#      Fixed by changing the FK column types from TEXT to UUID; this
+#      SQL clears the failed-migration row so the corrected schema
+#      applies cleanly on the next boot.
+#
+# Both files only delete the failed (unfinished) row from
+# `_prisma_migrations` — successful migrations have a non-null
+# finished_at and are untouched. Once the failed rows are gone, the
+# DELETEs are no-ops on every subsequent boot, so it's safe to leave
+# them in the deploy chain forever.
+CMD ["sh", "-c", "pnpm prisma db execute --schema prisma/schema.prisma --file prisma/recover-failed-0019.sql && pnpm prisma db execute --schema prisma/schema.prisma --file prisma/recover-failed-0035.sql && pnpm prisma migrate deploy && node dist/main.js"]

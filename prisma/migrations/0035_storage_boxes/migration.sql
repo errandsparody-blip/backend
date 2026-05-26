@@ -27,10 +27,15 @@ END
 $$;
 
 -- 2. storage_boxes table.
+--
+-- FK columns are UUID to match the parent tables (vendors.id, psns.id,
+-- users.id are all UUID). A previous draft of this migration declared
+-- them as TEXT and failed with a 42804 type-mismatch error from
+-- Postgres; that's been fixed to UUID below.
 CREATE TABLE IF NOT EXISTS "storage_boxes" (
-  "id"                       TEXT PRIMARY KEY,
-  "vendor_id"                TEXT NOT NULL REFERENCES "vendors"("id") ON DELETE CASCADE,
-  "psn_id"                   TEXT NOT NULL REFERENCES "psns"("id") ON DELETE RESTRICT,
+  "id"                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  "vendor_id"                UUID NOT NULL REFERENCES "vendors"("id") ON DELETE CASCADE,
+  "psn_id"                   UUID NOT NULL REFERENCES "psns"("id") ON DELETE RESTRICT,
   "tier"                     "StorageTier" NOT NULL,
   "received_at"              TIMESTAMP(3) NOT NULL,
   "next_billing_date"        DATE NOT NULL,
@@ -48,7 +53,7 @@ CREATE TABLE IF NOT EXISTS "storage_boxes" (
   -- by phone", etc.). Null while the box is ACTIVE.
   "status_note"              TEXT NULL,
   "status_changed_at"        TIMESTAMP(3) NULL,
-  "status_changed_by"        TEXT NULL REFERENCES "users"("id") ON DELETE SET NULL,
+  "status_changed_by"        UUID NULL REFERENCES "users"("id") ON DELETE SET NULL,
 
   "created_at"               TIMESTAMP(3) NOT NULL DEFAULT now(),
   "updated_at"               TIMESTAMP(3) NOT NULL DEFAULT now()
@@ -93,7 +98,7 @@ INSERT INTO "storage_boxes" (
   "status"
 )
 SELECT
-  gen_random_uuid()::text                                AS id,
+  gen_random_uuid()                                      AS id,
   p."vendor_id"                                          AS vendor_id,
   p."id"                                                 AS psn_id,
   tier_entry.tier::"StorageTier"                         AS tier,
