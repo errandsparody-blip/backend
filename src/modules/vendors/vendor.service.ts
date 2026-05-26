@@ -122,6 +122,23 @@ export interface VendorRecurringStorage {
   coveredAtIntakeSkuCount: number;
   /** ISO timestamp of the next storage charge (1st of next month, 02:00 UTC). */
   nextChargeAt: string;
+  /**
+   * Migration 0034 — projected debits for the next several monthly cron
+   * runs, accounting for SKUs whose first cycle is prepaid at intake.
+   * This is the headline answer to the vendor-facing question "I just
+   * shipped more boxes, when do they start hitting my bill?". Items are
+   * sorted chronologically; the first entry is the same number as
+   * `monthlyEstimateCents` / `nextChargeAt`. Capped at the next 3
+   * billing dates (90 days is plenty of horizon for cash planning).
+   */
+  upcomingCharges: Array<{
+    chargeAt: string;
+    amountCents: number;
+    /** SKUs joining this cycle for the first time (deferred ones whose intake-prepaid period just ended). */
+    newSkuCount: number;
+    /** Total SKUs being billed on this cycle (steady-state once everyone's joined). */
+    totalSkuCount: number;
+  }>;
   perTier: Array<{
     tier: string;
     skuCount: number;
@@ -138,6 +155,16 @@ export interface VendorRecurringStorage {
     contributingSkuCount: number;
     contributingTierCounts: Record<string, number>;
     monthlyEstimateCents: number;
+    /**
+     * Migration 0034 — earliest `nextBillingDate` among this PSN's
+     * contributing SKUs. When all contributing SKUs share the same
+     * billing date (the common case), this is THAT date. When a PSN
+     * filled multiple buckets with different intake months, this is
+     * the soonest of those dates — the vendor sees "PSN X first bills
+     * on Y" which is the actionable bit. Null when no contributing
+     * SKUs survive (rare; shouldn't render in that case anyway).
+     */
+    firstBillingDate: string | null;
   }>;
   history: Array<{
     id: string;
@@ -190,45 +217,25 @@ export class VendorService {
     const now = new Date();
     const nextCharge = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 2, 0, 0));
 
-    const [tierAgg, skus, deferredCount, recentStorage, allPsnsForContribution] = await Promise.all([
-      // Per-tier SKU count eligible for the next cron run.
-      this.prisma.sku.groupBy({
-        by: ["storageTier"],
-        where: {
-          vendorId,
-          status: "ACTIVE",
-          OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
-          nextBillingDate: { lte: nextCharge },
-        },
-        _count: { _all: true },
-      }),
-      // Per-SKU snapshot so the per-PSN contribution view can attribute
-      // monthly cost to the PSN(s) that filled the bucket. Same eligibility
-      // filter as the tier aggregation above.
+    // Migration 0034 — we now need `nextBillingDate` on every SKU, not
+    // just an eligibility flag, because the recurring view projects
+    // multiple months forward and attributes a billing date back to
+    // each PSN. Fetch ALL active SKUs with stock in one go; downstream
+    // we partition them by whether their date falls on or before the
+    // upcoming cron (eligible) vs after (deferred).
+    const [allActiveSkus, recentStorage, allPsnsForContribution] = await Promise.all([
       this.prisma.sku.findMany({
         where: {
           vendorId,
           status: "ACTIVE",
           OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
-          nextBillingDate: { lte: nextCharge },
         },
         select: {
           id: true,
           storageTier: true,
           quantityAvailable: true,
           quantityReserved: true,
-        },
-      }),
-      // Count of SKUs whose first cycle is prepaid at intake — has
-      // stock, but nextBillingDate is AFTER the upcoming cron tick.
-      // Vendor sees this on the dashboard so they understand that the
-      // upcoming bill doesn't include their just-added inventory.
-      this.prisma.sku.count({
-        where: {
-          vendorId,
-          status: "ACTIVE",
-          OR: [{ quantityAvailable: { gt: 0 } }, { quantityReserved: { gt: 0 } }],
-          nextBillingDate: { gt: nextCharge },
+          nextBillingDate: true,
         },
       }),
       // Last twelve STORAGE ledger entries — the billing history list.
@@ -273,23 +280,82 @@ export class VendorService {
       }),
     ]);
 
+    // Partition active SKUs into "eligible for the next cron" (date on
+    // or before nextCharge) vs "deferred — first cycle prepaid at
+    // intake" (date strictly after nextCharge). The legacy `skus` /
+    // `tierAgg` / `deferredCount` variables that downstream code expects
+    // are derived from this partition entirely in memory so we save a
+    // round trip to Postgres versus the old three-query approach.
+    const skus = allActiveSkus.filter((s) => s.nextBillingDate <= nextCharge);
+    const deferredCount = allActiveSkus.length - skus.length;
+    const tierCountsEligible = new Map<string, number>();
+    for (const s of skus) {
+      const tier = String(s.storageTier);
+      tierCountsEligible.set(tier, (tierCountsEligible.get(tier) ?? 0) + 1);
+    }
+
     // 1. Per-tier monthly estimate.
     const perTier: VendorRecurringStorage["perTier"] = [];
     let monthlyEstimateCents = 0;
     let negotiatedTierSkuCount = 0;
-    for (const row of tierAgg) {
-      const tier = row.storageTier;
-      const count = row._count._all;
-      const rateCents = schedule?.monthlyStorage?.[tier] ?? null;
+    for (const [tier, count] of tierCountsEligible) {
+      // Cast back to the enum key for the schedule lookup. Schedule
+      // keys mirror the StorageTier enum verbatim, so this is a no-op
+      // at runtime; the cast just makes TS happy.
+      const rateCents =
+        schedule?.monthlyStorage?.[tier as keyof NonNullable<typeof schedule>["monthlyStorage"]] ??
+        null;
       const subtotalCents = rateCents != null ? rateCents * count : null;
       if (subtotalCents != null) monthlyEstimateCents += subtotalCents;
       if (rateCents == null) negotiatedTierSkuCount += count;
       perTier.push({
-        tier: String(tier),
+        tier,
         skuCount: count,
         rateCents,
         subtotalCents,
       });
+    }
+    // Sort so the same tier ordering is stable across requests (matters
+    // for snapshot tests + a calm UI that doesn't reflow each refresh).
+    perTier.sort((a, b) => a.tier.localeCompare(b.tier));
+
+    // 1b. Upcoming-charges timeline. Walk forward up to UPCOMING_CHARGES_HORIZON
+    //     months from the next cron tick. For each tick, the bill includes
+    //     every SKU whose nextBillingDate is on or before THAT tick (the
+    //     same filter the cron uses). SKUs that were already billed at an
+    //     earlier tick remain in subsequent ticks because the cron bumps
+    //     their date forward exactly one month each run — so once a SKU
+    //     starts billing, it bills monthly forever (until it's drained).
+    //
+    //     The deferred SKUs that don't show up at tick N appear at tick N+1
+    //     once their initial intake-prepaid period ends. That's the precise
+    //     visualisation the vendor needs: "right now you owe $X next month,
+    //     and $Y the month after when your new boxes join."
+    const UPCOMING_CHARGES_HORIZON = 3;
+    const upcomingCharges: VendorRecurringStorage["upcomingCharges"] = [];
+    let priorTotalSkuCount = 0;
+    for (let i = 0; i < UPCOMING_CHARGES_HORIZON; i++) {
+      const tickDate = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1 + i, 1, 2, 0, 0),
+      );
+      let amountCents = 0;
+      let totalSkuCount = 0;
+      for (const s of allActiveSkus) {
+        if (s.nextBillingDate > tickDate) continue;
+        totalSkuCount += 1;
+        const rate =
+          schedule?.monthlyStorage?.[
+            String(s.storageTier) as keyof NonNullable<typeof schedule>["monthlyStorage"]
+          ] ?? null;
+        if (rate != null) amountCents += rate;
+      }
+      upcomingCharges.push({
+        chargeAt: tickDate.toISOString(),
+        amountCents,
+        newSkuCount: Math.max(0, totalSkuCount - priorTotalSkuCount),
+        totalSkuCount,
+      });
+      priorTotalSkuCount = totalSkuCount;
     }
 
     // 2. Per-PSN contribution. We need to map each SKU bucket → its monthly
@@ -308,20 +374,23 @@ export class VendorService {
     //    Returns whole cents per PSN; rounding error totals to ≤ # of
     //    contributing PSNs which is acceptable for a UI estimate.
 
+    // Maps cover ALL active SKUs (eligible + deferred) — the per-PSN
+    // attribution loop below needs to look up tier + rate + billing
+    // date for every SKU a PSN ever shipped, not just the ones eligible
+    // for the next cron run. Otherwise a PSN whose entire contribution
+    // is currently deferred would render as "0 SKUs" (wrong).
     const skuToTier = new Map<string, string>();
-    for (const s of skus) {
-      skuToTier.set(s.id, String(s.storageTier));
-    }
-
-    /** rateCents per active SKU bucket */
     const skuToRate = new Map<string, number | null>();
-    for (const s of skus) {
+    const skuToBillingDate = new Map<string, Date>();
+    for (const s of allActiveSkus) {
       const tier = String(s.storageTier);
-      const rate = schedule?.monthlyStorage?.[s.storageTier] ?? null;
-      // Cast through string lookup because StorageTier enum values are
-      // exactly what we used as keys in monthlyStorage.
-      void tier;
+      skuToTier.set(s.id, tier);
+      const rate =
+        schedule?.monthlyStorage?.[
+          tier as keyof NonNullable<typeof schedule>["monthlyStorage"]
+        ] ?? null;
       skuToRate.set(s.id, rate);
+      skuToBillingDate.set(s.id, s.nextBillingDate);
     }
 
     // sum of acceptedQty per SKU (across all PSN lines we found)
@@ -338,6 +407,10 @@ export class VendorService {
       let psnMonthlyCents = 0;
       let psnSkuCount = 0;
       const tierCounts: Record<string, number> = {};
+      // Earliest nextBillingDate across the contributing SKUs — the
+      // "PSN starts billing on" date the vendor sees in the table. Kept
+      // as a Date during the loop and serialised once at the end.
+      let firstBillingDate: Date | null = null;
       for (const line of p.lines) {
         if (!line.skuId || line.acceptedQty <= 0) continue;
         const rate = skuToRate.get(line.skuId);
@@ -349,6 +422,10 @@ export class VendorService {
         psnSkuCount += 1;
         const tier = skuToTier.get(line.skuId);
         if (tier) tierCounts[tier] = (tierCounts[tier] ?? 0) + 1;
+        const skuDate = skuToBillingDate.get(line.skuId);
+        if (skuDate && (firstBillingDate === null || skuDate < firstBillingDate)) {
+          firstBillingDate = skuDate;
+        }
       }
       if (psnMonthlyCents === 0 && psnSkuCount === 0) continue;
       perPsn.push({
@@ -361,6 +438,7 @@ export class VendorService {
         contributingSkuCount: psnSkuCount,
         contributingTierCounts: tierCounts,
         monthlyEstimateCents: psnMonthlyCents,
+        firstBillingDate: firstBillingDate?.toISOString() ?? null,
       });
     }
     perPsn.sort((a, b) => b.monthlyEstimateCents - a.monthlyEstimateCents);
@@ -372,6 +450,7 @@ export class VendorService {
       activeSkuCount: skus.length,
       coveredAtIntakeSkuCount: deferredCount,
       nextChargeAt: nextCharge.toISOString(),
+      upcomingCharges,
       perTier,
       perPsn,
       history: recentStorage.map((l) => ({
