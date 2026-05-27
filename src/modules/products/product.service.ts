@@ -337,7 +337,139 @@ export class ProductService {
       lengthIn: p.lengthIn,
       widthIn: p.widthIn,
       heightIn: p.heightIn,
+      storageTier:
+        (p as unknown as { storageTier?: string }).storageTier ?? "SMALL",
       status: p.status,
     };
   }
+
+  // ---------------------------------------------------------------------------
+  // Admin override path
+  //
+  // Products are locked to vendors from the moment they're created so
+  // they can't under-declare weights to dodge shipping costs after the
+  // fact. The warehouse, however, weighs and measures every incoming
+  // unit — and the receiving fee the vendor already paid covers that
+  // work. When physical measurements differ from what the vendor
+  // declared, the admin needs an escape hatch to correct the record.
+  //
+  // editAsAdmin bypasses the lock check and persists the corrected
+  // shipping-critical fields. Every change is audit-logged with
+  // before/after snapshots so finance can reconcile any disputes.
+  //
+  // Two fields stay LOCKED even for admins:
+  //   - `variant` — part of the SKU id format. Editing forks ids on
+  //     the next receive and corrupts historical references.
+  //   - `code`    — part of the SKU id format too. Same risk.
+  //
+  // Vendor-side reads from the same Product row, so corrections
+  // propagate automatically: the vendor's product detail page will
+  // show the warehouse-measured values on the next page load.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Admin-only product lookup (no vendor scope). Returns the public
+   * shape with `locked: true` so the admin form knows the vendor view
+   * is still read-only.
+   */
+  async getByIdAsAdmin(id: string): Promise<
+    PublicProduct & { vendorId: string; vendorBusinessName: string }
+  > {
+    const product = await this.prisma.product.findUnique({
+      where: { id },
+      include: {
+        vendor: { select: { businessName: true } },
+      },
+    });
+    if (!product) throw new NotFoundException();
+    const pub = this.toPublic(product, { locked: true });
+    return {
+      ...pub,
+      vendorId: product.vendorId,
+      vendorBusinessName: product.vendor.businessName,
+    };
+  }
+
+  /**
+   * Admin override — corrects vendor-declared weight / dimensions /
+   * declared value / HS code / country / storage tier from the
+   * warehouse measurements. NOT scoped to a vendor; caller is
+   * SUPER_ADMIN-gated at the controller layer.
+   *
+   * The patch shape is the same as the vendor's `UpdateProductInput`
+   * minus the fields admin can't safely edit (`variant`, `code`,
+   * `name`, `imageUrl`, `status`). Empty / undefined fields are
+   * skipped so a partial edit (e.g. weightOz only) leaves the rest
+   * untouched.
+   */
+  async editAsAdmin(
+    actorId: string,
+    id: string,
+    patch: AdminProductEditInput,
+  ): Promise<PublicProduct> {
+    const before = await this.prisma.product.findUnique({ where: { id } });
+    if (!before) throw new NotFoundException();
+
+    const data: Prisma.ProductUncheckedUpdateInput = {};
+    if (patch.weightOz !== undefined) data.weightOz = patch.weightOz;
+    if (patch.lengthIn !== undefined) data.lengthIn = patch.lengthIn;
+    if (patch.widthIn !== undefined) data.widthIn = patch.widthIn;
+    if (patch.heightIn !== undefined) data.heightIn = patch.heightIn;
+    if (patch.declaredValueCents !== undefined)
+      data.declaredValueCents = patch.declaredValueCents;
+    if (patch.hsCode !== undefined) data.hsCode = patch.hsCode;
+    if (patch.countryOfOrigin !== undefined)
+      data.countryOfOrigin = patch.countryOfOrigin;
+    if (patch.storageTier !== undefined) data.storageTier = patch.storageTier;
+
+    // Idempotent no-op safeguard: if the patch matches what's already
+    // on the row, skip the update + audit so we don't pollute the
+    // audit log with empty diffs from accidental double-submits.
+    const changed = Object.keys(data).some((k) => {
+      const next = (data as Record<string, unknown>)[k];
+      const current = (before as unknown as Record<string, unknown>)[k];
+      return next !== current;
+    });
+    if (!changed) return this.toPublic(before, { locked: true });
+
+    const updated = await this.prisma.product.update({
+      where: { id },
+      data,
+    });
+
+    await this.audit.log({
+      actorId,
+      action: "product.admin_edited",
+      resourceType: "product",
+      resourceId: id,
+      beforeState: this.diffSnapshot(before),
+      afterState: {
+        ...this.diffSnapshot(updated),
+        // Echo the admin's reason note into the audit row when given,
+        // so finance can scan the log without joining tables.
+        adminReason: patch.reason ?? null,
+      },
+    });
+
+    return this.toPublic(updated, { locked: true });
+  }
+}
+
+/**
+ * Fields the admin override accepts. Intentionally narrower than the
+ * vendor's UpdateProductInput — `variant`, `code`, `name`, and
+ * `imageUrl` stay locked because changing them after SKUs exist would
+ * break historical references and the photographic audit trail.
+ */
+export interface AdminProductEditInput {
+  weightOz?: number;
+  lengthIn?: number | null;
+  widthIn?: number | null;
+  heightIn?: number | null;
+  declaredValueCents?: number;
+  hsCode?: string | null;
+  countryOfOrigin?: string;
+  storageTier?: "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET";
+  /** Optional free-text reason ("warehouse re-weighed", "customs correction") logged on the audit row. */
+  reason?: string;
 }

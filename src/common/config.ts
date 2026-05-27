@@ -139,7 +139,7 @@ const ConfigSchema = z.object({
   WAREHOUSE_FROM_EMAIL: z
     .string()
     .regex(/^[^@\s]+@[^@\s]+\.[^@\s]+$/, "Must be a plain email address.")
-    .default("ops@myusaerrands.com"),
+    .default("hello@myusaerrands.com"),
 
   // Email — Implementation Plan §6.8.
   // EMAIL_PROVIDER:
@@ -153,14 +153,14 @@ const ConfigSchema = z.object({
     .string()
     .min(5)
     .regex(/^.+@.+\..+$/, "Must be a valid email or 'Name <email>' header.")
-    .default("USA Errands <noreply@usaerrands.com>"),
+    .default("USA Errands <noreply@myusaerrands.com>"),
   // Reply-to address surfaced in transactional templates ("Reply to
-  // support@…" footer). Separate from EMAIL_FROM so the From line can
-  // be a noreply alias while replies still land in support's inbox.
+  // hello@…" footer). Separate from EMAIL_FROM so the From line can
+  // be a noreply alias while replies still land in the team inbox.
   EMAIL_REPLY_TO: z
     .string()
     .regex(/^[^@\s]+@[^@\s]+\.[^@\s]+$/, "Must be a plain email address.")
-    .default("support@usaerrands.com"),
+    .default("hello@myusaerrands.com"),
   // Comma-separated list of operations email addresses that receive admin
   // alerts (new PSN submitted, new shopper request, KYC submitted, buyer
   // message in shopper thread). Empty list = no admin emails (in-app

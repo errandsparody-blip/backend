@@ -63,6 +63,49 @@ export const updateProductSchema = createProductSchema
   });
 export type UpdateProductInput = z.infer<typeof updateProductSchema>;
 
+/**
+ * Admin-side override for product details. Used by the warehouse
+ * after physically weighing / measuring incoming inventory when the
+ * vendor's declared values are wrong.
+ *
+ * Intentionally NARROWER than `updateProductSchema`:
+ *   - `code`, `name`, `variant`, `imageUrl`, `status` are NOT accepted.
+ *     Editing them would break the SKU id format, the warehouse pick
+ *     list, the photographic audit trail, or the archive lifecycle.
+ *   - All remaining fields are optional so a partial edit (e.g.
+ *     weightOz only) leaves the rest untouched.
+ *   - `reason` is a free-text note (up to 280 chars) recorded on the
+ *     audit row — "warehouse re-weighed", "customs correction", etc.
+ */
+export const adminEditProductSchema = z
+  .object({
+    hsCode: z.string().min(4).max(12).optional(),
+    countryOfOrigin: isoCountrySchema.optional(),
+    declaredValueCents: z.number().int().nonnegative().optional(),
+    weightOz: weightSchema.optional(),
+    lengthIn: optionalDimension,
+    widthIn: optionalDimension,
+    heightIn: optionalDimension,
+    storageTier: storageTierSchema.optional(),
+    reason: z.string().trim().min(1).max(280).optional(),
+  })
+  .strict()
+  // At least one substantive field must be present — a reason without
+  // any edit is a no-op that just clutters the audit log.
+  .refine(
+    (v) =>
+      v.weightOz !== undefined ||
+      v.lengthIn !== undefined ||
+      v.widthIn !== undefined ||
+      v.heightIn !== undefined ||
+      v.declaredValueCents !== undefined ||
+      v.hsCode !== undefined ||
+      v.countryOfOrigin !== undefined ||
+      v.storageTier !== undefined,
+    { message: "At least one field must be set." },
+  );
+export type AdminEditProductInput = z.infer<typeof adminEditProductSchema>;
+
 export const listProductsSchema = z.object({
   status: z.enum(["ACTIVE", "ARCHIVED"]).optional(),
   search: z.string().min(1).max(120).optional(),
