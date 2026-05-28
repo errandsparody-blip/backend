@@ -140,8 +140,10 @@ export class StorageBillingJob {
    * the boxes that contributed, so the caller can atomically advance
    * their `nextBillingDate` after a successful debit.
    *
-   * Filter: status = ACTIVE AND nextBillingDate <= today. EMPTY and
-   * REMOVED boxes are excluded.
+   * Filter: status = ACTIVE AND nextBillingDate IS NOT NULL AND
+   * nextBillingDate <= today. EMPTY and REMOVED boxes are excluded;
+   * so are ADD_TO_PALLET boxes (migration 0036 marks them with a null
+   * nextBillingDate because the parent pallet bills for them).
    *
    * Pallets (rate = null) are skipped — they're priced per quote and
    * billed manually outside this cron path.
@@ -151,6 +153,12 @@ export class StorageBillingJob {
     schedule: FeeSchedule,
     today: Date,
   ): Promise<{ totalCents: number; billableBoxes: BillableBox[] }> {
+    // Prisma's `lte` operator never matches NULL values (SQL standard
+    // NULL semantics — any comparison with NULL is UNKNOWN, never true).
+    // That means bundled boxes (nextBillingDate = NULL after migration
+    // 0036) are automatically excluded from this query without an extra
+    // predicate, and the post-query null-guard in the loop below is a
+    // belt-and-braces defence rather than the primary filter.
     const where: Prisma.StorageBoxWhereInput = {
       vendorId,
       status: "ACTIVE",
@@ -163,10 +171,17 @@ export class StorageBillingJob {
     let totalCents = 0;
     const billableBoxes: BillableBox[] = [];
     for (const box of eligible) {
+      // The query already excludes null dates, but the column type is
+      // now Date | null after migration 0036, so we narrow explicitly.
+      if (box.nextBillingDate === null) continue;
       const per = schedule.monthlyStorage[box.tier];
       if (per === null || per === undefined) continue; // pallets are negotiated
       totalCents += per;
-      billableBoxes.push(box);
+      billableBoxes.push({
+        id: box.id,
+        tier: box.tier,
+        nextBillingDate: box.nextBillingDate,
+      });
     }
     return { totalCents, billableBoxes };
   }

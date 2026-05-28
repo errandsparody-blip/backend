@@ -200,10 +200,33 @@ export interface VendorRecurringStorage {
      * filled multiple buckets with different intake months, this is
      * the soonest of those dates — the vendor sees "PSN X first bills
      * on Y" which is the actionable bit. Null when no contributing
-     * SKUs survive (rare; shouldn't render in that case anyway).
+     * SKUs survive (rare; shouldn't render in that case anyway), or
+     * when every box is bundled with a parent pallet (ADD_TO_PALLET
+     * shipments — see `isBundledWithParentPallet`).
      */
     firstBillingDate: string | null;
+    /**
+     * Migration 0036 — true when every box on this PSN is bundled with
+     * an existing parent pallet (ADD_TO_PALLET shipping mode). These
+     * PSNs don't generate their own monthly bill — the parent pallet's
+     * $45/mo already covers them — but they're surfaced here so the
+     * vendor sees the inventory they paid stocking on.
+     */
+    isBundledWithParentPallet: boolean;
   }>;
+  /**
+   * Migration 0036 — total boxes the vendor has that are bundled into
+   * an existing parent pallet and so don't bill independently. Surfaced
+   * as a headline so vendors who ship ADD_TO_PALLET can see what they
+   * paid stocking on without thinking the system "lost" it.
+   */
+  bundledBoxCount: number;
+  /**
+   * Migration 0036 — per-tier breakdown of the bundled boxes above.
+   * Maps "SMALL" → 3, "LARGE" → 1, etc. Empty object when the vendor
+   * has no bundled boxes.
+   */
+  bundledByTier: Record<string, number>;
   history: Array<{
     id: string;
     amountCents: number;
@@ -309,14 +332,43 @@ export class VendorService {
         tier as keyof NonNullable<typeof schedule>["monthlyStorage"]
       ] ?? null;
 
-    // 1. Per-tier breakdown across every ACTIVE box. This is the
+    // Migration 0036 — split active boxes into the two billing modes:
+    //   - billingBoxes:  nextBillingDate IS NOT NULL → bill on cycle
+    //   - bundledBoxes:  nextBillingDate IS NULL     → covered by an
+    //     existing parent pallet's $45/mo (ADD_TO_PALLET shipments)
+    // Every downstream calc that touches dates or dollar totals runs
+    // off `billingBoxes`; `bundledBoxes` are surfaced separately so the
+    // vendor sees the inventory they paid stocking on.
+    const billingBoxes: Array<{
+      id: string;
+      tier: string;
+      receivedAt: Date;
+      nextBillingDate: Date;
+      psnId: string;
+    }> = [];
+    const bundledBoxes: Array<{ id: string; tier: string; psnId: string }> = [];
+    for (const b of activeBoxes) {
+      if (b.nextBillingDate === null) {
+        bundledBoxes.push({ id: b.id, tier: String(b.tier), psnId: b.psnId });
+      } else {
+        billingBoxes.push({
+          id: b.id,
+          tier: String(b.tier),
+          receivedAt: b.receivedAt,
+          nextBillingDate: b.nextBillingDate,
+          psnId: b.psnId,
+        });
+      }
+    }
+
+    // 1. Per-tier breakdown across every BILLING box. This is the
     //    steady-state monthly cost view — answers "what does keeping
     //    everything in storage cost me each month, regardless of
-    //    grace periods?".
+    //    grace periods?". Bundled boxes contribute $0 because their
+    //    parent pallet's monthly bill already covers them.
     const perTierCounts = new Map<string, number>();
-    for (const b of activeBoxes) {
-      const tier = String(b.tier);
-      perTierCounts.set(tier, (perTierCounts.get(tier) ?? 0) + 1);
+    for (const b of billingBoxes) {
+      perTierCounts.set(b.tier, (perTierCounts.get(b.tier) ?? 0) + 1);
     }
     const perTier: VendorRecurringStorage["perTier"] = [];
     let monthlyTotalCents = 0;
@@ -333,20 +385,29 @@ export class VendorService {
     }
     perTier.sort((a, b) => a.tier.localeCompare(b.tier));
 
+    // 1b. Per-tier breakdown of bundled boxes — surfaced separately so
+    //     the vendor sees their full inventory footprint without
+    //     conflating it with the billing total.
+    const bundledByTier: Record<string, number> = {};
+    for (const b of bundledBoxes) {
+      bundledByTier[b.tier] = (bundledByTier[b.tier] ?? 0) + 1;
+    }
+
     // 2. Count boxes still inside their 30-day grace period — the
     //    headline annotation tells the vendor how many boxes are
     //    "joining later" so they aren't surprised when the next
     //    charge is smaller than `monthlyTotalCents`.
-    const deferredCount = activeBoxes.filter((b) => b.nextBillingDate > todayUtc).length;
+    const deferredCount = billingBoxes.filter((b) => b.nextBillingDate > todayUtc).length;
 
-    // 3. Upcoming charges — group every active box by its own
+    // 3. Upcoming charges — group every BILLING box by its own
     //    `nextBillingDate`. Past-due boxes collapse into a single
-    //    "today" group (they'll bill on tonight's cron run).
+    //    "today" group (they'll bill on tonight's cron run). Bundled
+    //    boxes never appear here.
     const upcomingGroups = new Map<
       string,
       Map<string, { quantity: number; rateCents: number | null }>
     >();
-    for (const b of activeBoxes) {
+    for (const b of billingBoxes) {
       const billingDate = b.nextBillingDate < todayUtc ? todayUtc : b.nextBillingDate;
       const groupKey = new Date(
         Date.UTC(
@@ -355,18 +416,17 @@ export class VendorService {
           billingDate.getUTCDate(),
         ),
       ).toISOString();
-      const tier = String(b.tier);
-      const rate = rateFor(tier);
+      const rate = rateFor(b.tier);
       let tierMap = upcomingGroups.get(groupKey);
       if (!tierMap) {
         tierMap = new Map();
         upcomingGroups.set(groupKey, tierMap);
       }
-      const existing = tierMap.get(tier);
+      const existing = tierMap.get(b.tier);
       if (existing) {
         existing.quantity += 1;
       } else {
-        tierMap.set(tier, { quantity: 1, rateCents: rate });
+        tierMap.set(b.tier, { quantity: 1, rateCents: rate });
       }
     }
     const upcomingCharges: VendorRecurringStorage["upcomingCharges"] = [];
@@ -383,36 +443,53 @@ export class VendorService {
       upcomingCharges.push({ startsBilling, totalCents, lines });
     }
 
-    // 4. Per-PSN — group boxes by their psnId, compute that PSN's
-    //    monthly cost (sum of box rates), find the earliest billing
-    //    date among its boxes. A PSN with all boxes flagged EMPTY /
-    //    REMOVED simply doesn't appear here because activeBoxes
-    //    won't contain any of its rows.
+    // 4. Per-PSN — group every active box (billing + bundled) by its
+    //    psnId. A PSN whose boxes are ALL bundled (ADD_TO_PALLET ships)
+    //    appears here with monthlyCents=0, firstBillingDate=null, and
+    //    isBundledWithParentPallet=true so the frontend can render a
+    //    "Bundled with pallet" badge instead of an empty cost. A PSN
+    //    with all boxes flagged EMPTY / REMOVED simply doesn't appear
+    //    because activeBoxes won't contain any of its rows.
     const psnIndex = new Map(ownerPsns.map((p) => [p.id, p]));
     const perPsnAgg = new Map<
       string,
       {
         monthlyCents: number;
         boxCount: number;
+        bundledBoxCount: number;
         tierCounts: Record<string, number>;
         firstBillingDate: Date | null;
       }
     >();
-    for (const b of activeBoxes) {
-      const tier = String(b.tier);
-      const rate = rateFor(tier);
-      const existing = perPsnAgg.get(b.psnId) ?? {
-        monthlyCents: 0,
-        boxCount: 0,
-        tierCounts: {} as Record<string, number>,
-        firstBillingDate: null as Date | null,
-      };
+    const initAgg = (): {
+      monthlyCents: number;
+      boxCount: number;
+      bundledBoxCount: number;
+      tierCounts: Record<string, number>;
+      firstBillingDate: Date | null;
+    } => ({
+      monthlyCents: 0,
+      boxCount: 0,
+      bundledBoxCount: 0,
+      tierCounts: {},
+      firstBillingDate: null,
+    });
+    for (const b of billingBoxes) {
+      const rate = rateFor(b.tier);
+      const existing = perPsnAgg.get(b.psnId) ?? initAgg();
       if (rate != null) existing.monthlyCents += rate;
       existing.boxCount += 1;
-      existing.tierCounts[tier] = (existing.tierCounts[tier] ?? 0) + 1;
+      existing.tierCounts[b.tier] = (existing.tierCounts[b.tier] ?? 0) + 1;
       if (existing.firstBillingDate === null || b.nextBillingDate < existing.firstBillingDate) {
         existing.firstBillingDate = b.nextBillingDate;
       }
+      perPsnAgg.set(b.psnId, existing);
+    }
+    for (const b of bundledBoxes) {
+      const existing = perPsnAgg.get(b.psnId) ?? initAgg();
+      existing.boxCount += 1;
+      existing.bundledBoxCount += 1;
+      existing.tierCounts[b.tier] = (existing.tierCounts[b.tier] ?? 0) + 1;
       perPsnAgg.set(b.psnId, existing);
     }
 
@@ -420,6 +497,11 @@ export class VendorService {
     for (const [psnId, agg] of perPsnAgg) {
       const p = psnIndex.get(psnId);
       if (!p) continue;
+      // PSN is "bundled" when every contributing box is bundled — that's
+      // the ADD_TO_PALLET case. A mixed PSN (which shouldn't happen but
+      // can theoretically exist via consolidation) renders normally.
+      const isBundledWithParentPallet =
+        agg.bundledBoxCount > 0 && agg.bundledBoxCount === agg.boxCount;
       perPsn.push({
         psnId,
         status: String(p.status),
@@ -434,6 +516,7 @@ export class VendorService {
         contributingTierCounts: agg.tierCounts,
         monthlyEstimateCents: agg.monthlyCents,
         firstBillingDate: agg.firstBillingDate?.toISOString() ?? null,
+        isBundledWithParentPallet,
       });
     }
     perPsn.sort((a, b) => b.monthlyEstimateCents - a.monthlyEstimateCents);
@@ -450,13 +533,15 @@ export class VendorService {
       monthlyEstimateCents: nextChargeAmountCents,
       negotiatedTierSkuCount: negotiatedTierBoxCount,
       // `activeSkuCount` field name preserved for back-compat; value
-      // is the active box count.
+      // is the active box count (billing + bundled).
       activeSkuCount: activeBoxes.length,
       coveredAtIntakeSkuCount: deferredCount,
       nextChargeAt,
       upcomingCharges,
       perTier,
       perPsn,
+      bundledBoxCount: bundledBoxes.length,
+      bundledByTier,
       history: recentStorage.map((l) => ({
         id: l.id,
         amountCents: l.amountCents,

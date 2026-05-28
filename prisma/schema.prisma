@@ -573,7 +573,10 @@ model StorageBox {
 
   tier                StorageTier
   receivedAt          DateTime         @map("received_at")
-  nextBillingDate     DateTime         @map("next_billing_date") @db.Date
+  // Migration 0036 — null means "bundled with parent pallet, do not
+  // bill independently". Used for ADD_TO_PALLET boxes; the parent
+  // pallet's StorageBox row keeps billing. The cron filters NULLs.
+  nextBillingDate     DateTime?        @map("next_billing_date") @db.Date
 
   status              StorageBoxStatus @default(ACTIVE)
 

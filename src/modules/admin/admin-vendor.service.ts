@@ -809,7 +809,10 @@ export class AdminVendorService {
       tier: string;
       status: string;
       receivedAt: string;
-      nextBillingDate: string;
+      // Migration 0036 — null means "bundled with parent pallet, not
+      // billed independently". UI should render those rows with a
+      // "Bundled" badge instead of a charge date.
+      nextBillingDate: string | null;
       palletContentTier: string | null;
       palletContentCount: number | null;
       statusNote: string | null;
@@ -844,7 +847,9 @@ export class AdminVendorService {
       tier: String(r.tier),
       status: String(r.status),
       receivedAt: r.receivedAt.toISOString(),
-      nextBillingDate: r.nextBillingDate.toISOString(),
+      // Migration 0036 — nullable. NULL → bundled with parent pallet,
+      // not billed independently.
+      nextBillingDate: r.nextBillingDate?.toISOString() ?? null,
       palletContentTier: r.palletContentTier ? String(r.palletContentTier) : null,
       palletContentCount: r.palletContentCount,
       statusNote: r.statusNote,

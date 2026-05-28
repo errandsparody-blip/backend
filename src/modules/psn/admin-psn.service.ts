@@ -227,23 +227,25 @@ export class AdminPsnService {
       // these rows, debits per box on its 30-day anchor, and admin can
       // mark them empty / removed via the consolidate UI.
       //
+      // Migration 0036 — ADD_TO_PALLET PSNs now ALSO create StorageBox
+      // rows, but with nextBillingDate=null so the cron skips them.
+      // That keeps the vendor's recurring-storage view honest (they see
+      // every box they paid stocking on) without double-billing — the
+      // parent pallet's $45/mo keeps covering them.
+      //
       // Guards:
       //   - Skip if boxes already exist for this PSN (idempotent on
       //     re-submission of the receive form).
-      //   - Skip if shippingMode is ADD_TO_PALLET — those boxes are
-      //     folded into an existing pallet and don't create new billing
-      //     rows; the original pallet's StorageBox keeps billing.
       //   - Pull declaredBoxCounts from the up-to-date PSN row so any
       //     in-receive correction by the operator is honoured.
-      if (updated.shippingMode !== "ADD_TO_PALLET") {
-        await this.createStorageBoxesIfNeeded(
-          tx as unknown as Tx,
-          updated.id,
-          updated.vendorId,
-          (updated.declaredBoxCounts ?? {}) as Record<string, number>,
-          updated.receivedAt ?? new Date(),
-        );
-      }
+      await this.createStorageBoxesIfNeeded(
+        tx as unknown as Tx,
+        updated.id,
+        updated.vendorId,
+        (updated.declaredBoxCounts ?? {}) as Record<string, number>,
+        updated.receivedAt ?? new Date(),
+        updated.shippingMode === "ADD_TO_PALLET",
+      );
 
       await this.audit.log({
         actorId,
@@ -261,6 +263,12 @@ export class AdminPsnService {
   /**
    * Insert one StorageBox row per declared box, anchored to receivedAt.
    * No-op when boxes already exist for this PSN (idempotent on retry).
+   *
+   * When `bundledWithParentPallet` is true (ADD_TO_PALLET shipments),
+   * each row's `nextBillingDate` is set to null so the daily billing
+   * cron skips it — the boxes physically exist and are visible to the
+   * vendor on the recurring-storage page, but the parent pallet's own
+   * StorageBox row continues to bill the monthly $45.
    */
   private async createStorageBoxesIfNeeded(
     tx: Tx,
@@ -268,17 +276,20 @@ export class AdminPsnService {
     vendorId: string,
     declaredBoxCounts: Record<string, number>,
     receivedAt: Date,
+    bundledWithParentPallet: boolean = false,
   ): Promise<void> {
     const existing = await tx.storageBox.count({ where: { psnId } });
     if (existing > 0) return;
 
-    const nextBillingDate = computeFirstBillingDate(receivedAt);
+    const nextBillingDate: Date | null = bundledWithParentPallet
+      ? null
+      : computeFirstBillingDate(receivedAt);
     const rows: Array<{
       vendorId: string;
       psnId: string;
       tier: "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET";
       receivedAt: Date;
-      nextBillingDate: Date;
+      nextBillingDate: Date | null;
     }> = [];
 
     for (const [tier, rawCount] of Object.entries(declaredBoxCounts)) {
