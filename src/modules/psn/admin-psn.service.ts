@@ -244,7 +244,7 @@ export class AdminPsnService {
         updated.vendorId,
         (updated.declaredBoxCounts ?? {}) as Record<string, number>,
         updated.receivedAt ?? new Date(),
-        updated.shippingMode === "ADD_TO_PALLET",
+        updated.shippingMode,
       );
 
       await this.audit.log({
@@ -264,11 +264,30 @@ export class AdminPsnService {
    * Insert one StorageBox row per declared box, anchored to receivedAt.
    * No-op when boxes already exist for this PSN (idempotent on retry).
    *
-   * When `bundledWithParentPallet` is true (ADD_TO_PALLET shipments),
-   * each row's `nextBillingDate` is set to null so the daily billing
-   * cron skips it — the boxes physically exist and are visible to the
-   * vendor on the recurring-storage page, but the parent pallet's own
-   * StorageBox row continues to bill the monthly $45.
+   * The `shippingMode` argument governs which rows actually bill:
+   *
+   *   LOOSE          — every row bills independently on its 30-day anchor.
+   *
+   *   PALLET         — the PALLET-tier row(s) bill at the $45/mo pallet
+   *                    rate. Inner-tier rows (LARGE / MEDIUM / SMALL /
+   *                    X_LARGE) are stored with nextBillingDate=null so
+   *                    the cron skips them — they're physically present
+   *                    and visible on the recurring-storage page, but
+   *                    the pallet's $45/mo already covers them. Without
+   *                    this, a 1-pallet × 5-LARGE shipment would bill
+   *                    $45 + 5×$18 = $135 instead of $45 (the bug this
+   *                    branch fixes; see also migration 0036 backfill).
+   *
+   *   ADD_TO_PALLET  — every row uses nextBillingDate=null. The boxes
+   *                    ride inside an existing pallet that's already on
+   *                    the books and billing $45/mo elsewhere; no row
+   *                    on this PSN should bill on its own.
+   *
+   * For PALLET mode, when there is a single inner tier (the common case:
+   * "1 pallet of 5 LARGE"), the helper populates `palletContentTier` /
+   * `palletContentCount` on the pallet row(s) so the UI can render
+   * "PALLET — 5 LARGE boxes inside" without an extra consolidate step.
+   * Mixed-tier pallets leave those fields null for admin to fill in.
    */
   private async createStorageBoxesIfNeeded(
     tx: Tx,
@@ -276,37 +295,103 @@ export class AdminPsnService {
     vendorId: string,
     declaredBoxCounts: Record<string, number>,
     receivedAt: Date,
-    bundledWithParentPallet: boolean = false,
+    shippingMode: "LOOSE" | "PALLET" | "ADD_TO_PALLET" = "LOOSE",
   ): Promise<void> {
     const existing = await tx.storageBox.count({ where: { psnId } });
     if (existing > 0) return;
 
-    const nextBillingDate: Date | null = bundledWithParentPallet
-      ? null
-      : computeFirstBillingDate(receivedAt);
-    const rows: Array<{
-      vendorId: string;
-      psnId: string;
-      tier: "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET";
-      receivedAt: Date;
-      nextBillingDate: Date | null;
-    }> = [];
+    const isPalletMode = shippingMode === "PALLET";
+    const isAddToPalletMode = shippingMode === "ADD_TO_PALLET";
+    const billDateForBillingRows: Date = computeFirstBillingDate(receivedAt);
 
+    // Normalise + filter the declared counts into a clean list. Anything
+    // that isn't a real StorageTier or a positive integer is dropped here
+    // so the row-building loop below stays simple.
+    const VALID_TIERS = ["SMALL", "MEDIUM", "LARGE", "X_LARGE", "PALLET"] as const;
+    type Tier = (typeof VALID_TIERS)[number];
+    const entries: Array<{ tier: Tier; count: number }> = [];
     for (const [tier, rawCount] of Object.entries(declaredBoxCounts)) {
       const count =
         typeof rawCount === "number" ? rawCount : Number.parseInt(String(rawCount), 10);
       if (!Number.isFinite(count) || count <= 0) continue;
-      // Defensive: skip any tier value that isn't a real StorageTier.
-      // The Zod schema on PSN create already guards the vendor input but
-      // we add a belt-and-braces check here for legacy rows.
-      if (!["SMALL", "MEDIUM", "LARGE", "X_LARGE", "PALLET"].includes(tier)) continue;
+      if (!(VALID_TIERS as readonly string[]).includes(tier)) continue;
+      entries.push({ tier: tier as Tier, count });
+    }
+    if (entries.length === 0) return;
+
+    // For PALLET mode, work out the inner-tier story so we can populate
+    // `palletContentTier` / `palletContentCount` on the pallet row(s)
+    // when the shipment is single-tier (the common case).
+    let palletContentTier: Tier | null = null;
+    let totalInnerBoxes = 0;
+    if (isPalletMode) {
+      const innerTiers = entries.filter((e) => e.tier !== "PALLET");
+      totalInnerBoxes = innerTiers.reduce((sum, e) => sum + e.count, 0);
+      // Only populate palletContentTier when there's exactly one inner
+      // tier (e.g. all 5 inner boxes are LARGE). Mixed-tier pallets
+      // can't be represented in a single column, so we leave the field
+      // null and let admin fill it in via the consolidate dialog.
+      palletContentTier =
+        innerTiers.length === 1 && innerTiers[0] !== undefined ? innerTiers[0].tier : null;
+    }
+    const palletCount = isPalletMode
+      ? (entries.find((e) => e.tier === "PALLET")?.count ?? 0)
+      : 0;
+    // When palletContentTier is known and there's exactly one pallet,
+    // every inner box can be attributed to it. Multi-pallet shipments
+    // distribute evenly (5 LARGE across 2 pallets → ~2 each); the math
+    // doesn't have to be perfect because the inner rows aren't billing —
+    // it's only a display hint for the pallet's contents line.
+    const innerPerPallet =
+      palletContentTier !== null && palletCount > 0
+        ? Math.round(totalInnerBoxes / palletCount)
+        : null;
+
+    const rows: Array<{
+      vendorId: string;
+      psnId: string;
+      tier: Tier;
+      receivedAt: Date;
+      nextBillingDate: Date | null;
+      palletContentTier: Tier | null;
+      palletContentCount: number | null;
+    }> = [];
+
+    for (const { tier, count } of entries) {
+      const isInnerTier = tier !== "PALLET";
+
+      // Bill-date decision tree:
+      //   ADD_TO_PALLET → every row bundled (null)
+      //   PALLET + inner tier → bundled into the pallet's row (null)
+      //   PALLET + PALLET tier → bills (the pallet itself)
+      //   LOOSE → bills
+      let billDate: Date | null;
+      if (isAddToPalletMode) {
+        billDate = null;
+      } else if (isPalletMode && isInnerTier) {
+        billDate = null;
+      } else {
+        billDate = billDateForBillingRows;
+      }
+
+      // Contents annotation only applies to PALLET-tier rows in PALLET
+      // mode with a single inner tier. Everything else is null.
+      const contentTier: Tier | null =
+        isPalletMode && tier === "PALLET" && palletContentTier !== null
+          ? palletContentTier
+          : null;
+      const contentCount: number | null =
+        contentTier !== null && innerPerPallet !== null ? innerPerPallet : null;
+
       for (let i = 0; i < count; i++) {
         rows.push({
           vendorId,
           psnId,
-          tier: tier as "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET",
+          tier,
           receivedAt,
-          nextBillingDate,
+          nextBillingDate: billDate,
+          palletContentTier: contentTier,
+          palletContentCount: contentCount,
         });
       }
     }

@@ -48,3 +48,23 @@ FROM "psns" p
 WHERE p."id" = sb."psn_id"
   AND p."shipping_mode" = 'ADD_TO_PALLET'
   AND sb."next_billing_date" IS NOT NULL;
+
+-- 4. Corrective backfill — for PALLET shipments, the inner-tier rows
+--    (LARGE / MEDIUM / SMALL / X_LARGE) ride inside the pallet's
+--    $45/mo billing line and must not bill independently. The 0035
+--    backfill (and the receive flow before this migration's companion
+--    code change) seeded one independent billing row per inner box,
+--    which would result in $45 + N × (inner-box rate) per cycle
+--    instead of the correct $45.
+--
+--    Null out next_billing_date for every non-PALLET-tier row whose
+--    owning PSN is PALLET-mode. The PALLET-tier row(s) on the same
+--    PSN keep their date and continue to bill the $45/mo as intended.
+UPDATE "storage_boxes" sb
+SET "next_billing_date" = NULL,
+    "updated_at"        = now()
+FROM "psns" p
+WHERE p."id"             = sb."psn_id"
+  AND p."shipping_mode"  = 'PALLET'
+  AND sb."tier"         <> 'PALLET'
+  AND sb."next_billing_date" IS NOT NULL;
