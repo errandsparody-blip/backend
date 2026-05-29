@@ -37,17 +37,59 @@ async function bootstrap(): Promise<void> {
   // any other middleware can interfere with the response.
   //
   // The allow-list is the canonical WEB_PUBLIC_URL plus any extras from
-  // WEB_ALLOWED_ORIGINS — useful for apex + www, staging mirrors, or Vercel
-  // preview deployments. Duplicates are de-duped via Set.
-  const allowedOrigins = Array.from(
+  // WEB_ALLOWED_ORIGINS. Entries can be either:
+  //   - An exact origin     (https://myusaerrands.com)
+  //   - A glob with `*`     (https://*-blips-projects.vercel.app)
+  //
+  // Glob support is here because Vercel preview deploys land on a unique
+  // hash per build (frontend-<hash>-<project>.vercel.app), making exact
+  // enumeration impossible. One glob entry covers the whole project's
+  // preview range without re-deploying the API on every PR build.
+  //
+  // The `*` translates to one-or-more of `[a-zA-Z0-9-]` — broad enough
+  // for Vercel hashes (alnum + hyphens) but tight enough to refuse
+  // `https://evil.com/.errandsparody-blips-projects.vercel.app` style
+  // homograph attempts.
+  const rawEntries = Array.from(
     new Set([cfg.WEB_PUBLIC_URL, ...cfg.WEB_ALLOWED_ORIGINS]),
   );
+  const exactOrigins = new Set<string>();
+  const globPatterns: RegExp[] = [];
+  for (const entry of rawEntries) {
+    if (entry.includes("*")) {
+      // Escape regex metacharacters, then expand `*` → `[a-zA-Z0-9-]+`.
+      const escaped = entry
+        .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, "[a-zA-Z0-9-]+");
+      globPatterns.push(new RegExp(`^${escaped}$`));
+    } else {
+      exactOrigins.add(entry);
+    }
+  }
+  const isOriginAllowed = (origin: string): boolean => {
+    if (exactOrigins.has(origin)) return true;
+    return globPatterns.some((re) => re.test(origin));
+  };
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
     rawBody: true,
     cors: {
-      origin: allowedOrigins,
+      // Function form (vs. array of strings) so we can apply both exact
+      // and glob matching above. Callback signature comes from the cors
+      // npm package; a falsy origin (no Origin header — same-origin or
+      // curl-style requests) is always allowed since CORS only gates
+      // cross-origin browser fetches.
+      origin: (
+        origin: string | undefined,
+        callback: (err: Error | null, allow?: boolean) => void,
+      ) => {
+        if (!origin || isOriginAllowed(origin)) {
+          callback(null, true);
+          return;
+        }
+        callback(new Error(`Origin ${origin} not allowed by CORS allowlist.`));
+      },
       credentials: true,
       methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
       allowedHeaders: ["Authorization", "Content-Type", "X-Correlation-Id", "Idempotency-Key"],
