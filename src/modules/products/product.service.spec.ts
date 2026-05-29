@@ -136,6 +136,9 @@ describe("ProductService — tenant isolation (IDOR)", () => {
     widthIn: 9,
     heightIn: 1,
     storageTier: "SMALL",
+    // imageUrl is required on create as of the "product image required"
+    // change — fixtures supply a stub URL so the schema accepts them.
+    imageUrl: "https://images.example.com/tsh-blk-m.jpg",
   } as const;
 
   beforeEach(async () => {

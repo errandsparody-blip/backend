@@ -24,20 +24,29 @@ const optionalDimension = dimensionSchema.nullable().optional();
 // lives in for monthly storage billing. Different from PSN box mix.
 const storageTierSchema = z.enum(["SMALL", "MEDIUM", "LARGE", "X_LARGE", "PALLET"]);
 
-// Optional product image URL. Must be a fully-qualified http(s) URL — we
-// don't accept raw paths so a typo can't poison the buyer-visible view.
-// Capped at 2048 chars (de-facto browser URL limit). An empty string from
-// the form normalises to `null`, which clears the image. `null` and
-// `undefined` both round-trip as "no image set".
-const imageUrlField = z
+// Strict http(s) URL — capped at 2048 chars (de-facto browser URL
+// limit). Shared by both schemas below.
+const imageUrlString = z
   .string()
   .trim()
   .url("Must be a fully-qualified URL.")
   .max(2048, "URL is too long.")
-  .refine((u) => /^https?:\/\//i.test(u), "Only http/https URLs are accepted.")
-  .nullable()
-  .optional()
-  .or(z.literal("").transform(() => null));
+  .refine((u) => /^https?:\/\//i.test(u), "Only http/https URLs are accepted.");
+
+// Image is REQUIRED on create. Vendors must upload a product photo
+// before they can save — the image is what the admin receiver uses to
+// visually match incoming stock against the declaration, and what
+// buyers see in customs and order views. The schema rejects null,
+// undefined, and empty string outright.
+const imageUrlRequired = imageUrlString;
+
+// Image is OPTIONAL on update. Existing products created before the
+// requirement landed have no image and must still be patchable
+// (vendors can backfill the photo by uploading later). `null` clears
+// the field, empty string normalises to `null`, an http(s) URL sets it.
+const imageUrlOptional = z
+  .union([imageUrlString, z.literal("").transform(() => null), z.null()])
+  .optional();
 
 export const createProductSchema = z.object({
   code: productCodeSchema,
@@ -51,14 +60,19 @@ export const createProductSchema = z.object({
   widthIn: optionalDimension,
   heightIn: optionalDimension,
   storageTier: storageTierSchema.default("SMALL"),
-  imageUrl: imageUrlField,
+  imageUrl: imageUrlRequired,
 });
 export type CreateProductInput = z.infer<typeof createProductSchema>;
 
+// Update reuses the create shape but loosens `imageUrl` back to
+// optional/nullable so PATCH bodies can omit it (keep existing) or
+// clear it via null. `code` is also dropped — product codes are
+// immutable post-create.
 export const updateProductSchema = createProductSchema
-  .omit({ code: true })
+  .omit({ code: true, imageUrl: true })
   .partial()
   .extend({
+    imageUrl: imageUrlOptional,
     status: z.enum(["ACTIVE", "ARCHIVED"]).optional(),
   });
 export type UpdateProductInput = z.infer<typeof updateProductSchema>;
