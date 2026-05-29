@@ -834,6 +834,61 @@ export function psnReceivedTemplate(args: {
 }
 
 // ---------------------------------------------------------------------------
+// Storage box lifecycle — admin-initiated consolidation
+// ---------------------------------------------------------------------------
+
+/**
+ * Sent when admin marks a vendor's storage box EMPTY, REMOVED, or
+ * restores it to ACTIVE. The vendor gets a transparency record of every
+ * change the warehouse makes to their footprint, with the admin's note
+ * (if any) so they understand the reason without needing to ask.
+ *
+ * `action` drives the subject + headline copy:
+ *   - "marked_empty" → billing stops on the box; row stays for audit.
+ *   - "removed"      → consolidated out of warehouse; permanent.
+ *   - "restored"     → previously empty/removed box back to billing.
+ */
+export function storageBoxConsolidatedTemplate(args: {
+  action: "marked_empty" | "removed" | "restored";
+  tier: string;
+  note: string | null;
+}): RenderedEmail {
+  const tierLabel = args.tier === "X_LARGE" ? "extra-large" : args.tier.toLowerCase();
+  const subjects = {
+    marked_empty: `One of your ${tierLabel} boxes was marked empty`,
+    removed: `One of your ${tierLabel} boxes was removed from billing`,
+    restored: `One of your ${tierLabel} boxes is back in active billing`,
+  } as const;
+  const headlines = {
+    marked_empty: "Storage box marked empty",
+    removed: "Storage box removed from billing",
+    restored: "Storage box restored to active",
+  } as const;
+  const intros = {
+    marked_empty: `Our warehouse team flagged one of your <strong>${escape(tierLabel)}</strong> boxes as empty. Monthly storage billing on it has stopped; the audit record stays in place.`,
+    removed: `Our warehouse team consolidated your inventory and removed one of your <strong>${escape(tierLabel)}</strong> boxes from your storage footprint. It will no longer bill.`,
+    restored: `Our warehouse team restored one of your <strong>${escape(tierLabel)}</strong> boxes back to active billing. The original 30-day cycle resumes from where it left off (no clock reset).`,
+  } as const;
+  const noteBlock = args.note
+    ? `<p style="margin:12px 0 0 0;color:#666;"><em>Operator note:</em> ${escape(args.note)}</p>`
+    : "";
+  return {
+    subject: subjects[args.action],
+    html: shell({
+      eyebrow: "[04] Storage update",
+      title: headlines[args.action],
+      bodyHtml: `<p style="margin:0 0 12px 0;">${intros[args.action]}</p>${noteBlock}`,
+      cta: { label: "View recurring storage", href: `${cfg.WEB_PUBLIC_URL}/wallet/recurring` },
+    }),
+    text:
+      `${headlines[args.action]}\n\n` +
+      `${intros[args.action].replace(/<[^>]+>/g, "")}\n` +
+      (args.note ? `Operator note: ${args.note}\n` : "") +
+      `\nView: ${cfg.WEB_PUBLIC_URL}/wallet/recurring`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Orders — vendor-facing
 // ---------------------------------------------------------------------------
 

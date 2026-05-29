@@ -644,6 +644,67 @@ export class AdminPsnService {
   }
 
   /**
+   * Close out a DISCREPANCY PSN with the previously-recorded
+   * quantities accepted as final. Used when the operator has
+   * physically reconciled the shipment with the vendor (e.g. the
+   * vendor confirmed the missing items were never sent, or a follow-up
+   * conversation established that the partial receipt is final) and
+   * just needs to stop the PSN from sitting in DISCREPANCY forever.
+   *
+   * Does NOT change line quantities or create additional inventory —
+   * everything that was going to be received already was during the
+   * original `completeReceiving` call. This action only flips the PSN
+   * status to RECEIVED and records the reconciliation note in the
+   * audit log.
+   *
+   * Allowed from: DISCREPANCY only. Use `reject` or `requestReturn`
+   * if the resolution is "send it back" rather than "accept as-is".
+   */
+  async resolveDiscrepancy(
+    psnId: string,
+    actorId: string,
+    input: { resolutionNote: string },
+  ): Promise<{ psnId: string; status: PsnStatus }> {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const psn = await tx.psn.findUnique({ where: { id: psnId } });
+      if (!psn) throw new NotFoundException();
+      if (psn.status !== "DISCREPANCY") {
+        throw new ConflictException({
+          message: `PSN in status ${psn.status} cannot be resolved as accepted; this action is only valid for DISCREPANCY.`,
+          code: "psn_resolve_blocked",
+        });
+      }
+
+      const updated = await tx.psn.update({
+        where: { id: psnId },
+        data: {
+          status: "RECEIVED" as PsnStatus,
+          // The PSN was already received once — keep that original
+          // receivedAt timestamp intact so historical reports stay
+          // accurate. We don't overwrite it with the resolution time.
+          receivedAt: psn.receivedAt ?? new Date(),
+        },
+      });
+
+      return { before: psn.status, updated };
+    });
+
+    await this.audit.log({
+      actorId,
+      action: "psn.discrepancy_resolved",
+      resourceType: "psn",
+      resourceId: psnId,
+      beforeState: { status: result.before },
+      afterState: {
+        status: result.updated.status,
+        resolutionNote: input.resolutionNote,
+      },
+    });
+
+    return { psnId, status: result.updated.status };
+  }
+
+  /**
    * Initiate a customer return — the package ships back to the vendor's
    * address unopened. Vendor's wallet is debited for the return shipping
    * cost (estimate, since we may not have actuals yet).

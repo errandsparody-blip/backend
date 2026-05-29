@@ -150,6 +150,19 @@ export const rejectPsnSchema = z.object({
 });
 export type RejectPsnInput = z.infer<typeof rejectPsnSchema>;
 
+// Close out a DISCREPANCY PSN with the previously-recorded quantities
+// accepted as final. The note is required so the audit log has a
+// human-readable record of how the discrepancy was reconciled
+// (vendor confirmation, follow-up shipment arrived separately, etc).
+export const resolveDiscrepancySchema = z.object({
+  resolutionNote: z
+    .string()
+    .trim()
+    .min(10, "Describe how the discrepancy was resolved in at least 10 characters.")
+    .max(500),
+});
+export type ResolveDiscrepancyInput = z.infer<typeof resolveDiscrepancySchema>;
+
 export const requestPsnReturnSchema = z.object({
   reason: z.string().trim().min(10, "Explain the return reason in at least 10 characters.").max(500),
   // Estimated return shipping. Admin enters this from their carrier quote

@@ -33,6 +33,7 @@ import {
   kycApprovedTemplate,
   kycRejectedTemplate,
   kycResubmissionTemplate,
+  storageBoxConsolidatedTemplate,
 } from "../email/email-templates";
 import { NotificationService } from "../notifications/notification.service";
 
@@ -872,7 +873,9 @@ export class AdminVendorService {
   ): Promise<{ id: string; status: string }> {
     const box = await this.prisma.storageBox.findUnique({
       where: { id: boxId },
-      select: { id: true, status: true, vendorId: true },
+      // `tier` is now selected too because the consolidation notification
+      // sent to the vendor includes the box size in copy + subject line.
+      select: { id: true, status: true, vendorId: true, tier: true },
     });
     if (!box) throw new NotFoundException();
     if (box.status !== "ACTIVE") {
@@ -899,6 +902,17 @@ export class AdminVendorService {
       beforeState: { status: box.status },
       afterState: { status: "EMPTY", note: ctx.note ?? null, vendorId: box.vendorId },
     });
+    // Notify the vendor that their footprint changed. The notification
+    // is non-blocking from the audit's POV — if it fails (e.g. email
+    // provider hiccup) we swallow the error to keep the consolidation
+    // action atomic. The vendor can always see the update on their
+    // /wallet/recurring page even if the email never arrives.
+    await this.notifyVendorOfBoxStatusChange({
+      vendorId: box.vendorId,
+      action: "marked_empty",
+      tier: String(box.tier),
+      note: ctx.note ?? null,
+    });
     return updated;
   }
 
@@ -913,7 +927,7 @@ export class AdminVendorService {
   ): Promise<{ id: string; status: string }> {
     const box = await this.prisma.storageBox.findUnique({
       where: { id: boxId },
-      select: { id: true, status: true, vendorId: true },
+      select: { id: true, status: true, vendorId: true, tier: true },
     });
     if (!box) throw new NotFoundException();
     if (box.status === "REMOVED") {
@@ -940,6 +954,12 @@ export class AdminVendorService {
       beforeState: { status: box.status },
       afterState: { status: "REMOVED", note: ctx.note ?? null, vendorId: box.vendorId },
     });
+    await this.notifyVendorOfBoxStatusChange({
+      vendorId: box.vendorId,
+      action: "removed",
+      tier: String(box.tier),
+      note: ctx.note ?? null,
+    });
     return updated;
   }
 
@@ -955,7 +975,7 @@ export class AdminVendorService {
   ): Promise<{ id: string; status: string }> {
     const box = await this.prisma.storageBox.findUnique({
       where: { id: boxId },
-      select: { id: true, status: true, vendorId: true },
+      select: { id: true, status: true, vendorId: true, tier: true },
     });
     if (!box) throw new NotFoundException();
     if (box.status === "ACTIVE") {
@@ -981,6 +1001,12 @@ export class AdminVendorService {
       resourceId: boxId,
       beforeState: { status: box.status },
       afterState: { status: "ACTIVE", note: ctx.note ?? null, vendorId: box.vendorId },
+    });
+    await this.notifyVendorOfBoxStatusChange({
+      vendorId: box.vendorId,
+      action: "restored",
+      tier: String(box.tier),
+      note: ctx.note ?? null,
     });
     return updated;
   }
@@ -1252,5 +1278,80 @@ export class AdminVendorService {
     // if (args.ownerUserId) {
     //   await this.email.send({ to: ..., type: args.type, userId: args.ownerUserId, ... });
     // }
+  }
+
+  /**
+   * Storage-box consolidation notification. Wraps notifyVendor with the
+   * type / severity / copy specific to the three consolidation outcomes.
+   * Errors are swallowed because the box-status DB write has already
+   * happened and is the source of truth; a flaky notification provider
+   * should not roll that back. The vendor can still see the new state
+   * on their /wallet/recurring page on next refresh.
+   */
+  private async notifyVendorOfBoxStatusChange(args: {
+    vendorId: string;
+    action: "marked_empty" | "removed" | "restored";
+    tier: string;
+    note: string | null;
+  }): Promise<void> {
+    const tierLabel =
+      args.tier === "X_LARGE" ? "extra-large" : args.tier.toLowerCase();
+    const inAppCopy = {
+      marked_empty: {
+        type: "storage_box.marked_empty",
+        severity: "INFO" as const,
+        title: "Storage box marked empty",
+        body: `Admin marked one of your ${tierLabel} boxes as empty. Billing on it has stopped.`,
+      },
+      removed: {
+        type: "storage_box.removed",
+        severity: "INFO" as const,
+        title: "Storage box removed",
+        body: `Admin consolidated one of your ${tierLabel} boxes out of the warehouse. It will no longer bill.`,
+      },
+      restored: {
+        type: "storage_box.restored",
+        severity: "INFO" as const,
+        title: "Storage box restored",
+        body: `Admin restored one of your ${tierLabel} boxes back to active billing. The original 30-day cycle resumes.`,
+      },
+    } as const;
+    const copy = inAppCopy[args.action];
+    // Look up the first active user on the vendor org as the email
+    // recipient. Same pattern as notifyVendor uses for KYC events.
+    const vendor = await this.prisma.vendor.findUnique({
+      where: { id: args.vendorId },
+      select: {
+        users: {
+          where: { status: "ACTIVE" },
+          orderBy: { createdAt: "asc" },
+          take: 1,
+          select: { id: true },
+        },
+      },
+    });
+    try {
+      await this.notifyVendor({
+        vendorId: args.vendorId,
+        type: copy.type,
+        severity: copy.severity,
+        title: copy.title,
+        body: copy.body,
+        href: "/wallet/recurring",
+        email: storageBoxConsolidatedTemplate({
+          action: args.action,
+          tier: args.tier,
+          note: args.note,
+        }),
+        ownerUserId: vendor?.users[0]?.id ?? null,
+      });
+    } catch (err) {
+      // Log but don't rethrow — see method-level comment.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `Failed to notify vendor ${args.vendorId} of storage-box ${args.action}:`,
+        err,
+      );
+    }
   }
 }

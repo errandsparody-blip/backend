@@ -22,12 +22,14 @@ import {
   postPsnMessageSchema,
   rejectPsnSchema,
   requestPsnReturnSchema,
+  resolveDiscrepancySchema,
   type CompleteReceivingInput,
   type ListPsnsInput,
   type PlaceHoldInput,
   type PostPsnMessageInput,
   type RejectPsnInput,
   type RequestPsnReturnInput,
+  type ResolveDiscrepancyInput,
 } from "../../common/schemas/psn.schema";
 import {
   presignShopperUploadSchema,
@@ -100,6 +102,22 @@ export class AdminPsnController {
     @Body(new ZodValidationPipe(rejectPsnSchema)) body: RejectPsnInput,
   ) {
     return this.admin.reject(id, user.sub, body);
+  }
+
+  /**
+   * Close out a DISCREPANCY PSN with the previously-recorded
+   * quantities accepted as final. No inventory change — just flips
+   * status DISCREPANCY → RECEIVED with an audit-logged note explaining
+   * the reconciliation (vendor confirmation, follow-up shipment, etc.).
+   */
+  @Post(":id/resolve-discrepancy")
+  @HttpCode(HttpStatus.OK)
+  resolveDiscrepancy(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(resolveDiscrepancySchema)) body: ResolveDiscrepancyInput,
+  ) {
+    return this.admin.resolveDiscrepancy(id, user.sub, body);
   }
 
   /**
