@@ -1063,13 +1063,7 @@ export function pricingGuideTemplate(args: {
       bodyHtml:
         `<p style="margin:0 0 12px 0;">Hi ${escape(businessName)},</p>` +
         `<p style="margin:0 0 12px 0;">Thanks for your interest in USA Errands. Click the button below to download the full pricing guide as a PDF — it covers per-box storage, pallet pricing, fulfillment, receiving, and our pallet rules.</p>` +
-        `<p style="margin:0 0 12px 0;">A few quick highlights:</p>` +
-        `<ul style="margin:0 0 12px 18px;padding:0;color:#3A3A3A;font-size:14px;line-height:1.7;">` +
-          `<li>Per-box monthly storage from <strong>$9 (Small)</strong> to <strong>$25 (X-Large)</strong></li>` +
-          `<li>Onboarding fee = stocking + first month's storage, charged once per box</li>` +
-          `<li>Standard U.S. pallet storage at <strong>$45/month</strong></li>` +
-          `<li>Fulfillment from <strong>$2.99/order</strong> + $0.99 per additional item</li>` +
-        `</ul>` +
+       
         `<p style="margin:0 0 12px 0;">If you'd like a walk-through or a custom quote for higher volume, just reply to this email.</p>` +
         `<p style="margin:16px 0 0 0;color:#9C9892;font-size:13px;">— The USA Errands team</p>`,
       cta: { label: "Download the price guide", href: args.downloadUrl },
