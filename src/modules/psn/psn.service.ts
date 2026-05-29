@@ -86,7 +86,12 @@ export class PsnService {
     input: ListPsnsInput,
   ): Promise<{ items: PublicPsn[]; nextCursor: string | null }> {
     const where: Prisma.PsnWhereInput = { vendorId };
-    if (input.status) where.status = input.status;
+    // listPsnsSchema now accepts either a single status or an array
+    // (used by the admin History tab). Normalise both shapes into the
+    // Prisma filter so this vendor-facing endpoint keeps working.
+    if (input.status) {
+      where.status = Array.isArray(input.status) ? { in: input.status } : input.status;
+    }
 
     const psns = await this.prisma.psn.findMany({
       where,

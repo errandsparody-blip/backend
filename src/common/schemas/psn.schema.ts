@@ -37,8 +37,48 @@ export type CreatePsnInput = z.infer<typeof createPsnSchema>;
 export const updatePsnDraftSchema = createPsnSchema.partial();
 export type UpdatePsnDraftInput = z.infer<typeof updatePsnDraftSchema>;
 
+// All PSN statuses the admin queue or vendor list may filter on. Includes
+// the post-Migration-0020 lifecycle states (HOLD / REJECTED /
+// RETURN_REQUESTED) so the admin "Received history" tab can surface them
+// alongside RECEIVED and DISCREPANCY.
+const PSN_STATUS_ENUM = z.enum([
+  "DRAFT",
+  "SUBMITTED",
+  "AWAITING_RECEIPT",
+  "PARTIALLY_RECEIVED",
+  "RECEIVED",
+  "DISCREPANCY",
+  "CANCELLED",
+  "HOLD",
+  "REJECTED",
+  "RETURN_REQUESTED",
+]);
+
 export const listPsnsSchema = z.object({
-  status: z.enum(["DRAFT", "SUBMITTED", "AWAITING_RECEIPT", "PARTIALLY_RECEIVED", "RECEIVED", "DISCREPANCY", "CANCELLED"]).optional(),
+  // Accept either a single status or a comma-separated list. The
+  // History tab in the admin receiving page sends a four-status list
+  // (e.g. "RECEIVED,DISCREPANCY,REJECTED,RETURN_REQUESTED"); the legacy
+  // vendor list endpoint and the inbox view send a single status or
+  // nothing. We preprocess into an array of valid statuses so the
+  // downstream service always sees one shape.
+  status: z
+    .preprocess(
+      (v) => {
+        if (v === undefined || v === null || v === "") return undefined;
+        if (Array.isArray(v)) return v;
+        if (typeof v === "string") {
+          const parts = v.split(",").map((x) => x.trim()).filter(Boolean);
+          return parts.length === 1 ? parts[0] : parts;
+        }
+        return v;
+      },
+      z.union([PSN_STATUS_ENUM, z.array(PSN_STATUS_ENUM).min(1)]),
+    )
+    .optional(),
+  // Optional vendor scope. Super admin uses this to narrow the History
+  // tab to a single vendor's shipments without losing the cross-vendor
+  // default.
+  vendorId: z.string().uuid().optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().positive().max(100).default(50),
 });

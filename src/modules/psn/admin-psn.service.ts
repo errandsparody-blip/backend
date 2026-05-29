@@ -50,16 +50,61 @@ export class AdminPsnService {
   // Cross-vendor reads (operator queue)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Cross-vendor PSN list used by both the receiving inbox (default —
+   * AWAITING_RECEIPT + PARTIALLY_RECEIVED, ordered by submittedAt asc so
+   * oldest shipments surface first) and the receiving History tab
+   * (caller passes a comma list of terminal statuses like
+   * "RECEIVED,DISCREPANCY,REJECTED,RETURN_REQUESTED" and we order by
+   * receivedAt desc so the most-recently-processed PSNs come back
+   * first).
+   *
+   * Tenant scoping: super admin can pass `vendorId` to drill into a
+   * single vendor's history without losing the cross-vendor query
+   * surface. Without it, every vendor's PSNs are returned.
+   */
   async listIncoming(input: ListPsnsInput) {
+    // Normalise status into a Prisma filter regardless of whether the
+    // caller passed a single value (legacy single-string form) or a
+    // comma-list (history-tab multi-status form).
+    let statusFilter: Prisma.PsnWhereInput["status"];
+    if (input.status === undefined) {
+      statusFilter = { in: ["AWAITING_RECEIPT", "PARTIALLY_RECEIVED"] };
+    } else if (Array.isArray(input.status)) {
+      statusFilter = { in: input.status };
+    } else {
+      statusFilter = input.status;
+    }
+
+    // Detect "history mode" — any query that touches a terminal status
+    // (RECEIVED / DISCREPANCY / REJECTED / RETURN_REQUESTED) should
+    // order by receivedAt desc so the operator sees the most-recent
+    // shipment first. The default inbox view stays submittedAt asc so
+    // the oldest queued shipment surfaces at the top.
+    const HISTORY_STATUSES = new Set([
+      "RECEIVED",
+      "DISCREPANCY",
+      "REJECTED",
+      "RETURN_REQUESTED",
+    ]);
+    const statusList: string[] = Array.isArray(input.status)
+      ? input.status
+      : input.status
+      ? [input.status]
+      : [];
+    const isHistoryView = statusList.some((s) => HISTORY_STATUSES.has(s));
+
     const where: Prisma.PsnWhereInput = {
-      // Default: only items relevant to receiving.
-      status: input.status ?? { in: ["AWAITING_RECEIPT", "PARTIALLY_RECEIVED"] },
+      status: statusFilter,
+      ...(input.vendorId ? { vendorId: input.vendorId } : {}),
     };
     const psns = await this.prisma.psn.findMany({
       where,
       include: { lines: true, vendor: { select: { id: true, businessName: true } } },
       take: input.limit + 1,
-      orderBy: { submittedAt: "asc" },
+      orderBy: isHistoryView
+        ? [{ receivedAt: "desc" }, { submittedAt: "desc" }]
+        : { submittedAt: "asc" },
       ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
     });
     let nextCursor: string | null = null;
