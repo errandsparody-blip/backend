@@ -42,6 +42,7 @@ import type {
 
 import { loadConfig } from "../../common/config";
 import { loadFeeSchedule } from "../../common/fees";
+import { formatOrderRef } from "../../common/order-ref";
 import {
   aggregateParcel,
   computeOrderFees,
@@ -56,8 +57,10 @@ import type {
   QuoteOrderInput,
 } from "../../common/schemas/order.schema";
 import { AuditService } from "../audit/audit.service";
+import { opsNewOrderTemplate } from "../email/email-templates";
 import { ShippoService, type ShippingRate } from "../integrations/shippo/shippo.service";
 import { SmartyService, type AddressValidationResult } from "../integrations/smarty/smarty.service";
+import { OpsAlertService } from "../notifications/ops-alert.service";
 import { WalletService } from "../wallet/wallet.service";
 
 type Tx = Omit<
@@ -184,6 +187,11 @@ export class OrderService {
     private readonly wallet: WalletService,
     private readonly smarty: SmartyService,
     private readonly shippo: ShippoService,
+    // OpsAlertService fans an email (to OPS_ALERT_EMAILS) plus an
+    // in-app notification (to every active admin user) when a vendor
+    // creates an order, so ops sees the new pick/pack work without
+    // having to refresh the admin orders list.
+    private readonly opsAlerts: OpsAlertService,
   ) {}
 
   // ===========================================================================
@@ -624,6 +632,41 @@ export class OrderService {
         lineCount: input.lines.length,
       },
     });
+
+    // Fire-and-forget ops alert so admin sees the new order in their
+    // inbox AND the admin notification bell. `.catch` swallows so a
+    // flaky email provider can't roll back the order that the vendor's
+    // wallet has already been debited for. Vendor business name is
+    // looked up separately because the order query doesn't include the
+    // vendor relation; one extra row read in exchange for a complete
+    // notification copy is the right trade.
+    void (async (): Promise<void> => {
+      try {
+        const vendor = await this.prisma.vendor.findUnique({
+          where: { id: vendorId },
+          select: { businessName: true },
+        });
+        if (!vendor) return;
+        const ops = opsNewOrderTemplate({
+          orderId: order.id,
+          orderRef: formatOrderRef(order.orderNumber),
+          vendorBusinessName: vendor.businessName,
+          lineCount: input.lines.length,
+          totalChargedCents: order.totalChargedCents,
+        });
+        await this.opsAlerts.send({
+          type: "ops.order.new",
+          subject: ops.subject,
+          html: ops.html,
+          text: ops.text,
+          idempotencyKey: `ops:order:${order.id}`,
+          href: `/admin/orders/${order.id}`,
+        });
+      } catch {
+        // Best-effort — ops alert failures are logged inside the
+        // service itself; nothing to do here.
+      }
+    })();
 
     return this.toPublic(order);
   }

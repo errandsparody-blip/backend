@@ -990,6 +990,29 @@ export function opsNewPsnTemplate(args: {
   };
 }
 
+export function opsNewOrderTemplate(args: {
+  orderId: string;
+  orderRef: string;
+  vendorBusinessName: string;
+  lineCount: number;
+  totalChargedCents: number;
+}): RenderedEmail {
+  const total = `$${(args.totalChargedCents / 100).toFixed(2)}`;
+  return {
+    subject: `[OPS] New order ${args.orderRef} — ${args.vendorBusinessName} (${total})`,
+    html: opsShell({
+      eyebrow: "[Ops] New order",
+      title: `${escape(args.vendorBusinessName)} placed order ${escape(args.orderRef)}`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">${args.lineCount} line(s); total charged ${total}.</p>
+        <p style="margin:0;color:#666;">Wallet has been debited; stock is reserved. The pick / pack workflow can start.</p>`,
+      cta: { label: "Open order", href: `${cfg.WEB_PUBLIC_URL}/admin/orders/${encodeURIComponent(args.orderId)}` },
+    }),
+    text:
+      `[OPS] New order ${args.orderRef} from ${args.vendorBusinessName} — ${args.lineCount} line(s), ${total}.\n` +
+      `${cfg.WEB_PUBLIC_URL}/admin/orders/${args.orderId}`,
+  };
+}
+
 export function opsNewKycTemplate(args: {
   vendorId: string;
   vendorBusinessName: string;
