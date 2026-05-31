@@ -27,6 +27,7 @@
     "prisma:studio": "prisma studio",
     "prisma:seed": "ts-node prisma/seed.ts",
     "dev:delete-user": "ts-node scripts/dev-delete-user.ts",
+    "dev:wipe-vendor-data": "ts-node scripts/prod-wipe-vendor-data.ts",
     "r2:cors": "ts-node scripts/r2-apply-cors.ts"
   },
   "prisma": {
