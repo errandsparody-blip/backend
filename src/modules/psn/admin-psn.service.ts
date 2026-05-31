@@ -207,8 +207,23 @@ export class AdminPsnService {
         if (submitted.damagedQty > 0) anyDiscrepancy = true;
         if (total < declared.declaredQty) anyMissing = true;
 
+        // Delta math — every re-receive on a PARTIALLY_RECEIVED PSN
+        // must compute the CHANGE in accepted qty since the last
+        // receive, not the absolute value. Before this guard the
+        // SkuService blindly incremented `quantityAvailable` by
+        // `submitted.acceptedQty` every time, so an operator who
+        // re-opened a partial and re-typed counts would double-count
+        // inventory (5 of 10 → 8 of 10 made the SKU bucket hit 13
+        // instead of 8). Now:
+        //   delta == 0 → no SKU touch
+        //   delta > 0  → topup the bucket by `delta` only
+        //   delta < 0  → corrective decrement + ADJUST movement
+        const prevAccepted = declared.acceptedQty;
+        const newAccepted = submitted.acceptedQty;
+        const acceptedDelta = newAccepted - prevAccepted;
+
         let skuId: string | null = declared.skuId;
-        if (submitted.acceptedQty > 0) {
+        if (acceptedDelta > 0) {
           // Pull both the variant and the storage tier from the product so
           // the resulting SKU bucket lands in the right tier for monthly
           // storage billing. Pre-0010 rows default to SMALL on the Product
@@ -228,10 +243,37 @@ export class AdminPsnService {
             // Receive into product's own variant; future enhancement: allow
             // operator to override at receiving time.
             variant: product?.variant ?? "STD",
-            qty: submitted.acceptedQty,
+            // Critical: pass the DELTA, not the absolute. The bucket
+            // already contains `prevAccepted` from the previous
+            // receive(s); we only want to add the additional units.
+            qty: acceptedDelta,
             psnId: psn.id,
             actorId,
             storageTier: product?.storageTier,
+          });
+        } else if (acceptedDelta < 0 && skuId) {
+          // Re-receive lowered the accepted count. Walk the SKU bucket
+          // back by the difference and record the correction. The
+          // `Math.max(0, ...)` guards against an SKU that someone has
+          // already shipped out of — we can't make it negative, the
+          // ADJUST row still captures intent for the audit trail.
+          const decrementBy = -acceptedDelta;
+          await (tx as unknown as Tx).sku.update({
+            where: { id: skuId },
+            data: { quantityAvailable: { decrement: decrementBy } },
+          });
+          await (tx as unknown as Tx).inventoryMovement.create({
+            data: {
+              vendorId: psn.vendorId,
+              skuId,
+              type: "ADJUST",
+              deltaAvailable: -decrementBy,
+              deltaReserved: 0,
+              reason: `Re-receive correction on PSN ${psn.id.slice(0, 8)}: accepted ${prevAccepted} → ${newAccepted}`,
+              referenceType: "psn",
+              referenceId: psn.id,
+              actorId,
+            },
           });
         }
 
