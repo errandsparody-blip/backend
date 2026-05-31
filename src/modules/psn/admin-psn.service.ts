@@ -262,7 +262,16 @@ export class AdminPsnService {
         where: { id: psn.id },
         data: {
           status: next,
-          receivedAt: next === "RECEIVED" ? new Date() : psn.receivedAt,
+          // Stamp `receivedAt` on the FIRST receive action regardless
+          // of the resulting status. PARTIALLY_RECEIVED and DISCREPANCY
+          // are still real warehouse events — the operator opened the
+          // package, counted boxes, recorded missing / damaged units.
+          // Vendors should see WHEN the warehouse first opened their
+          // shipment, not have to wait for a full RECEIVED flip for a
+          // date to appear. Previously the field stayed null for
+          // partials, which left vendors looking at "—" next to the
+          // submission date with no way to tell anything had happened.
+          receivedAt: psn.receivedAt ?? new Date(),
         },
       });
 
