@@ -106,7 +106,7 @@ export function emailVerifyTemplate(args: { email: string; code: string }): Rend
   return {
     subject: `${args.code} is your USA Errands verification code`,
     html: shell({
-      eyebrow: "[01] Verify your email",
+      eyebrow: "  Verify your email",
       title: "Your verification code",
       bodyHtml: `<p style="margin:0 0 12px 0;">Enter this code on the verification screen to confirm <strong>${escape(args.email)}</strong>.</p>
         ${codeBlock}
@@ -126,7 +126,7 @@ export function passwordResetTemplate(args: { email: string; resetUrl: string })
   return {
     subject: "Reset your USA Errands password",
     html: shell({
-      eyebrow: "[01] Password reset",
+      eyebrow: "  Password reset",
       title: "Reset your password",
       bodyHtml: `<p style="margin:0 0 12px 0;">We received a password reset request for <strong>${escape(args.email)}</strong>.</p>
         <p style="margin:0 0 12px 0;">The link expires in 60 minutes and only works once. If you didn't request a reset, ignore this email; your password won't change.</p>`,
@@ -149,7 +149,7 @@ export function existingAccountReminderTemplate(args: { email: string }): Render
   return {
     subject: "You already have a USA Errands account",
     html: shell({
-      eyebrow: "[01] Account exists",
+      eyebrow: "  Account exists",
       title: "Looks like you've been here before",
       bodyHtml: `<p style="margin:0 0 12px 0;">Someone — probably you — just tried to sign up using <strong>${escape(args.email)}</strong>. There's already an account with this email.</p>
         <p style="margin:0 0 12px 0;">Sign in below to pick up where you left off, or reset your password if you've forgotten it.</p>
@@ -169,7 +169,7 @@ export function mfaEnrolledTemplate(args: { email: string }): RenderedEmail {
   return {
     subject: "Two-factor authentication is on",
     html: shell({
-      eyebrow: "[01] MFA enrolled",
+      eyebrow: "  MFA enrolled",
       title: "Your account is protected by 2FA",
       bodyHtml: `<p style="margin:0 0 12px 0;">Two-factor authentication has been turned on for <strong>${escape(args.email)}</strong>.</p>
         <p style="margin:0 0 12px 0;">If you didn't do this, sign in now and remove the device, then change your password.</p>`,
@@ -190,7 +190,7 @@ export function kycApprovedTemplate(args: { businessName: string }): RenderedEma
   return {
     subject: "KYC approved — you're good to ship",
     html: shell({
-      eyebrow: "[02] KYC approved",
+      eyebrow: "  KYC approved",
       title: `${args.businessName} is verified`,
       bodyHtml: `<p style="margin:0 0 12px 0;">Your KYC review is complete. Once you accept the vendor agreement, your account becomes active and you can submit your first PSN.</p>`,
       cta: { label: "Go to dashboard", href: `${cfg.WEB_PUBLIC_URL}/` },
@@ -209,7 +209,7 @@ export function kycResubmissionTemplate(args: {
   return {
     subject: "Action needed: KYC resubmission requested",
     html: shell({
-      eyebrow: "[02] KYC resubmission",
+      eyebrow: "  KYC resubmission",
       title: `Quick fixes needed for ${args.businessName}`,
       bodyHtml: `<p style="margin:0 0 12px 0;">Our review team needs a few details corrected before we can finish verifying your account.</p>
         <div style="margin:8px 0 16px 0;padding:14px 18px;background:#F1EFE9;border-left:3px solid #C99428;color:#0A0A0A;font-size:14px;line-height:1.55;">
@@ -234,7 +234,7 @@ export function kycRejectedTemplate(args: {
   return {
     subject: "KYC review outcome",
     html: shell({
-      eyebrow: "[02] KYC declined",
+      eyebrow: "  KYC declined",
       title: "We weren't able to verify your account",
       bodyHtml: `<p style="margin:0 0 12px 0;">Hi ${escape(args.businessName)} — we've finished reviewing the information you provided and can't proceed with onboarding right now.</p>
         <div style="margin:8px 0 16px 0;padding:14px 18px;background:#F1EFE9;border-left:3px solid #C0392B;color:#0A0A0A;font-size:14px;line-height:1.55;">
@@ -262,7 +262,7 @@ export function lowBalanceTemplate(args: { businessName: string; balanceCents: n
   return {
     subject: `Wallet balance low — ${balance}`,
     html: shell({
-      eyebrow: "[03] Wallet alert",
+      eyebrow: "  Wallet alert",
       title: "Your wallet balance is low",
       bodyHtml: `<p style="margin:0 0 12px 0;">${escape(args.businessName)}'s balance is <strong>${balance}</strong>, at or below your alert threshold of ${threshold}.</p>
         <p style="margin:0 0 12px 0;">Add funds to keep fulfillments running. New orders will fail with insufficient funds at $0.</p>`,
@@ -281,7 +281,7 @@ export function depositReceiptTemplate(args: { amountCents: number; balanceAfter
   return {
     subject: `Deposit received — ${amount}`,
     html: shell({
-      eyebrow: "[03] Wallet receipt",
+      eyebrow: "  Wallet receipt",
       title: `${amount} added to your wallet`,
       bodyHtml: `<p style="margin:0 0 12px 0;">Your deposit of <strong>${amount}</strong> has cleared. New balance: <strong>${balance}</strong>.</p>
         <p style="margin:0 0 12px 0;font-family:'JetBrains Mono',monospace;font-size:13px;color:#777270;">Reference: ${escape(args.reference)}</p>`,
@@ -303,7 +303,7 @@ export function orderShippedTemplate(args: { orderRef: string; carrier: string; 
   return {
     subject: `Order ${args.orderRef} shipped`,
     html: shell({
-      eyebrow: "[05] Order shipped",
+      eyebrow: "  Order shipped",
       title: `Order ${args.orderRef} is on its way`,
       bodyHtml: `<p style="margin:0 0 12px 0;">${escape(args.carrier)} picked it up. Tracking number:</p>
         <p style="margin:0 0 12px 0;font-family:'JetBrains Mono',monospace;font-size:14px;color:#0A0A0A;">${escape(args.trackingNumber)}</p>`,
@@ -320,7 +320,7 @@ export function orderDeliveredTemplate(args: { orderRef: string; orderId: string
   return {
     subject: `Order ${args.orderRef} delivered`,
     html: shell({
-      eyebrow: "[05] Order delivered",
+      eyebrow: "  Order delivered",
       title: `Order ${args.orderRef} was delivered`,
       bodyHtml: `<p style="margin:0 0 12px 0;">The carrier marked the package delivered. If your customer reports they didn't receive it, open a return within 30 days.</p>`,
       cta: { label: "View order", href: `${cfg.WEB_PUBLIC_URL}/orders/${encodeURIComponent(args.orderId)}` },
@@ -340,7 +340,7 @@ export function teamInviteTemplate(args: { businessName: string; inviterEmail: s
   return {
     subject: `Join ${args.businessName} on USA Errands`,
     html: shell({
-      eyebrow: "[07] Team invitation",
+      eyebrow: "  Team invitation",
       title: `${escape(args.businessName)} invited you to USA Errands`,
       bodyHtml: `<p style="margin:0 0 12px 0;"><strong>${escape(args.inviterEmail)}</strong> added you as a sub-user. Accept the invite to set a password and enrol two-factor authentication.</p>
         <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">The link expires in 24 hours and only works once.</p>`,
@@ -385,7 +385,7 @@ export function returnAuthorizedTemplate(args: {
   return {
     subject: `Return ${args.rmaCode} authorised`,
     html: shell({
-      eyebrow: "[06] Return authorised",
+      eyebrow: "  Return authorised",
       title: `RMA ${args.rmaCode} is open`,
       bodyHtml: `<p style="margin:0 0 12px 0;">A return against order <strong>${escape(args.orderRef)}</strong> is now authorised. Forward the prepaid shipping label below to your customer so they can drop the box at any carrier location.</p>
         ${args.trackingNumber ? `<p style="margin:0 0 12px 0;">Inbound tracking: <span style="font-family:'JetBrains Mono',monospace;">${escape(args.trackingNumber)}</span></p>` : ""}
@@ -408,7 +408,7 @@ export function returnRefundedTemplate(args: { rmaCode: string; netRefundCents: 
   return {
     subject: `Return ${args.rmaCode} refunded — ${refund}`,
     html: shell({
-      eyebrow: "[06] Return refunded",
+      eyebrow: "  Return refunded",
       title: `${refund} refunded to your wallet`,
       bodyHtml: `<p style="margin:0 0 12px 0;">RMA <strong>${escape(args.rmaCode)}</strong> has been resolved. Your wallet balance is now <strong>${balance}</strong>.</p>`,
       cta: { label: "Open wallet", href: `${cfg.WEB_PUBLIC_URL}/wallet` },
@@ -493,7 +493,7 @@ export function shopperIntakeReceivedTemplate(args: {
     ? {
         subject: `Your USA Errands shopper request — ${total} (ID verification required)`,
         html: shell({
-          eyebrow: "[08] Shopper request",
+          eyebrow: "  Shopper request",
           title: "Your request is in. Two steps to finish.",
           bodyHtml: `<p style="margin:0 0 12px 0;">Thanks for using USA Errands. Orders over $1,000 are paid by bank wire transfer.</p>
             <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;"><strong>Step 1</strong> — open your private order page and upload a photo of your government-issued ID and a selfie holding it. We review within one business day.</p>
@@ -511,7 +511,7 @@ export function shopperIntakeReceivedTemplate(args: {
     : {
         subject: `Your USA Errands shopper request — ${total}`,
         html: shell({
-          eyebrow: "[08] Shopper request",
+          eyebrow: "  Shopper request",
           title: "Your request is in. One step to finish.",
           bodyHtml: `<p style="margin:0 0 12px 0;">Thanks for using USA Errands. To start procurement we need the upfront amount of <strong>${total}</strong>.</p>
             <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">After we buy your items we'll either send a small follow-up invoice for the actual cost difference + shipping, or refund the difference. Either way, you'll see it in this thread.</p>
@@ -537,7 +537,7 @@ export function shopperIntakePaidTemplate(args: {
   const base: RenderedEmail = {
     subject: `Payment received — ${total}`,
     html: shell({
-      eyebrow: "[08] Payment received",
+      eyebrow: "  Payment received",
       title: "Got it — we're on it.",
       bodyHtml: `<p style="margin:0 0 12px 0;">We've received your payment of <strong>${total}</strong> and are starting procurement now.</p>
         <p style="margin:0 0 12px 0;">You'll get an update in your thread when we have item updates or a shipping quote.</p>`,
@@ -560,7 +560,7 @@ export function shopperNewMessageTemplate(args: {
   const base: RenderedEmail = {
     subject: "New message from USA Errands",
     html: shell({
-      eyebrow: "[08] New message",
+      eyebrow: "  New message",
       title: "USA Errands replied to your request",
       bodyHtml: `<blockquote style="margin:0 0 16px 0;padding:12px 16px;background:#F1EFE9;border-left:3px solid #C99428;color:#3A3A3A;font-size:14px;">${escape(trimmed)}</blockquote>`,
       cta: { label: "Open thread to reply", href: shopperThreadUrl(args.threadToken) },
@@ -598,7 +598,7 @@ export function shopperFollowupOwedTemplate(args: {
   const base: RenderedEmail = {
     subject: `Adjustment + shipping invoice — ${amount}`,
     html: shell({
-      eyebrow: "[08] Follow-up invoice",
+      eyebrow: "  Follow-up invoice",
       title: "Final payment to release shipping",
       bodyHtml: `<p style="margin:0 0 12px 0;">We've finished procurement and confirmed shipping cost. The remaining balance is <strong>${amount}</strong>.</p>
         <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">As soon as this is paid we'll dispatch your package and email tracking.</p>
@@ -653,7 +653,7 @@ export function shopperShippingInvoiceTemplate(args: {
   const base: RenderedEmail = {
     subject: `Shipping invoice — ${amount}`,
     html: shell({
-      eyebrow: "[08] Shipping invoice",
+      eyebrow: "  Shipping invoice",
       title: "One more step before we ship",
       bodyHtml: `<p style="margin:0 0 12px 0;">Your items are at our warehouse. Pay the shipping line to release the package via <strong>${escape(methodLabel)}</strong>.</p>
         <p style="margin:0 0 12px 0;color:#3A3A3A;font-size:16px;"><strong>Shipping &amp; handling: ${amount}</strong></p>
@@ -690,7 +690,7 @@ export function shopperRefundIssuedTemplate(args: {
   const base: RenderedEmail = {
     subject: `Refund issued — ${amount}`,
     html: shell({
-      eyebrow: "[08] Refund issued",
+      eyebrow: "  Refund issued",
       title: `${amount} on its way back to your card`,
       bodyHtml: `<p style="margin:0 0 12px 0;">Actual costs came in under your estimate. We've refunded <strong>${amount}</strong> to the card you paid with — most banks settle within 5–10 business days.</p>
         <p style="margin:0 0 12px 0;">Your package will ship as soon as the warehouse picks it up.</p>
@@ -724,7 +724,7 @@ export function shopperShippedTemplate(args: {
   const base: RenderedEmail = {
     subject: `Your shopper order shipped via ${args.carrier}`,
     html: shell({
-      eyebrow: "[08] Shipped",
+      eyebrow: "  Shipped",
       title: "Package handed to the carrier",
       bodyHtml: `<p style="margin:0 0 12px 0;">${escape(args.carrier)} picked up your package.</p>
         <p style="margin:0 0 12px 0;font-family:'JetBrains Mono',monospace;font-size:14px;color:#0A0A0A;">${escape(args.trackingNumber)}</p>
@@ -750,7 +750,7 @@ export function shopperFollowupPaidTemplate(args: {
   const base: RenderedEmail = {
     subject: `Final payment received — ${amount}`,
     html: shell({
-      eyebrow: "[08] Final payment received",
+      eyebrow: "  Final payment received",
       title: "All set — your package ships next.",
       bodyHtml: `<p style="margin:0 0 12px 0;">Thanks — we’ve received the final payment of <strong>${amount}</strong>. Your package is being prepared for dispatch and we’ll email tracking the moment it leaves the warehouse.</p>`,
       cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
@@ -770,7 +770,7 @@ export function shopperDeliveredTemplate(args: {
   const base: RenderedEmail = {
     subject: "Your shopper order was delivered",
     html: shell({
-      eyebrow: "[08] Delivered",
+      eyebrow: "  Delivered",
       title: "Delivered — thanks for using USA Errands.",
       bodyHtml: `<p style="margin:0 0 12px 0;">The carrier marked your package delivered. If anything is wrong, reply in your thread within 14 days and we’ll help you sort it.</p>`,
       cta: { label: "Open your thread", href: shopperThreadUrl(args.threadToken) },
@@ -796,7 +796,7 @@ export function psnSubmittedTemplate(args: {
   return {
     subject: `PSN ${args.psnId.slice(0, 8)} submitted — ${fee} debited`,
     html: shell({
-      eyebrow: "[03] PSN submitted",
+      eyebrow: "  PSN submitted",
       title: "We’re ready for your inbound shipment",
       bodyHtml: `<p style="margin:0 0 12px 0;">Your Pre-Shipment Notice with <strong>${args.lineCount} ${args.lineCount === 1 ? "line" : "lines"}</strong> is in our queue.</p>
         <p style="margin:0 0 12px 0;">Onboarding fee debited from your wallet: <strong>${fee}</strong>.</p>
@@ -820,7 +820,7 @@ export function psnReceivedTemplate(args: {
   return {
     subject: `PSN ${args.psnId.slice(0, 8)} received — ${ok} units accepted`,
     html: shell({
-      eyebrow: "[03] Inventory received",
+      eyebrow: "  Inventory received",
       title: "Your shipment is in the warehouse",
       bodyHtml: `<p style="margin:0 0 12px 0;"><strong>${ok}</strong> units have been accepted into inventory and are reflected on your dashboard.</p>
         ${bad > 0 ? `<p style="margin:0 0 12px 0;color:#C99428;"><strong>${bad}</strong> units were rejected on inspection — see the PSN for details.</p>` : ""}`,
@@ -875,7 +875,7 @@ export function storageBoxConsolidatedTemplate(args: {
   return {
     subject: subjects[args.action],
     html: shell({
-      eyebrow: "[04] Storage update",
+      eyebrow: "  Storage update",
       title: headlines[args.action],
       bodyHtml: `<p style="margin:0 0 12px 0;">${intros[args.action]}</p>${noteBlock}`,
       cta: { label: "View recurring storage", href: `${cfg.WEB_PUBLIC_URL}/wallet/recurring` },
@@ -903,7 +903,7 @@ export function orderCreatedTemplate(args: {
   return {
     subject: `Order ${args.orderRef} created — ${total} reserved`,
     html: shell({
-      eyebrow: "[04] Order created",
+      eyebrow: "  Order created",
       title: "Order in fulfillment queue",
       bodyHtml: `<p style="margin:0 0 12px 0;"><strong>${total}</strong> reserved from your wallet (new balance: ${balance}). We’ll email tracking the moment it ships.</p>`,
       cta: { label: "View order", href: `${cfg.WEB_PUBLIC_URL}/orders/${encodeURIComponent(args.orderId)}` },
@@ -926,7 +926,7 @@ export function orderInsufficientFundsTemplate(args: {
   return {
     subject: `Order rejected — wallet short by ${short}`,
     html: shell({
-      eyebrow: "[02] Wallet shortfall",
+      eyebrow: "  Wallet shortfall",
       title: "Order couldn’t be created — top up your wallet",
       bodyHtml: `<p style="margin:0 0 12px 0;">An order failed to submit because your wallet balance (<strong>${bal}</strong>) is below the required <strong>${req}</strong>.</p>
         <p style="margin:0 0 12px 0;">Add at least <strong>${short}</strong> to your wallet and re-submit the order from your dashboard.</p>`,
@@ -949,7 +949,7 @@ export function orderCancelledTemplate(args: {
   return {
     subject: `Order ${args.orderRef} cancelled`,
     html: shell({
-      eyebrow: "[04] Order cancelled",
+      eyebrow: "  Order cancelled",
       title: `Order ${args.orderRef} was cancelled`,
       bodyHtml: `<p style="margin:0 0 12px 0;"><strong>Reason:</strong> ${escape(args.reason)}.</p>
         ${args.refundedToWalletCents > 0 ? `<p style="margin:0 0 12px 0;"><strong>${refund}</strong> credited back to your wallet.</p>` : ""}`,
@@ -1094,7 +1094,7 @@ export function shopperCancelledTemplate(args: {
         ? `Request cancelled — $${(args.refundedAmountCents / 100).toFixed(2)} refunded`
         : "Your shopper request was cancelled",
     html: shell({
-      eyebrow: "[08] Cancelled",
+      eyebrow: "  Cancelled",
       title: "Your request was cancelled.",
       bodyHtml: `<p style="margin:0 0 12px 0;">Your USA Errands shopper request has been cancelled.${refunded}</p>
         <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;"><strong>Reason from our team:</strong> ${escape(args.reason)}</p>
@@ -1136,7 +1136,7 @@ export function pricingGuideTemplate(args: {
   return {
     subject: "Your USA Errands pricing guide",
     html: shell({
-      eyebrow: "[09] Pricing guide",
+      eyebrow: "  Pricing guide",
       title: "Here's our full pricing guide",
       bodyHtml:
         `<p style="margin:0 0 12px 0;">Hi ${escape(businessName)},</p>` +

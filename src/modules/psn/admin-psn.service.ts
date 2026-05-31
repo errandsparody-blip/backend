@@ -168,9 +168,17 @@ export class AdminPsnService {
     return this.prisma.$transaction(async (tx) => {
       const psn = await tx.psn.findUnique({ where: { id: psnId }, include: { lines: true } });
       if (!psn) throw new NotFoundException();
-      if (!["AWAITING_RECEIPT", "PARTIALLY_RECEIVED"].includes(psn.status)) {
+      // Single-shot receive policy: once the operator clicks Accept the
+      // PSN is sealed (status flips to RECEIVED / PARTIALLY_RECEIVED /
+      // DISCREPANCY based on what they recorded) and can never be
+      // re-opened. Late-arriving boxes go on a new PSN; this keeps the
+      // history record honest (one receive event per PSN, one timestamp,
+      // no compound math). Previously we allowed PARTIALLY_RECEIVED to
+      // be re-received, which let the SKU bucket leak and confused the
+      // form math — both issues are now structurally avoided.
+      if (psn.status !== "AWAITING_RECEIPT") {
         throw new ConflictException({
-          message: `PSN cannot be received from status ${psn.status}.`,
+          message: `PSN cannot be received from status ${psn.status} — receiving is a one-time action and this PSN is already sealed.`,
           code: "psn_wrong_status",
         });
       }
