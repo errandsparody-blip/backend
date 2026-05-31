@@ -52,12 +52,17 @@ export class AdminPsnService {
 
   /**
    * Cross-vendor PSN list used by both the receiving inbox (default —
-   * AWAITING_RECEIPT + PARTIALLY_RECEIVED, ordered by submittedAt asc so
-   * oldest shipments surface first) and the receiving History tab
-   * (caller passes a comma list of terminal statuses like
-   * "RECEIVED,DISCREPANCY,REJECTED,RETURN_REQUESTED" and we order by
-   * receivedAt desc so the most-recently-processed PSNs come back
-   * first).
+   * AWAITING_RECEIPT only, ordered by submittedAt asc so the oldest
+   * shipments surface first) and the receiving History tab (caller
+   * passes a comma list of terminal statuses like
+   * "RECEIVED,PARTIALLY_RECEIVED,DISCREPANCY,REJECTED,RETURN_REQUESTED"
+   * and we order by receivedAt desc so the most-recently-processed
+   * PSNs come back first).
+   *
+   * Single-shot receive policy (May 2026): PARTIALLY_RECEIVED and
+   * DISCREPANCY are terminal. A PSN exits AWAITING_RECEIPT exactly
+   * once — when the operator clicks Accept — and never re-enters the
+   * inbox, so the inbox filter excludes them.
    *
    * Tenant scoping: super admin can pass `vendorId` to drill into a
    * single vendor's history without losing the cross-vendor query
@@ -66,10 +71,13 @@ export class AdminPsnService {
   async listIncoming(input: ListPsnsInput) {
     // Normalise status into a Prisma filter regardless of whether the
     // caller passed a single value (legacy single-string form) or a
-    // comma-list (history-tab multi-status form).
+    // comma-list (history-tab multi-status form). When the caller
+    // omits status we default to AWAITING_RECEIPT only — the single
+    // status still requiring operator action under the single-shot
+    // receive policy.
     let statusFilter: Prisma.PsnWhereInput["status"];
     if (input.status === undefined) {
-      statusFilter = { in: ["AWAITING_RECEIPT", "PARTIALLY_RECEIVED"] };
+      statusFilter = "AWAITING_RECEIPT";
     } else if (Array.isArray(input.status)) {
       statusFilter = { in: input.status };
     } else {
@@ -77,12 +85,14 @@ export class AdminPsnService {
     }
 
     // Detect "history mode" — any query that touches a terminal status
-    // (RECEIVED / DISCREPANCY / REJECTED / RETURN_REQUESTED) should
-    // order by receivedAt desc so the operator sees the most-recent
-    // shipment first. The default inbox view stays submittedAt asc so
-    // the oldest queued shipment surfaces at the top.
+    // (RECEIVED / PARTIALLY_RECEIVED / DISCREPANCY / REJECTED /
+    // RETURN_REQUESTED) should order by receivedAt desc so the
+    // operator sees the most-recent shipment first. The default inbox
+    // view stays submittedAt asc so the oldest queued shipment
+    // surfaces at the top.
     const HISTORY_STATUSES = new Set([
       "RECEIVED",
+      "PARTIALLY_RECEIVED",
       "DISCREPANCY",
       "REJECTED",
       "RETURN_REQUESTED",
