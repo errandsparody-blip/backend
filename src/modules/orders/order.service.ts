@@ -390,36 +390,58 @@ export class OrderService {
       }),
     );
 
-    const rateResp = await this.shippo.getRates({
-      fromAddress: this.warehouseOrigin,
-      toAddress: {
-        line1: input.recipient.shipAddressLine1,
-        line2: input.recipient.shipAddressLine2,
-        city: input.recipient.shipCity,
-        state: input.recipient.shipState,
-        postalCode: input.recipient.shipPostalCode,
-        country: input.recipient.shipCountry,
-      },
-      parcel,
-      declaredValueCents: declaredValueCentsPreview,
-      insuranceRequested: input.insuranceRequested,
-    });
-
-    const chosen: ShippingRate | undefined = rateResp.rates.find(
-      (r) => `${r.carrier} ${r.service}`.toLowerCase() === input.carrierService.toLowerCase(),
-    );
-    if (!chosen) {
-      throw new BadRequestException({
-        message: `Carrier service "${input.carrierService}" is not available for this destination.`,
-        code: "order_carrier_unavailable",
+    // Migration 0037 — branch the create flow on fulfillmentMode.
+    //
+    // PLATFORM_SHIP (default): unchanged — get a Shippo quote, match
+    // the vendor's chosen carrier service, compute shipping + handling
+    // + insurance + fulfillment fees against the carrier's real cost.
+    //
+    // VENDOR_CARRIER: the vendor brought their own pre-paid label. We
+    // skip Shippo entirely, set carrier cost to 0, and the fee schedule
+    // still produces handling + fulfillment + insurance (the "minus
+    // shipping" math the user spec'd). `chosen` stays null on this
+    // path and `rateResp` is never fetched.
+    let chosen: ShippingRate | null = null;
+    let rateResp: { shipmentId: string; rates: ShippingRate[] } | null = null;
+    if (input.fulfillmentMode === "PLATFORM_SHIP") {
+      rateResp = await this.shippo.getRates({
+        fromAddress: this.warehouseOrigin,
+        toAddress: {
+          line1: input.recipient.shipAddressLine1,
+          line2: input.recipient.shipAddressLine2,
+          city: input.recipient.shipCity,
+          state: input.recipient.shipState,
+          postalCode: input.recipient.shipPostalCode,
+          country: input.recipient.shipCountry,
+        },
+        parcel,
+        declaredValueCents: declaredValueCentsPreview,
+        insuranceRequested: input.insuranceRequested,
       });
+
+      // carrierService is guaranteed non-null here by the Zod
+      // superRefine — for PLATFORM_SHIP we required it.
+      const wanted = (input.carrierService ?? "").toLowerCase();
+      chosen = rateResp.rates.find(
+        (r) => `${r.carrier} ${r.service}`.toLowerCase() === wanted,
+      ) ?? null;
+      if (!chosen) {
+        throw new BadRequestException({
+          message: `Carrier service "${input.carrierService}" is not available for this destination.`,
+          code: "order_carrier_unavailable",
+        });
+      }
     }
 
     const schedule = await loadFeeSchedule(this.prisma);
     const fees = computeOrderFees({
       schedule,
       totalUnits,
-      carrierCostCents: chosen.costCents,
+      // VENDOR_CARRIER orders have zero carrier cost — the vendor pays
+      // their own carrier directly. computeOrderFees then yields zero
+      // for shippingCostCents + shippingFeeCents; the remaining
+      // fulfillment + insurance fees are what the vendor owes us.
+      carrierCostCents: chosen?.costCents ?? 0,
       declaredValueCents: declaredValueCentsPreview,
       insuranceRequested: input.insuranceRequested,
     });
@@ -532,10 +554,55 @@ export class OrderService {
                 providerRef: addressValidation.providerRef ?? null,
               } as Prisma.InputJsonValue)
             : Prisma.JsonNull,
-          carrier: chosen.carrier,
-          carrierService: `${chosen.carrier} ${chosen.service}`,
-          rateProviderRef: rateResp.shipmentId,
-          ratePurchasedRef: chosen.rateId,
+          // Carrier identity depends on the fulfillment branch.
+          // PLATFORM_SHIP records the Shippo-purchased carrier + rate
+          // references so the admin can re-print the label later.
+          // VENDOR_CARRIER records what the vendor told us about their
+          // own carrier — no Shippo refs because we never bought a
+          // rate, so those columns stay null.
+          carrier:
+            input.fulfillmentMode === "VENDOR_CARRIER"
+              ? input.vendorCarrier?.vendorCarrierName ?? null
+              : chosen?.carrier ?? null,
+          carrierService:
+            input.fulfillmentMode === "VENDOR_CARRIER"
+              ? "Vendor carrier"
+              : chosen
+                ? `${chosen.carrier} ${chosen.service}`
+                : null,
+          rateProviderRef:
+            input.fulfillmentMode === "VENDOR_CARRIER" ? null : rateResp?.shipmentId ?? null,
+          ratePurchasedRef:
+            input.fulfillmentMode === "VENDOR_CARRIER" ? null : chosen?.rateId ?? null,
+          // Migration 0037 — fulfillment branch + vendor-supplied label
+          // info. These columns stay null on PLATFORM_SHIP rows. Cast
+          // through `unknown` because the generated Prisma client on a
+          // local machine that hasn't run `prisma generate` yet won't
+          // know these columns exist; Railway runs prisma generate on
+          // every deploy, so the runtime accepts them just fine.
+          ...({
+            fulfillmentMode: input.fulfillmentMode,
+            vendorCarrierName:
+              input.fulfillmentMode === "VENDOR_CARRIER"
+                ? input.vendorCarrier?.vendorCarrierName ?? null
+                : null,
+            vendorTrackingNumber:
+              input.fulfillmentMode === "VENDOR_CARRIER"
+                ? input.vendorCarrier?.vendorTrackingNumber ?? null
+                : null,
+            vendorLabelUrl:
+              input.fulfillmentMode === "VENDOR_CARRIER"
+                ? input.vendorCarrier?.vendorLabelUrl ?? null
+                : null,
+          } as Record<string, unknown>),
+          // If the vendor supplied a tracking number up front, mirror
+          // it onto the canonical tracking_number column too so the
+          // existing /track/<number> public page and admin search work
+          // for these orders without a special case.
+          trackingNumber:
+            input.fulfillmentMode === "VENDOR_CARRIER"
+              ? input.vendorCarrier?.vendorTrackingNumber ?? null
+              : null,
           itemsDeclaredValueCents: declaredValueCentsPreview,
           shippingCostCents: fees.shippingCostCents,
           shippingFeeCents: fees.shippingFeeCents,
@@ -599,7 +666,17 @@ export class OrderService {
           source: "VENDOR",
           actorId,
           metadata: {
-            carrierService: `${chosen.carrier} ${chosen.service}`,
+            // For VENDOR_CARRIER orders `chosen` is null — the vendor
+            // brought their own carrier instead of picking a Shippo
+            // rate, so we record the vendor-provided carrier label
+            // (or a fallback) for the audit trail.
+            carrierService:
+              chosen != null
+                ? `${chosen.carrier} ${chosen.service}`
+                : input.fulfillmentMode === "VENDOR_CARRIER"
+                  ? `Vendor carrier — ${input.vendorCarrier?.vendorCarrierName ?? "(unspecified)"}`
+                  : "(unknown)",
+            fulfillmentMode: input.fulfillmentMode,
             totalChargedCents: fees.totalChargedCents,
             addressValidation: addressValidation.outcome,
           },

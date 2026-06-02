@@ -148,6 +148,37 @@ export type QuoteOrderInput = z.infer<typeof quoteOrderSchema>;
 // Create — full order submit. Idempotency-Key required at the HTTP layer.
 // ---------------------------------------------------------------------------
 
+// Migration 0037 — vendor-carrier fulfillment-only details. Only relevant
+// when fulfillmentMode = VENDOR_CARRIER. At submit time the service
+// enforces that AT LEAST ONE of (vendorLabelUrl) OR (vendorCarrierName +
+// vendorTrackingNumber) is present — the Zod schema accepts both forms
+// without making either strictly required because we want the validation
+// error to come back as a friendly "tell us how to ship this" message
+// from the service, not as a generic Zod path complaint.
+export const vendorCarrierDetailsSchema = z.object({
+  vendorCarrierName: z
+    .string()
+    .trim()
+    .min(2)
+    .max(60)
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
+  vendorTrackingNumber: z
+    .string()
+    .trim()
+    .min(4)
+    .max(80)
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
+  vendorLabelUrl: z
+    .string()
+    .url()
+    .max(2048)
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
+});
+export type VendorCarrierDetails = z.infer<typeof vendorCarrierDetailsSchema>;
+
 export const createOrderSchema = z.object({
   externalReference: z
     .string()
@@ -158,12 +189,51 @@ export const createOrderSchema = z.object({
     .optional(),
   recipient: recipientAddressSchema,
   lines: z.array(orderLineInputSchema).min(1).max(50),
-  // Carrier service the vendor accepted from a prior quote. Free-text; the
-  // service maps it to a Shippo rate.
-  carrierService: z.string().trim().min(2).max(60),
+  // Migration 0037 — branches the order pipeline. Defaults to
+  // PLATFORM_SHIP so existing API clients (older portal builds,
+  // automation scripts) keep working unchanged. VENDOR_CARRIER opts the
+  // request into the new fulfillment-only flow.
+  fulfillmentMode: z.enum(["PLATFORM_SHIP", "VENDOR_CARRIER"]).default("PLATFORM_SHIP"),
+  // Carrier service the vendor accepted from a prior quote. Free-text;
+  // the service maps it to a Shippo rate. Required for PLATFORM_SHIP,
+  // ignored for VENDOR_CARRIER (the vendor's own carrier replaces the
+  // Shippo rate selection).
+  carrierService: z
+    .string()
+    .trim()
+    .min(2)
+    .max(60)
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
   insuranceRequested: z.boolean().default(false),
   // Soft cap so a typo can't bankrupt a vendor in one click.
   maxAcceptableTotalCents: z.number().int().positive().max(50_000_000).optional(),
+  // Vendor-carrier details — service requires at least one of label URL
+  // or (carrier + tracking) when fulfillmentMode is VENDOR_CARRIER.
+  vendorCarrier: vendorCarrierDetailsSchema.optional(),
+}).superRefine((data, ctx) => {
+  // Per-mode required-field check that Zod can express cleanly.
+  if (data.fulfillmentMode === "PLATFORM_SHIP") {
+    if (!data.carrierService) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "carrierService is required for platform-shipped orders.",
+        path: ["carrierService"],
+      });
+    }
+  } else if (data.fulfillmentMode === "VENDOR_CARRIER") {
+    const vc = data.vendorCarrier ?? {};
+    const hasLabel = !!vc.vendorLabelUrl;
+    const hasManual = !!vc.vendorCarrierName && !!vc.vendorTrackingNumber;
+    if (!hasLabel && !hasManual) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Upload a shipping label, or enter both a carrier name and tracking number.",
+        path: ["vendorCarrier"],
+      });
+    }
+  }
 });
 export type CreateOrderInput = z.infer<typeof createOrderSchema>;
 

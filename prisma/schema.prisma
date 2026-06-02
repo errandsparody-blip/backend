@@ -960,6 +960,23 @@ enum OrderStatus {
   EXCEPTION          // carrier exception (lost, damaged, refused)
   CANCELLED
   RETURNED
+  // Migration 0037 — terminal status for orders shipped on the vendor's
+  // own carrier account. The package has left the warehouse but the
+  // carrier was the vendor's, so we never bought a Shippo label. No
+  // automatic tracking webhook fires after this point — the vendor or
+  // their recipient tracks via the vendor's carrier portal.
+  HANDED_OFF
+}
+
+// Migration 0037 — fulfillment branch chosen by the vendor at order
+// creation. PLATFORM_SHIP keeps the existing Shippo-driven flow;
+// VENDOR_CARRIER skips Shippo entirely and we do pick + pack + hand-off
+// against a label the vendor supplies (uploaded file or carrier +
+// tracking they typed in). New orders default to PLATFORM_SHIP so
+// historical rows retain their existing semantics without backfill.
+enum FulfillmentMode {
+  PLATFORM_SHIP
+  VENDOR_CARRIER
 }
 
 enum OrderCancelReason {
@@ -1016,6 +1033,26 @@ model Order {
   rateProviderRef          String?         @map("rate_provider_ref")    // EasyPost shipment id
   ratePurchasedRef         String?         @map("rate_purchased_ref")   // EasyPost rate id
 
+  // ---- Migration 0037 — vendor-carrier fulfillment-only branch.
+  //
+  // When `fulfillment_mode = VENDOR_CARRIER` we skip Shippo entirely
+  // and use whichever of these three fields the vendor populated at
+  // intake:
+  //   vendorCarrierName     — free-text carrier label ("UPS", "DHL")
+  //   vendorTrackingNumber  — carrier-issued tracking number
+  //   vendorLabelUrl        — R2 URL to the pre-paid label PDF/image
+  // Service-layer validation enforces "at least one of (label URL) OR
+  // (carrier + tracking) must be present" — never both columns blank.
+  //
+  // For PLATFORM_SHIP rows all three stay NULL and the existing
+  // carrier / trackingNumber / labelUrl columns above carry the
+  // Shippo-purchased equivalents instead.
+  fulfillmentMode          FulfillmentMode @default(PLATFORM_SHIP) @map("fulfillment_mode")
+  vendorCarrierName        String?         @map("vendor_carrier_name")
+  vendorTrackingNumber     String?         @map("vendor_tracking_number")
+  vendorLabelUrl           String?         @map("vendor_label_url")
+  handedOffAt              DateTime?       @map("handed_off_at")
+
   // ---- Money (cents). Captured at submit time so future fee schedule changes
   // do not retro-apply. Reassessment writes a separate ledger entry.
   itemsDeclaredValueCents  Int             @default(0) @map("items_declared_value_cents")
@@ -1056,6 +1093,7 @@ model Order {
   @@index([status, createdAt])
   @@index([trackingNumber])
   @@index([carrier, status])
+  @@index([fulfillmentMode, status])
   @@map("orders")
 }
 
