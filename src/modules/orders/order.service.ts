@@ -325,6 +325,58 @@ export class OrderService {
   }
 
   // ===========================================================================
+  // FULFILLMENT ESTIMATE — fees only, no Shippo round-trip.
+  //
+  // Used by the VENDOR_CARRIER branch of the order wizard so the vendor
+  // can see what handling + insurance will cost BEFORE they reach the
+  // review step. Shipping is zero by definition on this branch (the
+  // vendor brought their own label), so we pass carrierCostCents: 0
+  // through the same fee math the carrier-quoted path uses — keeping
+  // both branches honest against one source of truth.
+  //
+  // No address validation needed: this is a pricing read, not an order
+  // commitment, and addresses don't change the handling fee. Read-only
+  // SKU resolution is the only DB work.
+  // ===========================================================================
+
+  async fulfillmentEstimate(
+    vendorId: string,
+    input: { lines: OrderLineInput[]; insuranceRequested?: boolean },
+  ): Promise<{
+    totalUnits: number;
+    declaredValueCents: number;
+    fulfillmentFeeCents: number;
+    insuranceFeeCents: number;
+    totalCents: number;
+  }> {
+    const resolved = await this.resolveLinesReadOnly(vendorId, input.lines);
+    const totalUnits = resolved.reduce((s, r) => s + r.input.quantity, 0);
+    const declaredValueCents = resolved.reduce(
+      (s, r) => s + r.declaredValueCents,
+      0,
+    );
+    const schedule = await loadFeeSchedule(this.prisma);
+    const fees = computeOrderFees({
+      schedule,
+      totalUnits,
+      // Vendor-carrier orders never have a Shippo-bought label, so
+      // shipping cost is structurally zero. The breakdown therefore
+      // contains only handling + insurance — exactly what the wizard
+      // displays as "Fulfillment cost".
+      carrierCostCents: 0,
+      declaredValueCents,
+      insuranceRequested: input.insuranceRequested ?? false,
+    });
+    return {
+      totalUnits,
+      declaredValueCents,
+      fulfillmentFeeCents: fees.fulfillmentFeeCents,
+      insuranceFeeCents: fees.insuranceFeeCents,
+      totalCents: fees.fulfillmentFeeCents + fees.insuranceFeeCents,
+    };
+  }
+
+  // ===========================================================================
   // CREATE — atomic. Stock reservation + wallet debit + order + events.
   // ===========================================================================
 

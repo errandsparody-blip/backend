@@ -144,6 +144,23 @@ export const quoteOrderSchema = z.object({
 });
 export type QuoteOrderInput = z.infer<typeof quoteOrderSchema>;
 
+/**
+ * Lightweight fulfillment-cost estimate — no recipient address, no
+ * carrier rate. Used by the VENDOR_CARRIER branch of the order wizard
+ * to display a running "Fulfillment cost" pill while the vendor is
+ * still editing lines or toggling insurance, before they reach the
+ * carrier step (which is skipped on this branch anyway).
+ *
+ * Address is intentionally excluded — handling fees don't vary by
+ * destination, and including a half-typed address would make the
+ * endpoint chatty for every keystroke.
+ */
+export const fulfillmentEstimateSchema = z.object({
+  lines: z.array(orderLineInputSchema).min(1).max(50),
+  insuranceRequested: z.boolean().default(false),
+});
+export type FulfillmentEstimateInput = z.infer<typeof fulfillmentEstimateSchema>;
+
 // ---------------------------------------------------------------------------
 // Create — full order submit. Idempotency-Key required at the HTTP layer.
 // ---------------------------------------------------------------------------

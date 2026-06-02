@@ -39,12 +39,14 @@ import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import {
   cancelOrderSchema,
   createOrderSchema,
+  fulfillmentEstimateSchema,
   listOrdersSchema,
   presignOrderLabelUploadSchema,
   quoteOrderSchema,
   validateAddressSchema,
   type CancelOrderInput,
   type CreateOrderInput,
+  type FulfillmentEstimateInput,
   type ListOrdersInput,
   type PresignOrderLabelUploadInput,
   type QuoteOrderInput,
@@ -140,6 +142,27 @@ export class OrderController {
     @Body(new ZodValidationPipe(quoteOrderSchema)) body: QuoteOrderInput,
   ) {
     return this.orders.quote(user.vendorId!, body);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration 0037 — fulfillment-cost estimate for the VENDOR_CARRIER
+  // branch of the order wizard. Returns handling + insurance + total
+  // without hitting Shippo, so the vendor sees a live running cost as
+  // they add lines / toggle insurance.
+  //
+  // Cheaper than /quote (no carrier round-trip), so the rate limit is
+  // higher — the wizard refetches whenever lines or insurance changes.
+  // Still read-only; no idempotency key required.
+  // ---------------------------------------------------------------------------
+  @Post("fulfillment-estimate")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  fulfillmentEstimate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body(new ZodValidationPipe(fulfillmentEstimateSchema))
+    body: FulfillmentEstimateInput,
+  ) {
+    return this.orders.fulfillmentEstimate(user.vendorId!, body);
   }
 
   // ---------------------------------------------------------------------------
