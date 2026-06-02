@@ -273,3 +273,51 @@ export const cancelOrderSchema = z.object({
   note: z.string().trim().max(500).optional(),
 });
 export type CancelOrderInput = z.infer<typeof cancelOrderSchema>;
+
+// ---------------------------------------------------------------------------
+// Migration 0037 — vendor-supplied label uploads (VENDOR_CARRIER mode).
+//
+// Used by the order/new wizard's Fulfillment step so the vendor can
+// upload a PDF or image of their pre-paid label straight to R2 instead
+// of hosting it elsewhere first and pasting a URL. Mime allow-list
+// mirrors the returns / shopper upload endpoints — image formats +
+// PDF only, never HTML/SVG (those carry XSS risk on the same origin
+// as the buyer-facing pages).
+// ---------------------------------------------------------------------------
+
+export const ORDER_LABEL_UPLOAD_ALLOWED_MIME = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+  "image/heic",
+  "application/pdf",
+] as const;
+
+// 25 MB matches the returns + chat upload caps — the largest legitimate
+// shipping label PDF we've seen is ~3 MB, so this is comfortably padded.
+export const ORDER_LABEL_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+
+export const presignOrderLabelUploadSchema = z.object({
+  filename: z
+    .string()
+    .trim()
+    .min(1, "Filename required.")
+    .max(200, "Filename too long.")
+    // Disallow path separators / control chars / shell metas so a
+    // malicious filename can't traverse outside the per-vendor R2
+    // prefix. Same allow-list returns + shopper presign uses.
+    .regex(/^[^\\/<>:"|?*]+$/, "Filename contains invalid characters."),
+  contentType: z.enum(ORDER_LABEL_UPLOAD_ALLOWED_MIME),
+  contentLengthBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(
+      ORDER_LABEL_UPLOAD_MAX_BYTES,
+      `File too large — max ${ORDER_LABEL_UPLOAD_MAX_BYTES / (1024 * 1024)} MB.`,
+    ),
+});
+export type PresignOrderLabelUploadInput = z.infer<
+  typeof presignOrderLabelUploadSchema
+>;

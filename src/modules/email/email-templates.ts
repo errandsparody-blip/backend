@@ -616,6 +616,87 @@ export function shopperFollowupOwedTemplate(args: {
 }
 
 /**
+ * Payment instructions email — sent when the buyer picks a payment
+ * method on the thread page and clicks "Continue to payment".
+ *
+ * Why this exists: bank account numbers, Zelle handles, and Cash App
+ * tags used to render inline on the buyer thread page. That kept them
+ * in the rendered HTML where any browser extension, screen-recording
+ * tool, or shoulder-surfer could lift them. Routing the details
+ * through email means the buyer has to demonstrate inbox control
+ * before seeing them, and the page never has to render them.
+ *
+ * The HTML escapes every field; we render fields as label/value
+ * pairs in a single table so any new field on the admin config side
+ * (e.g. a memo line, a SWIFT code) shows up here automatically
+ * without template surgery.
+ */
+export function shopperPaymentInstructionsTemplate(args: {
+  reference: string;
+  threadToken: string;
+  amountCents: number;
+  methodLabel: string;
+  /**
+   * Ordered key/value pairs as the admin config row stored them.
+   * Each entry's label has already been humanised by the caller
+   * (e.g. "accountNumber" → "Account number") so this template
+   * doesn't have to know which method it's rendering.
+   */
+  details: ReadonlyArray<{ label: string; value: string }>;
+}): RenderedEmail {
+  const amount = `$${(args.amountCents / 100).toFixed(2)}`;
+  const threadUrl = shopperThreadUrl(args.threadToken);
+
+  // Build the details table HTML. Each row is two cells: label (muted,
+  // monospace) on the left, value (ink, monospace for credentials) on
+  // the right. Empty arrays render nothing — we still send the email
+  // because the buyer needs the "now what" footer either way, but the
+  // caller is expected to refuse the send when details are empty.
+  const detailsRowsHtml = args.details
+    .map(
+      (row) => `
+        <tr>
+          <td style="padding:8px 12px 8px 0;font-family:'JetBrains Mono',Menlo,Consolas,monospace;font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:#777270;white-space:nowrap;vertical-align:top;">${escape(row.label)}</td>
+          <td style="padding:8px 0 8px 0;font-family:'JetBrains Mono',Menlo,Consolas,monospace;font-size:14px;color:#0A0A0A;word-break:break-all;">${escape(row.value)}</td>
+        </tr>`,
+    )
+    .join("");
+  const detailsTableHtml = args.details.length
+    ? `<table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="margin:8px 0 16px 0;border-top:1px solid #E2DFD7;border-bottom:1px solid #E2DFD7;">${detailsRowsHtml}</table>`
+    : "";
+
+  // Build the plain-text twin. Same field order; padded label column
+  // so long-value lines stay readable in monospaced mail clients.
+  const labelWidth = args.details.reduce(
+    (max, row) => Math.max(max, row.label.length),
+    0,
+  );
+  const detailsText = args.details
+    .map((row) => `  ${row.label.padEnd(labelWidth, " ")}   ${row.value}`)
+    .join("\n");
+
+  const base: RenderedEmail = {
+    subject: `${args.methodLabel} instructions — ${amount}`,
+    html: shell({
+      eyebrow: "  Payment instructions",
+      title: `Pay ${amount} via ${args.methodLabel}`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">You picked <strong>${escape(args.methodLabel)}</strong> for your order. Here are the account details — keep this email private.</p>
+        ${detailsTableHtml}
+        <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">Include the reference <strong>${escape(args.reference)}</strong> in your transfer&apos;s note or memo field so we can match the payment as soon as it lands.</p>
+        <p style="margin:16px 0 12px 0;">Once you&apos;ve sent the payment, come back to your private order page and upload the bank confirmation / screenshot. We&apos;ll start sourcing your items the moment it clears.</p>`,
+      cta: { label: "Upload payment proof", href: threadUrl },
+    }),
+    text:
+      `Pay ${amount} via ${args.methodLabel}\n\n` +
+      (detailsText ? `${detailsText}\n\n` : "") +
+      `Reference: ${args.reference}\n` +
+      `Include this reference in the transfer's memo / note field.\n\n` +
+      `When done, upload your payment confirmation:\n${threadUrl}\n`,
+  };
+  return withShopperReference(base, args.reference);
+}
+
+/**
  * Migration 0027 — shipping invoice email.
  *
  * Fires when admin saves the shipping form for a freight-bearing method

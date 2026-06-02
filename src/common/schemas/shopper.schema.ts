@@ -488,6 +488,31 @@ export const submitShopperWireProofSchema = z.object({
 });
 export type SubmitShopperWireProofInput = z.infer<typeof submitShopperWireProofSchema>;
 
+/**
+ * Buyer picks a payment method and asks the server to email them the
+ * credentials. The code must match one of the configured methods
+ * (wire, ach, zelle, cashapp); the server re-validates against the
+ * live config row to refuse anything off-list.
+ *
+ * Regex (not z.enum) so adding a fifth method later is a pure backend
+ * change — the validator stays open to any [a-z0-9_] code while still
+ * rejecting whitespace, slashes, and anything that could land in a
+ * config-key lookup unsanitised. Length cap is short on purpose; real
+ * codes are 3-8 chars.
+ */
+export const sendShopperPaymentInstructionsSchema = z.object({
+  methodCode: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .min(2)
+    .max(16)
+    .regex(/^[a-z0-9_]+$/, "Invalid payment method code."),
+});
+export type SendShopperPaymentInstructionsInput = z.infer<
+  typeof sendShopperPaymentInstructionsSchema
+>;
+
 // ---------------------------------------------------------------------------
 // Migration 0023 — admin wire / ID review schemas
 // ---------------------------------------------------------------------------

@@ -35,11 +35,13 @@ import {
   createShopperRequestSchema,
   postShopperMessageSchema,
   presignShopperUploadSchema,
+  sendShopperPaymentInstructionsSchema,
   submitShopperIdUploadsSchema,
   submitShopperWireProofSchema,
   type CreateShopperRequestInput,
   type PostShopperMessageInput,
   type PresignShopperUploadInput,
+  type SendShopperPaymentInstructionsInput,
   type SubmitShopperIdUploadsInput,
   type SubmitShopperWireProofInput,
 } from "../../common/schemas/shopper.schema";
@@ -48,6 +50,7 @@ import {
   opsBuyerMessageTemplate,
   opsNewShopperRequestTemplate,
   shopperIntakeReceivedTemplate,
+  shopperPaymentInstructionsTemplate,
 } from "../email/email-templates";
 import { OpsAlertService } from "../notifications/ops-alert.service";
 import { R2Service } from "../integrations/r2/r2.service";
@@ -446,23 +449,41 @@ export class ShopperController {
     // ones marked active. Same gating as bankInstructions above so
     // an unverified buyer can't capture payment details by hitting
     // the endpoint with a random token before payment is due.
-    const paymentMethods = shouldRevealBank
+    //
+    // Privacy posture (Jun 2026): we ONLY ship `{ code, label }` to
+    // the browser — never the credential `details`. Details land in
+    // the buyer's inbox after they pick a method and POST to
+    // /payment/send-instructions. This keeps account numbers /
+    // Zelle handles / Cash App tags out of the rendered DOM where
+    // any browser extension, screen-recording tool, or shoulder-
+    // surfer could lift them.
+    const paymentMethodsFull = shouldRevealBank
       ? await this.loadActivePaymentMethods()
       : [];
+    const paymentMethods = paymentMethodsFull.map((m) => ({
+      code: m.code,
+      label: m.label,
+    }));
+
+    // Legacy block — same posture. We expose only the boolean
+    // "instructions are available" (so the UI can decide whether to
+    // render the picker) and strip the actual fields. Anything with
+    // an account-number key is treated as set.
+    const legacyAvailable =
+      bankInstructions != null &&
+      typeof bankInstructions.accountNumber === "string" &&
+      bankInstructions.accountNumber.trim().length > 0;
 
     return {
       request: {
         ...this.serializeBuyerRequest(request),
         parentReference,
-        // Surface the legacy single bank-instructions block only on the
-        // wire-payment leg. Null otherwise so the client UI never
-        // accidentally renders. Kept for back-compat with the previous
-        // single-method UI; the multi-method picker uses paymentMethods
-        // below.
-        bankInstructions,
-        // Each entry is { code, label, details } where details is a
-        // map of human-readable label → value pairs the buyer thread
-        // renders verbatim. Empty array when payment isn't due yet.
+        // Boolean-only signal kept for back-compat with the previous
+        // single-method UI. The buyer thread no longer renders any
+        // bank details inline — they arrive by email.
+        bankInstructionsAvailable: legacyAvailable,
+        // Each entry is { code, label }. Empty array when payment
+        // isn't due yet. Details are intentionally NOT included.
         paymentMethods,
         warehouseShipFrom,
       },
@@ -793,6 +814,198 @@ export class ShopperController {
       .catch(() => undefined);
 
     return { status: updated.status };
+  }
+
+  // ---------------------------------------------------------------------------
+  // POST /v1/shopper/r/:token/payment/send-instructions
+  //
+  // Buyer picked a payment method on the thread page and asked us to
+  // email them the account details. The browser never receives the
+  // credentials — they go straight to the buyer's inbox. This makes
+  // it materially harder for a screen-recording extension, a
+  // shoulder-surfer, or a malicious browser to lift the account
+  // numbers / Zelle handle / Cash App tag.
+  //
+  // Validations (all server-side, in order):
+  //   1. Token resolves to a real request (magic-link auth).
+  //   2. paymentMethod === "WIRE" (the only rail today; STRIPE
+  //      requests don't go through this flow).
+  //   3. ID check passes — either NONE (below threshold) or APPROVED.
+  //   4. Status is one of the payment-pending / under-review states
+  //      where revealing credentials is appropriate.
+  //   5. methodCode matches one of the active config rows.
+  //   6. The method has at least one populated detail field.
+  //
+  // Idempotency: the EmailService dedupes by key. We bucket the key
+  // by a coarse 60-second window so rapid double-clicks send one
+  // email, while a buyer coming back an hour later can request a
+  // fresh send. Throttle on top caps abuse at 5/min/IP.
+  // ---------------------------------------------------------------------------
+
+  @Public()
+  @Post("r/:token/payment/send-instructions")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async sendPaymentInstructions(
+    @Param("token") token: string,
+    @Body(new ZodValidationPipe(sendShopperPaymentInstructionsSchema))
+    body: SendShopperPaymentInstructionsInput,
+  ): Promise<{ sentTo: string; methodLabel: string; methodCode: string }> {
+    const resolved = await this.tokens.resolve(token);
+    const request = await this.requests.getById(resolved.requestId, {
+      includeLines: false,
+    });
+
+    // (2) Manual-payment rail only. STRIPE intake doesn't surface a
+    // method picker, so anything else hitting this endpoint is either
+    // confused or hostile — reject identically either way.
+    if (request.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request isn't on the manual-payment track.",
+        code: "shopper_payment_not_applicable",
+      });
+    }
+
+    // (3) ID check. Mirrors the gating in getThread() so a buyer who
+    // hasn't passed ID can't pivot from the picker to an endpoint and
+    // skip the check.
+    const idCheckPassed =
+      request.idVerificationStatus === "NONE" ||
+      request.idVerificationStatus === "APPROVED";
+    if (!idCheckPassed) {
+      throw new BadRequestException({
+        message:
+          "Identity verification must be completed before payment instructions can be released.",
+        code: "shopper_payment_id_not_verified",
+      });
+    }
+
+    // (4) Status gate — same set the thread response checks. We
+    // include the under-review states so a buyer who already paid
+    // but lost the original email can still pull a fresh copy.
+    const allowed = new Set([
+      "QUOTE_SENT",
+      "AWAITING_WIRE_PAYMENT",
+      "WIRE_PROOF_UPLOADED",
+      "WIRE_UNDER_REVIEW",
+    ]);
+    if (!allowed.has(request.status as string)) {
+      throw new BadRequestException({
+        message:
+          "Payment instructions can only be sent while the request is awaiting payment.",
+        code: "shopper_payment_instructions_invalid_state",
+        status: request.status,
+      });
+    }
+
+    // (5) + (6) Method must be currently active AND have details.
+    const activeMethods = await this.loadActivePaymentMethods();
+    const chosen = activeMethods.find((m) => m.code === body.methodCode);
+    if (!chosen) {
+      // 404-ish — don't disclose what's configured to anyone with a
+      // valid token but a wrong methodCode. Same surface as "not
+      // active" so an attacker can't enumerate the list.
+      throw new BadRequestException({
+        message: "That payment method isn't available right now.",
+        code: "shopper_payment_method_not_active",
+      });
+    }
+    if (Object.keys(chosen.details).length === 0) {
+      throw new BadRequestException({
+        message: "That payment method isn't available right now.",
+        code: "shopper_payment_method_not_active",
+      });
+    }
+
+    // Humanise the field keys for the email template. The buyer-facing
+    // copy used to live in the thread component (humanLabel) — we
+    // mirror it here so the email is self-contained and changing one
+    // side doesn't drift the other. We preserve the order the admin
+    // stored fields in (Object.entries respects insertion order for
+    // string keys) so the email reads in the same order the admin
+    // intended.
+    const details = Object.entries(chosen.details).map(([key, value]) => ({
+      label: this.humanLabel(key),
+      value,
+    }));
+
+    const tpl = shopperPaymentInstructionsTemplate({
+      reference: request.reference,
+      threadToken: token,
+      amountCents: request.intakeTotalCents,
+      methodLabel: chosen.label,
+      details,
+    });
+
+    // Idempotency bucket — clicking N times in a minute sends 1 email;
+    // clicking again after a minute (or on a different method) sends
+    // a fresh one. Math.floor / 60_000 gives a stable bucket id per
+    // 60-second window. Combined with the @Throttle decorator above.
+    const bucket = Math.floor(Date.now() / 60_000);
+    const idempotencyKey = `shopper:payment_instructions:${request.id}:${chosen.code}:${bucket}`;
+
+    // Await + check the result. EmailService returns { ok, error }
+    // instead of throwing on provider failure, so a fire-and-forget
+    // here would tell the buyer "check your email" while nothing
+    // ever leaves Resend. We surface a 500 with a recognisable code
+    // so the frontend's error banner renders meaningful copy and the
+    // buyer can retry.
+    const sendResult = await this.email.send({
+      to: request.buyerEmail,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+      idempotencyKey,
+      type: "shopper.payment_instructions",
+    });
+    if (!sendResult.ok) {
+      this.logger.error(
+        { requestId: request.id, method: chosen.code, error: sendResult.error },
+        "shopper.payment_instructions.email_failed",
+      );
+      throw new InternalServerErrorException({
+        message:
+          "We couldn't send the payment instructions email. Please try again in a moment.",
+        code: "shopper_payment_instructions_email_failed",
+      });
+    }
+
+    // Ops alert — operators want to see that a buyer asked for
+    // credentials (correlates with the eventual wire-proof upload).
+    // Best-effort; never block the buyer on this.
+    void this.opsAlerts
+      .send({
+        type: "ops.shopper.payment_instructions_sent",
+        subject: `[${request.reference}] Payment instructions sent — ${chosen.label}`,
+        html: `<p>Buyer <strong>${this.escapeHtml(request.buyerEmail)}</strong> requested ${this.escapeHtml(chosen.label)} instructions for ${this.escapeHtml(request.reference)}.</p>`,
+        text: `Buyer ${request.buyerEmail} requested ${chosen.label} instructions for ${request.reference}.`,
+        // Use the same bucket here so a rapid-fire double-click does
+        // not double-alert the ops team either.
+        idempotencyKey: `ops:shopper:payment_instructions:${request.id}:${chosen.code}:${bucket}`,
+        href: `/admin/shopper/${request.id}`,
+      })
+      .catch(() => undefined);
+
+    // Echo back only what the buyer needs to display the confirmation
+    // card — never the credentials themselves. methodCode is included
+    // so the client can match the in-flight selection to the
+    // confirmation by stable id (labels can change if an admin renames
+    // a method while the buyer is on the page).
+    return {
+      sentTo: request.buyerEmail,
+      methodLabel: chosen.label,
+      methodCode: chosen.code,
+    };
+  }
+
+  /**
+   * Convert a camelCase config key into a human-readable label for
+   * email rendering. Mirrors the frontend humanLabel() so changes to
+   * the field naming don't surprise either side.
+   */
+  private humanLabel(key: string): string {
+    const spaced = key.replace(/([a-z])([A-Z])/g, "$1 $2");
+    return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
   }
 
   // ---------------------------------------------------------------------------

@@ -40,15 +40,18 @@ import {
   cancelOrderSchema,
   createOrderSchema,
   listOrdersSchema,
+  presignOrderLabelUploadSchema,
   quoteOrderSchema,
   validateAddressSchema,
   type CancelOrderInput,
   type CreateOrderInput,
   type ListOrdersInput,
+  type PresignOrderLabelUploadInput,
   type QuoteOrderInput,
   type ValidateAddressInput,
 } from "../../common/schemas/order.schema";
 
+import { R2Service } from "../integrations/r2/r2.service";
 import { ReturnService } from "../returns/return.service";
 
 import { OrderService } from "./order.service";
@@ -61,6 +64,10 @@ export class OrderController {
     private readonly orders: OrderService,
     private readonly idempotency: IdempotencyService,
     private readonly returns: ReturnService,
+    // R2Service is global (R2Module is @Global) so we don't need to
+    // import a module here; we just inject the service to presign
+    // vendor-supplied label uploads on the new VENDOR_CARRIER flow.
+    private readonly r2: R2Service,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -78,6 +85,47 @@ export class OrderController {
     @Body(new ZodValidationPipe(validateAddressSchema)) body: ValidateAddressInput,
   ) {
     return this.orders.validateAddress(body);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration 0037 — Presign a PUT for a vendor-supplied shipping label
+  // on the VENDOR_CARRIER fulfillment flow.
+  //
+  // The order/new wizard's Fulfillment step uses this so the vendor can
+  // drag a PDF / image straight to R2 without first having to host it
+  // on Drive / Dropbox / S3 and paste a URL.
+  //
+  // Scoping:
+  //   - JWT + TenantGuard already gate the controller, so only the
+  //     authenticated vendor can hit this. We further scope the R2 key
+  //     under the vendorId so a forensic audit by vendor surfaces every
+  //     uploaded label.
+  //   - MIME allow-list is enforced by Zod (PDF + images only). No
+  //     HTML/SVG accepted — those carry XSS risk on the same origin
+  //     as our buyer-facing tracking pages.
+  //   - Throttle is generous enough for normal usage (uploader can fire
+  //     a couple of presigns for retries) but hostile to scripts.
+  // ---------------------------------------------------------------------------
+  @Post("uploads")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  presignLabelUpload(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body(new ZodValidationPipe(presignOrderLabelUploadSchema))
+    body: PresignOrderLabelUploadInput,
+  ) {
+    // user.vendorId is guaranteed non-null inside this controller —
+    // TenantGuard rejects requests without a vendor scope before they
+    // ever reach a handler.
+    const key = this.r2.generateKey(
+      `orders/${user.vendorId}/labels`,
+      body.filename,
+    );
+    return this.r2.presignPut({
+      key,
+      contentType: body.contentType,
+      contentLengthBytes: body.contentLengthBytes,
+    });
   }
 
   // ---------------------------------------------------------------------------
