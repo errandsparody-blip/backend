@@ -45,9 +45,20 @@ export interface AdminOrderListInput {
 
 const ALLOWED_TRANSITIONS: Record<string, OrderStatus[]> = {
   purchaseLabel: ["ALLOCATED"],
-  pick: ["LABEL_PURCHASED"],
+  // Migration 0037 — VENDOR_CARRIER orders have no Shippo label to
+  // buy, so picking can start directly from ALLOCATED for that branch.
+  // The mode-specific guard inside markHandedOff() / pick() enforces
+  // which orders are eligible; the union here only widens the
+  // transition's starting set.
+  pick: ["LABEL_PURCHASED", "ALLOCATED"],
   pack: ["PICKING"],
   ship: ["PACKED"],
+  // Migration 0037 — terminal hand-off for VENDOR_CARRIER orders.
+  // Same starting state as `ship` (PACKED) but skips the
+  // SKU-decrement / inventory-movement bookkeeping done inside
+  // ship() since that flows through the carrier reassessment + label
+  // refund cron, neither of which applies here.
+  handedOff: ["PACKED"],
 };
 
 @Injectable()
@@ -312,7 +323,20 @@ export class AdminOrderService {
   }
 
   async pick(id: string, actorId: string) {
-    return this.transition(id, actorId, "pick", async (tx) => {
+    return this.transition(id, actorId, "pick", async (tx, order) => {
+      // Migration 0037 — the ALLOWED_TRANSITIONS union widened to accept
+      // ALLOCATED on top of LABEL_PURCHASED so VENDOR_CARRIER orders can
+      // start picking without a Shippo label. Block PLATFORM_SHIP orders
+      // from skipping the label-buy step that way: they must reach
+      // LABEL_PURCHASED first or the rest of the pipeline (carrier
+      // reassessment, tracking webhook) has no rate to anchor on.
+      const mode = (order as unknown as { fulfillmentMode?: string }).fulfillmentMode;
+      if (mode === "PLATFORM_SHIP" && order.status === "ALLOCATED") {
+        throw new ConflictException({
+          message: "Buy the carrier label before picking starts on this order.",
+          code: "order_label_required",
+        });
+      }
       const updated = await tx.order.update({
         where: { id },
         data: { status: "PICKING", pickingStartedAt: new Date() },
@@ -350,7 +374,20 @@ export class AdminOrderService {
   }
 
   async ship(id: string, actorId: string) {
-    const updated = await this.transition(id, actorId, "ship", async (tx) => {
+    const updated = await this.transition(id, actorId, "ship", async (tx, order) => {
+      // Migration 0037 — VENDOR_CARRIER orders own no Shippo label and
+      // emit no tracking webhooks; advancing them through `ship` would
+      // create a SHIPPED row the reassessment + delivered-webhook cron
+      // can never close out. Force operators down the markHandedOff
+      // path instead.
+      const mode = (order as unknown as { fulfillmentMode?: string }).fulfillmentMode;
+      if (mode === "VENDOR_CARRIER") {
+        throw new ConflictException({
+          message:
+            "This order uses the vendor's own carrier — use the Mark handed off action, not Ship.",
+          code: "order_wrong_fulfillment_mode",
+        });
+      }
       // Mark the order lines as SHIPPED + decrement reserved counts.
       const lines = await tx.orderLine.findMany({ where: { orderId: id } });
       for (const line of lines) {
@@ -415,6 +452,110 @@ export class AdminOrderService {
         email: { subject: tpl.subject, html: tpl.html, text: tpl.text },
       });
     }
+    return updated;
+  }
+
+  /**
+   * Migration 0037 — terminal hand-off for VENDOR_CARRIER orders.
+   *
+   * Same starting state as `ship` (PACKED) but skips the Shippo /
+   * tracking-webhook side of the pipeline. The vendor's chosen
+   * carrier owns delivery and any tracking from this point on; the
+   * platform just decrements `quantityReserved` (the parcel has
+   * physically left the warehouse) and stamps `handed_off_at`.
+   *
+   * Refuses to advance PLATFORM_SHIP orders — those have a real
+   * Shippo label and must go through `ship()` so the carrier
+   * reassessment cron + delivered-webhook path stays intact.
+   */
+  async markHandedOff(id: string, actorId: string) {
+    const updated = await this.transition(id, actorId, "handedOff", async (tx, order) => {
+      // Mode guard. Cast the column out of the Order row through an
+      // intermediate `unknown` because the generated Prisma client
+      // doesn't surface fulfillmentMode until `prisma generate` runs
+      // on the deploy machine (same pattern used by other migration-
+      // 0037 spots in this file).
+      const mode = (order as unknown as { fulfillmentMode?: string }).fulfillmentMode;
+      if (mode !== "VENDOR_CARRIER") {
+        throw new ConflictException({
+          message:
+            "This order ships on a USA Errands label — use the Ship action, not Mark handed off.",
+          code: "order_wrong_fulfillment_mode",
+        });
+      }
+
+      // Decrement reserved (the units have left the warehouse) and
+      // flag each line as shipped. Same bookkeeping as ship() — the
+      // wallet has already been debited at create time, so the only
+      // thing left is inventory.
+      const lines = await tx.orderLine.findMany({ where: { orderId: id } });
+      for (const line of lines) {
+        await tx.sku.update({
+          where: { id: line.skuId },
+          data: { quantityReserved: { decrement: line.quantity } },
+        });
+        await tx.inventoryMovement.create({
+          data: {
+            vendorId: line.vendorId,
+            skuId: line.skuId,
+            type: "SHIP",
+            deltaAvailable: 0,
+            deltaReserved: -line.quantity,
+            referenceType: "order",
+            referenceId: id,
+            actorId,
+          },
+        });
+        await tx.orderLine.update({
+          where: { id: line.id },
+          data: { allocationStatus: "SHIPPED" },
+        });
+      }
+
+      const o = await tx.order.update({
+        where: { id },
+        // HANDED_OFF + handedOffAt are added in migration 0037; cast
+        // through `unknown` until Prisma client regenerates.
+        data: ({
+          status: "HANDED_OFF",
+          handedOffAt: new Date(),
+        } as unknown) as Parameters<typeof tx.order.update>[0]["data"],
+      });
+      await tx.orderEvent.create({
+        data: {
+          orderId: id,
+          type: "order.handed_off",
+          description: "Handed to vendor's carrier.",
+          source: "ADMIN",
+          actorId,
+        },
+      });
+      return o;
+    });
+
+    // Fire the same vendor notification as ship() but with copy that
+    // makes clear this is the vendor-carrier path — there's no
+    // platform-side tracking to surface in the body. Failures here do
+    // NOT roll back the transaction above.
+    const ref = formatOrderRef(updated.orderNumber);
+    const carrierName =
+      (updated as unknown as { vendorCarrierName?: string | null }).vendorCarrierName ??
+      updated.carrier ??
+      "your carrier";
+    const tracking =
+      (updated as unknown as { vendorTrackingNumber?: string | null }).vendorTrackingNumber ??
+      updated.trackingNumber ??
+      null;
+    await this.notifications.emit({
+      vendorId: updated.vendorId,
+      type: "order.shipped",
+      severity: "INFO",
+      title: `Order ${ref} handed off`,
+      body: tracking
+        ? `Handed to ${carrierName}. Tracking: ${tracking}.`
+        : `Handed to ${carrierName}.`,
+      href: `/orders/${updated.id}`,
+    }).catch(() => undefined);
     return updated;
   }
 

@@ -97,6 +97,26 @@ export class AdminOrderController {
   }
 
   /**
+   * Migration 0037 — terminal hand-off for VENDOR_CARRIER orders.
+   *
+   * Replaces the `ship` action for orders the vendor brought their
+   * own label for. There's no Shippo label to print, no carrier
+   * reassessment to run — just the physical hand-off to the vendor's
+   * chosen carrier. Status flow: PACKED → HANDED_OFF.
+   *
+   * The service-side guard refuses to advance PLATFORM_SHIP orders
+   * through this endpoint; those still go through `ship`.
+   */
+  @Post(":id/handed-off")
+  @HttpCode(HttpStatus.OK)
+  handedOff(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.orders.markHandedOff(id, user.sub);
+  }
+
+  /**
    * Force-cancel a stuck order. Releases inventory + refunds the wallet in
    * one transaction. Used when a label can't be purchased (e.g. invalid
    * recipient address at the carrier) and the order would otherwise sit
