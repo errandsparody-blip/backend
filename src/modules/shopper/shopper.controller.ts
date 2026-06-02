@@ -100,6 +100,29 @@ export class ShopperController {
   ) {}
 
   // ---------------------------------------------------------------------------
+  // GET /v1/shopper/config/public — buyer-facing config knobs.
+  //
+  // Surfaces the (live) ID-verification threshold so the public
+  // intake page can render an accurate "above $X, ID required" hint
+  // without hardcoding a dollar amount that drifts whenever finance
+  // edits the admin config row. We expose ONLY the threshold for now
+  // — every other config row stays admin-only. If a future addition
+  // needs to be public, add it to the response shape here.
+  //
+  // Public route: no JWT, no token. Throttled enough to stay polite
+  // but generous (the intake page fetches once on mount).
+  // ---------------------------------------------------------------------------
+
+  @Public()
+  @Get("config/public")
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  async getPublicConfig(): Promise<{ idVerificationThresholdCents: number }> {
+    return {
+      idVerificationThresholdCents: await this.loadWireThresholdCents(),
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // POST /v1/shopper — create request + intake Checkout session
   // ---------------------------------------------------------------------------
 
@@ -474,6 +497,14 @@ export class ShopperController {
       typeof bankInstructions.accountNumber === "string" &&
       bankInstructions.accountNumber.trim().length > 0;
 
+    // ID-verification threshold — the LIVE value, not a hardcoded
+    // copy. The IdVerificationCard on the buyer thread uses this
+    // to render "Orders over $X require ID verification" so the
+    // number stays in sync whenever finance edits the admin config
+    // row. Falling back to the compiled-in default is acceptable —
+    // it's the same number the create() path uses on a fresh DB.
+    const idVerificationThresholdCents = await this.loadWireThresholdCents();
+
     return {
       request: {
         ...this.serializeBuyerRequest(request),
@@ -486,6 +517,8 @@ export class ShopperController {
         // isn't due yet. Details are intentionally NOT included.
         paymentMethods,
         warehouseShipFrom,
+        // Live threshold — drives the IdVerificationCard's copy.
+        idVerificationThresholdCents,
       },
       messages: messageRows.map((m) => ({
         id: m.id,
