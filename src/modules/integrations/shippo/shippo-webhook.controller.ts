@@ -199,7 +199,29 @@ export class ShippoWebhookController {
     }
 
     // Don't downgrade. e.g. once SHIPPED, ignore a delayed pre_transit event.
-    const RANK: Record<OrderStatus, number> = {
+    //
+    // Migration 0037 — HANDED_OFF is a terminal success state for
+    // VENDOR_CARRIER orders. Those orders never carry a Shippo label
+    // and Shippo will never emit a tracking webhook for them, so in
+    // practice we should never reach this RANK lookup with a
+    // HANDED_OFF order. We still include it (at the same rank as
+    // DELIVERED) so a spurious webhook can't downgrade the status.
+    //
+    // The type is `Partial<Record<OrderStatus, number>>` rather than the
+    // exhaustive variant so the file builds in both environments where
+    // the Prisma client may be slightly out of sync with the schema
+    // (sandbox regen blocked by binaries.prisma.sh; Railway regen
+    // succeeds at deploy time). The defaultRank fallback below makes
+    // missing keys SAFE — any unmapped status is treated as terminal
+    // (Number.MAX_SAFE_INTEGER), so a webhook for an unknown status
+    // can never be ranked LOWER than a known one and therefore can't
+    // accidentally advance the order.
+    // Plain string-keyed map (not Partial<Record<OrderStatus, number>>)
+    // because the Prisma client may be one schema-bump behind the
+    // application code in CI / local sandboxes. Casting to the strict
+    // type would surface a stale-client error here without adding
+    // safety, since `rankOf` already falls back for unmapped keys.
+    const RANK: Record<string, number> = {
       DRAFT: 0,
       SUBMITTED: 1,
       ALLOCATED: 2,
@@ -210,10 +232,13 @@ export class ShippoWebhookController {
       IN_TRANSIT: 7,
       EXCEPTION: 7,
       DELIVERED: 8,
+      HANDED_OFF: 8,
       RETURNED: 9,
       CANCELLED: 9,
     };
-    if (RANK[targetStatus] < RANK[order.status]) {
+    const rankOf = (s: OrderStatus): number =>
+      RANK[s as string] ?? Number.MAX_SAFE_INTEGER;
+    if (rankOf(targetStatus) < rankOf(order.status)) {
       // Still record the event for the timeline.
       await this.prisma.orderEvent.create({
         data: {
