@@ -265,17 +265,28 @@ export class ShopperRequestService {
        */
       effectiveTaxState: string;
       /**
-       * Migration 0023 — server-derived payment rail. Above the wire
-       * threshold the request is created with `paymentMethod=WIRE`,
-       * status `AWAITING_ID_VERIFICATION`, and we skip the Stripe
-       * Checkout step entirely. Defaults to STRIPE so existing callers
-       * stay on the original flow.
+       * Migration 0023 — server-derived payment rail. WIRE is the only
+       * rail used in production today (the STRIPE branch is no longer
+       * reachable from the public controller as of May 2026), but the
+       * union is preserved for any legacy callers.
        */
       paymentMethod?: "STRIPE" | "WIRE";
+      /**
+       * May 2026 — ID verification gating. When true, the request is
+       * created at status `AWAITING_ID_VERIFICATION` with
+       * idVerificationStatus = `PENDING_UPLOAD`; the buyer must upload
+       * ID before payment instructions are released. When false (or
+       * unset), the request goes straight to `AWAITING_WIRE_PAYMENT`
+       * with idVerificationStatus = `NONE` and the buyer sees the
+       * payment picker immediately. The caller derives this from the
+       * items-subtotal threshold.
+       */
+      requiresIdVerification?: boolean;
     },
   ): Promise<RequestWithLines> {
     const { commissionBps, estimatedTaxBps, effectiveTaxState } = rates;
     const paymentMethod = rates.paymentMethod ?? "STRIPE";
+    const requiresIdVerification = rates.requiresIdVerification === true;
     if (!Number.isInteger(commissionBps) || commissionBps < 0 || commissionBps > COMMISSION_BPS_CAP) {
       // Defence in depth: should already be validated upstream.
       throw new BadRequestException({
@@ -381,13 +392,20 @@ export class ShopperRequestService {
 
       // May 2026 — All-manual payment policy. ID verification is no
       // longer collected. WIRE-rail requests now jump straight to
-      // AWAITING_WIRE_PAYMENT (semantically: "awaiting any manual
-      // payment" — wire / ACH / Zelle / Cash App). The buyer thread
-      // surfaces every active method from configuration and the buyer
-      // picks one. The STRIPE branch is preserved for legacy callers
-      // but is no longer reachable from the public controller.
+      // May 2026 — All-manual payment policy with threshold-gated ID
+      // verification. Initial status depends on (paymentMethod,
+      // requiresIdVerification):
+      //   STRIPE                            → AWAITING_INTAKE_PAYMENT
+      //   WIRE + ID required                → AWAITING_ID_VERIFICATION
+      //   WIRE + ID NOT required            → AWAITING_WIRE_PAYMENT
+      // The STRIPE branch is preserved for legacy callers but is no
+      // longer reachable from the public controller.
       const initialStatus: ShopperRequestStatus =
-        paymentMethod === "WIRE" ? "AWAITING_WIRE_PAYMENT" : "AWAITING_INTAKE_PAYMENT";
+        paymentMethod === "WIRE"
+          ? requiresIdVerification
+            ? "AWAITING_ID_VERIFICATION"
+            : "AWAITING_WIRE_PAYMENT"
+          : "AWAITING_INTAKE_PAYMENT";
 
       const requestRow = await (
         tx as unknown as { shopperRequest: AnyPrismaShopperRequest }
@@ -415,7 +433,12 @@ export class ShopperRequestService {
           // Cast — the generated Prisma client may not include the new
           // enum/column types until `prisma generate` runs post-deploy.
           paymentMethod: paymentMethod as unknown as never,
-          idVerificationStatus: (paymentMethod === "WIRE"
+          // ID verification is required only when the controller flags
+          // the request as above-threshold. Below-threshold WIRE
+          // requests + every STRIPE request go to "NONE" so the bank-
+          // reveal gate on the thread response treats them as
+          // satisfied without any buyer action.
+          idVerificationStatus: (paymentMethod === "WIRE" && requiresIdVerification
             ? "PENDING_UPLOAD"
             : "NONE") as unknown as never,
           lines: {

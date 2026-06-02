@@ -84,14 +84,30 @@ export class AdminConfigController {
       throw new BadRequestException({ message: "key must match [a-z0-9_]{2,64}", code: "config_key_invalid" });
     }
 
+    // Upsert so admins never have to seed config rows out-of-band. New
+    // features (shopper payment methods, etc.) ship without seed SQL —
+    // the first admin save creates the row, every subsequent save
+    // updates it. The audit log captures the create case with
+    // beforeState.value = null so forensic review still tells "this
+    // row didn't exist before" apart from "this row was reset".
     const before = await this.prisma.configuration.findUnique({ where: { key } });
-    if (!before) {
-      throw new BadRequestException({ message: `Unknown configuration key: ${key}`, code: "config_unknown" });
-    }
 
-    const updated = await this.prisma.configuration.update({
+    const updated = await this.prisma.configuration.upsert({
       where: { key },
-      data: {
+      create: {
+        key,
+        value: body.value as object,
+        // Description on first create defaults to a generic
+        // placeholder when the client doesn't supply one, so the
+        // row has SOMETHING in the column for ops who later browse
+        // the configuration table in psql.
+        description:
+          body.description !== undefined
+            ? body.description
+            : `Created by admin via /admin/config/${key}`,
+        updatedBy: user.sub,
+      },
+      update: {
         value: body.value as object,
         ...(body.description !== undefined ? { description: body.description } : {}),
         updatedBy: user.sub,
@@ -101,10 +117,12 @@ export class AdminConfigController {
     await this.audit.log({
       actorId: user.sub,
       actorRole: user.role,
-      action: "config.updated",
+      action: before ? "config.updated" : "config.created",
       resourceType: "configuration",
       resourceId: key,
-      beforeState: { value: before.value, description: before.description },
+      beforeState: before
+        ? { value: before.value, description: before.description }
+        : { value: null, description: null },
       afterState: { value: updated.value, description: updated.description },
     });
 

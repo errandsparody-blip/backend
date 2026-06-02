@@ -66,12 +66,15 @@ const WAREHOUSE_STATE_CONFIG_KEY = "shopper_warehouse_state";
 // row is missing or the resolved state isn't in the tax-rate map.
 const FALLBACK_WAREHOUSE_STATE = "TX";
 const FALLBACK_TAX_BPS = 825;
-// Migration 0023 — items-subtotal threshold above which a buyer is routed
-// onto the wire-transfer + ID-verification track. Configurable via the
-// `shopper_wire_threshold_cents` row; fallback used only if the row is
-// missing (fresh dev environments that haven't run migration 0023 yet).
+// Items-subtotal threshold above which a buyer must complete ID
+// verification before payment instructions are released. May 2026 —
+// repurposed from the original Stripe-vs-wire threshold into a pure
+// ID-gating control; the payment rail is always manual now. Editable
+// via the admin shopper config page (key kept as
+// `shopper_wire_threshold_cents` for back-compat with existing rows).
+// Fallback applies only when the row is absent on a fresh DB.
 const WIRE_THRESHOLD_CONFIG_KEY = "shopper_wire_threshold_cents";
-const WIRE_THRESHOLD_FALLBACK_CENTS = 100_000; // $1,000
+const WIRE_THRESHOLD_FALLBACK_CENTS = 1_000_000; // $10,000
 // Cap on the threshold so a misconfigured row can't push the wire flow
 // effectively off (e.g. a billion-cent threshold) or shrink it to a few
 // dollars by accident.
@@ -153,28 +156,33 @@ export class ShopperController {
       (sum, line) => sum + line.estimatedUnitPriceCents * line.quantity,
       0,
     );
-    // May 2026 — All-manual payment policy. Every intake now routes to
-    // the WIRE rail regardless of cart size. The buyer thread surfaces
-    // every active manual method (wire / ACH / Zelle / Cash App) and
-    // the buyer picks one. The threshold check + STRIPE branch are
-    // preserved in code for reference but the STRIPE path is no longer
-    // reachable; the variable below is unused and kept only to avoid
-    // changing the controller's local-variable shape.
-    void itemsSubtotalForRailCents;
-    void wireThresholdCents;
+    // May 2026 — All-manual payment policy. Payment rail is always WIRE
+    // (the manual rail; STRIPE branch is no longer reachable). The
+    // threshold check is repurposed: it decides whether the buyer must
+    // pass ID verification BEFORE being shown payment instructions.
+    //   itemsSubtotal >= threshold → ID required; status starts at
+    //                                AWAITING_ID_VERIFICATION
+    //   itemsSubtotal <  threshold → no ID; status starts at
+    //                                AWAITING_WIRE_PAYMENT (the buyer
+    //                                sees the multi-method picker
+    //                                immediately).
+    const requiresIdVerification = itemsSubtotalForRailCents >= wireThresholdCents;
     // Annotated explicitly via `as` so the `paymentMethod === "STRIPE"`
     // branch below still type-checks against the wider union, even
     // though we only ever assign "WIRE" today.
     const paymentMethod = "WIRE" as "STRIPE" | "WIRE";
 
-    // 1. Persist request. Status is set inside requests.create() based on
-    //    paymentMethod (AWAITING_INTAKE_PAYMENT for STRIPE,
-    //    AWAITING_ID_VERIFICATION for WIRE).
+    // 1. Persist request. Status + idVerificationStatus are set inside
+    //    requests.create() based on (paymentMethod, requiresIdVerification):
+    //      STRIPE                            → AWAITING_INTAKE_PAYMENT
+    //      WIRE + requiresId                 → AWAITING_ID_VERIFICATION
+    //      WIRE + !requiresId                → AWAITING_WIRE_PAYMENT
     const created = await this.requests.create(body, {
       commissionBps,
       estimatedTaxBps,
       effectiveTaxState,
       paymentMethod,
+      requiresIdVerification,
     });
 
     // 2. Mint a magic-link token for the buyer to access the thread.
@@ -369,20 +377,23 @@ export class ShopperController {
 
     // Bank / payment instructions are only attached to the thread
     // response when the request is in a payment-pending state. May 2026
-    // — the ID-verification gate is dropped (the all-manual payment
-    // policy removed that step) so the only conditions left are:
-    //   1. payment_method is WIRE (i.e. the manual rail), and
-    //   2. status is one of the payment-pending or under-review states.
-    // Defensive gating in addition to the screen-level check on the
-    // client.
+    // — ID-verification is required only for above-threshold requests.
+    // For below-threshold requests, idVerificationStatus is "NONE" so
+    // the ID check is implicitly satisfied. For above-threshold
+    // requests, ID must be APPROVED before payment details are
+    // released. Defensive gating on top of the client-side check.
     const bankRevealStatuses = new Set([
       "QUOTE_SENT",
       "AWAITING_WIRE_PAYMENT",
       "WIRE_PROOF_UPLOADED",
       "WIRE_UNDER_REVIEW",
     ]);
+    const idCheckPassed =
+      request.idVerificationStatus === "NONE" ||
+      request.idVerificationStatus === "APPROVED";
     const shouldRevealBank =
       request.paymentMethod === "WIRE" &&
+      idCheckPassed &&
       bankRevealStatuses.has(request.status as string);
 
     // Migration 0026 — prefer the per-request bank instructions chosen
