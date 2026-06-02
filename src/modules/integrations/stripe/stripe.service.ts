@@ -187,13 +187,18 @@ export class StripeService {
   /**
    * Create a Checkout Session for the buyer's intake payment.
    *
-   * Two line items are presented separately so the buyer's receipt clearly
-   * shows what they're paying the platform vs. what's being held against
-   * their items. The actual items are NOT a Stripe product — Stripe never
-   * sees the merchandise URLs, only the totals.
+   * NOTE (May 2026): The buyer-facing intake flow has moved to manual
+   * payment rails (wire / ACH / Zelle / CashApp) and no longer routes
+   * through Stripe. This method is retained for any legacy code paths
+   * that may still call it but is not used by the new shopper flow.
    *
-   * Returns the session id + the hosted Checkout URL. The caller persists
-   * the session id on the ShopperRequest before redirecting.
+   * Two line items are presented separately so the buyer's receipt
+   * clearly shows what they're paying the platform vs. what's being
+   * held against their items. The actual items are NOT a Stripe product
+   * — Stripe never sees the merchandise URLs, only the totals.
+   *
+   * Returns the session id + the hosted Checkout URL. The caller
+   * persists the session id on the ShopperRequest before redirecting.
    */
   async createShopperIntakeSession(args: CreateShopperIntakeSessionArgs): Promise<{
     sessionId: string;
@@ -244,6 +249,7 @@ export class StripeService {
         },
       });
     }
+
 
     const session = await this.stripe.checkout.sessions.create(
       {

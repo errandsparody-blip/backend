@@ -379,13 +379,15 @@ export class ShopperRequestService {
         throw new Error("Failed to allocate shopper reference (sequence missing).");
       }
 
-      // Migration 0023 — the WIRE rail enters the lifecycle at a totally
-      // different status. The buyer never hits Stripe; they verify ID
-      // first, get a quote with bank details second, wire the money
-      // third. We snapshot the starting status here so the rest of the
-      // service stays unaware of which rail spawned the row.
+      // May 2026 — All-manual payment policy. ID verification is no
+      // longer collected. WIRE-rail requests now jump straight to
+      // AWAITING_WIRE_PAYMENT (semantically: "awaiting any manual
+      // payment" — wire / ACH / Zelle / Cash App). The buyer thread
+      // surfaces every active method from configuration and the buyer
+      // picks one. The STRIPE branch is preserved for legacy callers
+      // but is no longer reachable from the public controller.
       const initialStatus: ShopperRequestStatus =
-        paymentMethod === "WIRE" ? "AWAITING_ID_VERIFICATION" : "AWAITING_INTAKE_PAYMENT";
+        paymentMethod === "WIRE" ? "AWAITING_WIRE_PAYMENT" : "AWAITING_INTAKE_PAYMENT";
 
       const requestRow = await (
         tx as unknown as { shopperRequest: AnyPrismaShopperRequest }

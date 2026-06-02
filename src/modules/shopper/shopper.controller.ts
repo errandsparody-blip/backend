@@ -153,8 +153,19 @@ export class ShopperController {
       (sum, line) => sum + line.estimatedUnitPriceCents * line.quantity,
       0,
     );
-    const paymentMethod: "STRIPE" | "WIRE" =
-      itemsSubtotalForRailCents >= wireThresholdCents ? "WIRE" : "STRIPE";
+    // May 2026 — All-manual payment policy. Every intake now routes to
+    // the WIRE rail regardless of cart size. The buyer thread surfaces
+    // every active manual method (wire / ACH / Zelle / Cash App) and
+    // the buyer picks one. The threshold check + STRIPE branch are
+    // preserved in code for reference but the STRIPE path is no longer
+    // reachable; the variable below is unused and kept only to avoid
+    // changing the controller's local-variable shape.
+    void itemsSubtotalForRailCents;
+    void wireThresholdCents;
+    // Annotated explicitly via `as` so the `paymentMethod === "STRIPE"`
+    // branch below still type-checks against the wider union, even
+    // though we only ever assign "WIRE" today.
+    const paymentMethod = "WIRE" as "STRIPE" | "WIRE";
 
     // 1. Persist request. Status is set inside requests.create() based on
     //    paymentMethod (AWAITING_INTAKE_PAYMENT for STRIPE,
@@ -356,14 +367,14 @@ export class ShopperController {
       parentReference = parentRow?.reference ?? null;
     }
 
-    // Migration 0023 — bank instructions are NEVER rendered on the
-    // intake form. They only ride along on the thread response when:
-    //   1. payment_method is WIRE,
-    //   2. ID is APPROVED, and
-    //   3. status is past the quote-sending step.
+    // Bank / payment instructions are only attached to the thread
+    // response when the request is in a payment-pending state. May 2026
+    // — the ID-verification gate is dropped (the all-manual payment
+    // policy removed that step) so the only conditions left are:
+    //   1. payment_method is WIRE (i.e. the manual rail), and
+    //   2. status is one of the payment-pending or under-review states.
     // Defensive gating in addition to the screen-level check on the
-    // client — keeps the bank details out of any debug payload an
-    // unverified buyer might capture.
+    // client.
     const bankRevealStatuses = new Set([
       "QUOTE_SENT",
       "AWAITING_WIRE_PAYMENT",
@@ -372,7 +383,6 @@ export class ShopperController {
     ]);
     const shouldRevealBank =
       request.paymentMethod === "WIRE" &&
-      request.idVerificationStatus === "APPROVED" &&
       bankRevealStatuses.has(request.status as string);
 
     // Migration 0026 — prefer the per-request bank instructions chosen
@@ -420,13 +430,29 @@ export class ShopperController {
       email: cfg.WAREHOUSE_FROM_EMAIL,
     };
 
+    // May 2026 — Multi-method manual payments. Load the four
+    // shopper_payment_method_<code> config rows and surface only the
+    // ones marked active. Same gating as bankInstructions above so
+    // an unverified buyer can't capture payment details by hitting
+    // the endpoint with a random token before payment is due.
+    const paymentMethods = shouldRevealBank
+      ? await this.loadActivePaymentMethods()
+      : [];
+
     return {
       request: {
         ...this.serializeBuyerRequest(request),
         parentReference,
-        // Surface the bank instructions only on the wire-payment leg.
-        // Null otherwise so the client UI never accidentally renders.
+        // Surface the legacy single bank-instructions block only on the
+        // wire-payment leg. Null otherwise so the client UI never
+        // accidentally renders. Kept for back-compat with the previous
+        // single-method UI; the multi-method picker uses paymentMethods
+        // below.
         bankInstructions,
+        // Each entry is { code, label, details } where details is a
+        // map of human-readable label → value pairs the buyer thread
+        // renders verbatim. Empty array when payment isn't due yet.
+        paymentMethods,
         warehouseShipFrom,
       },
       messages: messageRows.map((m) => ({
@@ -438,6 +464,75 @@ export class ShopperController {
         // Buyers don't get to see admin user identity beyond "ADMIN".
       })),
     };
+  }
+
+  /**
+   * Load the four `shopper_payment_method_<code>` configuration rows
+   * and return the active ones in display order. Each row is JSON of
+   * shape `{ active: boolean, details: { [key]: string } }`.
+   *
+   * Missing rows, parse errors, or inactive rows are silently
+   * filtered out so the buyer never sees a half-configured method.
+   * If every method is missing or inactive, the array is empty —
+   * the frontend renders a fallback ("contact us to arrange
+   * payment") so the buyer is never stranded.
+   */
+  private async loadActivePaymentMethods(): Promise<
+    Array<{ code: string; label: string; details: Record<string, string> }>
+  > {
+    // Display order matches the admin config card order. Hardcoded
+    // (not config-driven) so admins can't accidentally reorder into
+    // a state where Cash App appears above a wire transfer.
+    const specs: ReadonlyArray<{ code: string; label: string }> = [
+      { code: "wire", label: "Wire transfer" },
+      { code: "ach", label: "ACH transfer" },
+      { code: "zelle", label: "Zelle" },
+      { code: "cashapp", label: "Cash App" },
+    ];
+
+    const rows = await Promise.all(
+      specs.map(async (spec) => {
+        try {
+          const row = await this.prisma.configuration.findUnique({
+            where: { key: `shopper_payment_method_${spec.code}` },
+          });
+          if (!row) return null;
+          const value = row.value as { active?: unknown; details?: unknown } | null;
+          if (!value || typeof value !== "object") return null;
+          if (value.active !== true) return null;
+          if (!value.details || typeof value.details !== "object") return null;
+
+          // Normalise details — strip non-string values and empty
+          // strings so the buyer UI only ever sees clean key/value
+          // pairs. Object.entries is safe here because we just
+          // checked typeof === "object".
+          const cleanDetails: Record<string, string> = {};
+          for (const [k, v] of Object.entries(value.details as Record<string, unknown>)) {
+            if (typeof v === "string" && v.trim().length > 0) {
+              cleanDetails[k] = v.trim();
+            }
+          }
+          // Refuse to surface a method with zero details — an
+          // "active but empty" config row is almost certainly a
+          // mistake; better to hide it than show a buyer a blank
+          // card with no way to pay.
+          if (Object.keys(cleanDetails).length === 0) return null;
+
+          return { code: spec.code, label: spec.label, details: cleanDetails };
+        } catch (err) {
+          this.logger.warn(
+            { err, code: spec.code },
+            "shopper.payment_methods.load_failed",
+          );
+          return null;
+        }
+      }),
+    );
+
+    return rows.filter(
+      (r): r is { code: string; label: string; details: Record<string, string> } =>
+        r !== null,
+    );
   }
 
   // ---------------------------------------------------------------------------
