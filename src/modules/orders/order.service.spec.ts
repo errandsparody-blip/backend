@@ -24,6 +24,7 @@ import { Test, type TestingModule } from "@nestjs/testing";
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import { ShippoService } from "../integrations/shippo/shippo.service";
+import { OpsAlertService } from "../notifications/ops-alert.service";
 import { SmartyService } from "../integrations/smarty/smarty.service";
 import { WalletService } from "../wallet/wallet.service";
 
@@ -208,6 +209,12 @@ describe("OrderService — tenant isolation + address rejection", () => {
     shippo = { getRates: jest.fn(async () => ({ shipmentId: "shp_x", rates: [] })) };
     wallet = { debit: jest.fn(), credit: jest.fn() };
     audit = { log: jest.fn() };
+    // OpsAlertService was added to OrderService's constructor in an
+    // earlier change (email + in-app notification to admins on new
+    // order). The fixture was never updated alongside it, which left
+    // these tests red. Mock it as a no-op — the order paths under
+    // test don't depend on the alert succeeding.
+    const opsAlerts = { send: jest.fn().mockResolvedValue(undefined) };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -217,6 +224,11 @@ describe("OrderService — tenant isolation + address rejection", () => {
         { provide: WalletService, useValue: wallet },
         { provide: SmartyService, useValue: smarty },
         { provide: ShippoService, useValue: shippo },
+        // Token-based provider — by class reference rather than string
+        // — matches how the service constructor declares the
+        // dependency. The local mock only implements the subset of
+        // methods exercised by these specs.
+        { provide: OpsAlertService, useValue: opsAlerts },
       ],
     }).compile();
     svc = moduleRef.get(OrderService);
