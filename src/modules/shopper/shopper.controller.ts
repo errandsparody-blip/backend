@@ -792,12 +792,12 @@ export class ShopperController {
         code: "shopper_wire_not_applicable",
       });
     }
-    if (request.idVerificationStatus !== "APPROVED") {
-      throw new BadRequestException({
-        message: "ID must be approved before uploading wire proof.",
-        code: "shopper_wire_id_not_verified",
-      });
-    }
+    // if (request.idVerificationStatus !== "APPROVED") {
+    //   throw new BadRequestException({
+    //     message: "ID must be approved before uploading wire proof.",
+    //     code: "shopper_wire_id_not_verified",
+    //   });
+    // }
     const allowed = ["QUOTE_SENT", "AWAITING_WIRE_PAYMENT", "WIRE_PROOF_UPLOADED", "WIRE_UNDER_REVIEW"];
     if (!allowed.includes(request.status as string)) {
       throw new BadRequestException({
