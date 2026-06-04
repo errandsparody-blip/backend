@@ -56,6 +56,11 @@ import { OpsAlertService } from "../notifications/ops-alert.service";
 import { R2Service } from "../integrations/r2/r2.service";
 import { StripeService } from "../integrations/stripe/stripe.service";
 
+import {
+  buyerIdCheckPassed,
+  buyerIdVerificationRequired,
+  loadWireThresholdCents,
+} from "./shopper-id-verification.util";
 import { ShopperMessageService } from "./shopper-message.service";
 import { ShopperRequestService } from "./shopper-request.service";
 import { ShopperTokenService } from "./shopper-token.service";
@@ -69,19 +74,6 @@ const WAREHOUSE_STATE_CONFIG_KEY = "shopper_warehouse_state";
 // row is missing or the resolved state isn't in the tax-rate map.
 const FALLBACK_WAREHOUSE_STATE = "TX";
 const FALLBACK_TAX_BPS = 825;
-// Items-subtotal threshold above which a buyer must complete ID
-// verification before payment instructions are released. May 2026 —
-// repurposed from the original Stripe-vs-wire threshold into a pure
-// ID-gating control; the payment rail is always manual now. Editable
-// via the admin shopper config page (key kept as
-// `shopper_wire_threshold_cents` for back-compat with existing rows).
-// Fallback applies only when the row is absent on a fresh DB.
-const WIRE_THRESHOLD_CONFIG_KEY = "shopper_wire_threshold_cents";
-const WIRE_THRESHOLD_FALLBACK_CENTS = 1_000_000; // $10,000
-// Cap on the threshold so a misconfigured row can't push the wire flow
-// effectively off (e.g. a billion-cent threshold) or shrink it to a few
-// dollars by accident.
-const WIRE_THRESHOLD_MAX_CENTS = 10_000_000; // $100,000
 const BANK_INSTRUCTIONS_CONFIG_KEY = "shopper_bank_instructions";
 
 @Controller({ path: "shopper", version: "1" })
@@ -118,7 +110,7 @@ export class ShopperController {
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
   async getPublicConfig(): Promise<{ idVerificationThresholdCents: number }> {
     return {
-      idVerificationThresholdCents: await this.loadWireThresholdCents(),
+      idVerificationThresholdCents: await loadWireThresholdCents(this.prisma, this.logger),
     };
   }
 
@@ -149,7 +141,7 @@ export class ShopperController {
     // Migration 0023 — load the wire threshold AFTER computing the items
     // subtotal (we'd need to validate the lines first either way; doing
     // the lookup up here keeps the create-call atomic).
-    const wireThresholdCents = await this.loadWireThresholdCents();
+    const wireThresholdCents = await loadWireThresholdCents(this.prisma, this.logger);
 
     // Resolve the effective tax state for this request. The retailer ships
     // to whoever's address gets put on the order — that's our warehouse
@@ -403,20 +395,20 @@ export class ShopperController {
 
     // Bank / payment instructions are only attached to the thread
     // response when the request is in a payment-pending state. May 2026
-    // — ID-verification is required only for above-threshold requests.
-    // For below-threshold requests, idVerificationStatus is "NONE" so
-    // the ID check is implicitly satisfied. For above-threshold
-    // requests, ID must be APPROVED before payment details are
-    // released. Defensive gating on top of the client-side check.
+    // — ID required only when items subtotal (actual when quoted, else
+    // estimate) is at/above the admin-configured threshold. Defensive
+    // gating on top of the client-side check.
     const bankRevealStatuses = new Set([
       "QUOTE_SENT",
       "AWAITING_WIRE_PAYMENT",
       "WIRE_PROOF_UPLOADED",
       "WIRE_UNDER_REVIEW",
     ]);
-    const idCheckPassed =
-      request.idVerificationStatus === "NONE" ||
-      request.idVerificationStatus === "APPROVED";
+    const idVerificationThresholdCents = await loadWireThresholdCents(
+      this.prisma,
+      this.logger,
+    );
+    const idCheckPassed = buyerIdCheckPassed(request, idVerificationThresholdCents);
     const shouldRevealBank =
       request.paymentMethod === "WIRE" &&
       idCheckPassed &&
@@ -496,14 +488,6 @@ export class ShopperController {
       bankInstructions != null &&
       typeof bankInstructions.accountNumber === "string" &&
       bankInstructions.accountNumber.trim().length > 0;
-
-    // ID-verification threshold — the LIVE value, not a hardcoded
-    // copy. The IdVerificationCard on the buyer thread uses this
-    // to render "Orders over $X require ID verification" so the
-    // number stays in sync whenever finance edits the admin config
-    // row. Falling back to the compiled-in default is acceptable —
-    // it's the same number the create() path uses on a fresh DB.
-    const idVerificationThresholdCents = await this.loadWireThresholdCents();
 
     return {
       request: {
@@ -708,6 +692,13 @@ export class ShopperController {
         code: "shopper_id_not_required",
       });
     }
+    const thresholdCents = await loadWireThresholdCents(this.prisma, this.logger);
+    if (!buyerIdVerificationRequired(request, thresholdCents)) {
+      throw new BadRequestException({
+        message: "This order is below the ID verification threshold.",
+        code: "shopper_id_not_required",
+      });
+    }
     const allowed = ["AWAITING_ID_VERIFICATION", "ID_UNDER_REVIEW"];
     if (
       !allowed.includes(request.status as string) &&
@@ -902,10 +893,8 @@ export class ShopperController {
     // (3) ID check. Mirrors the gating in getThread() so a buyer who
     // hasn't passed ID can't pivot from the picker to an endpoint and
     // skip the check.
-    const idCheckPassed =
-      request.idVerificationStatus === "NONE" ||
-      request.idVerificationStatus === "APPROVED";
-    if (!idCheckPassed) {
+    const thresholdCents = await loadWireThresholdCents(this.prisma, this.logger);
+    if (!buyerIdCheckPassed(request, thresholdCents)) {
       throw new BadRequestException({
         message:
           "Identity verification must be completed before payment instructions can be released.",
@@ -1171,33 +1160,6 @@ export class ShopperController {
         message: "Could not load configuration.",
         code: "shopper_config_unavailable",
       });
-    }
-  }
-
-  /**
-   * Load the wire-track threshold from configuration. Caps the value so
-   * a misconfigured row can't accidentally disable the wire flow
-   * entirely or push it down to a few dollars.
-   */
-  private async loadWireThresholdCents(): Promise<number> {
-    try {
-      const row = await this.prisma.configuration.findUnique({
-        where: { key: WIRE_THRESHOLD_CONFIG_KEY },
-      });
-      if (!row) return WIRE_THRESHOLD_FALLBACK_CENTS;
-      const value = row.value as unknown;
-      const cents = typeof value === "number" ? value : Number(value);
-      if (!Number.isFinite(cents) || cents < 0 || cents > WIRE_THRESHOLD_MAX_CENTS) {
-        this.logger.warn(
-          { value, max: WIRE_THRESHOLD_MAX_CENTS },
-          "shopper_wire_threshold_cents: invalid; falling back to default",
-        );
-        return WIRE_THRESHOLD_FALLBACK_CENTS;
-      }
-      return Math.floor(cents);
-    } catch (err) {
-      this.logger.error({ err }, "shopper.wire_threshold_load_failed");
-      return WIRE_THRESHOLD_FALLBACK_CENTS;
     }
   }
 

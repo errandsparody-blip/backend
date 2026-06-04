@@ -89,6 +89,10 @@ import {
 import { R2Service } from "../integrations/r2/r2.service";
 import { StripeService } from "../integrations/stripe/stripe.service";
 
+import {
+  buyerIdCheckPassed,
+  loadWireThresholdCents,
+} from "./shopper-id-verification.util";
 import { ShopperMessageService } from "./shopper-message.service";
 import { ShopperReceiptService } from "./shopper-receipt.service";
 import { ShopperRequestService } from "./shopper-request.service";
@@ -995,7 +999,8 @@ export class AdminShopperController {
         code: "shopper_wire_not_applicable",
       });
     }
-    if (request.idVerificationStatus !== "APPROVED") {
+    const thresholdCents = await loadWireThresholdCents(this.prisma, this.logger);
+    if (!buyerIdCheckPassed(request, thresholdCents)) {
       throw new BadRequestException({
         message: "Approve the ID before sending the quote.",
         code: "shopper_quote_id_not_verified",

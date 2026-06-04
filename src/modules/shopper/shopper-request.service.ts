@@ -74,6 +74,11 @@ import {
 import { EmailService } from "../email/email.service";
 import { ShopperLedgerService } from "../wallet/shopper-ledger.service";
 
+import {
+  buyerIdCheckPassed,
+  buyerIdVerificationRequired,
+  loadWireThresholdCents,
+} from "./shopper-id-verification.util";
 import { ShopperTokenService } from "./shopper-token.service";
 
 // ---------------------------------------------------------------------------
@@ -1776,6 +1781,13 @@ export class ShopperRequestService {
         code: "shopper_id_not_required",
       });
     }
+    const thresholdCents = await loadWireThresholdCents(this.prisma, this.logger);
+    if (!buyerIdVerificationRequired(before, thresholdCents)) {
+      throw new BadRequestException({
+        message: "This order is below the ID verification threshold.",
+        code: "shopper_id_not_required",
+      });
+    }
     // The buyer can submit/replace uploads while waiting for their first
     // review OR after a rejection asking them to try again. Once we approve
     // (or the request progresses past the ID stage entirely) the upload is
@@ -1994,7 +2006,8 @@ export class ShopperRequestService {
         code: "shopper_wire_not_applicable",
       });
     }
-    if (before.idVerificationStatus !== "APPROVED") {
+    const thresholdCents = await loadWireThresholdCents(this.prisma, this.logger);
+    if (!buyerIdCheckPassed(before, thresholdCents)) {
       throw new BadRequestException({
         message: "ID must be verified before submitting wire proof.",
         code: "shopper_wire_id_not_verified",
