@@ -17,6 +17,7 @@ const SCHEDULE: FeeSchedule = {
   monthlyStorage: { SMALL: 100, MEDIUM: 200, LARGE: 400, X_LARGE: 600, PALLET: null },
   fulfillment: { baseCents: 250, perAdditionalUnitCents: 75 },
   returnsHandlingCents: 500,
+  shippingMarkupBps: 1000, // 10%
 };
 
 describe("computeOrderFees", () => {
@@ -73,6 +74,43 @@ describe("computeOrderFees", () => {
       insuranceRequested: false,
     });
     expect(r.shippingFeeCents).toBe(367);
+  });
+
+  it("honours a configurable shipping markup from the schedule", () => {
+    // 20% markup of 500 = 100 → shipping fee 600.
+    const r = computeOrderFees({
+      schedule: { ...SCHEDULE, shippingMarkupBps: 2000 },
+      totalUnits: 1,
+      carrierCostCents: 500,
+      declaredValueCents: 0,
+      insuranceRequested: false,
+    });
+    expect(r.shippingFeeCents).toBe(600);
+  });
+
+  it("a zero markup passes the carrier cost straight through", () => {
+    const r = computeOrderFees({
+      schedule: { ...SCHEDULE, shippingMarkupBps: 0 },
+      totalUnits: 1,
+      carrierCostCents: 500,
+      declaredValueCents: 0,
+      insuranceRequested: false,
+    });
+    expect(r.shippingFeeCents).toBe(500);
+  });
+
+  it("falls back to the default markup when the field is missing", () => {
+    // Simulate a schedule row written before shippingMarkupBps existed.
+    const legacy = { ...SCHEDULE } as FeeSchedule;
+    delete (legacy as Partial<FeeSchedule>).shippingMarkupBps;
+    const r = computeOrderFees({
+      schedule: legacy,
+      totalUnits: 1,
+      carrierCostCents: 500,
+      declaredValueCents: 0,
+      insuranceRequested: false,
+    });
+    expect(r.shippingFeeCents).toBe(550); // default 10%
   });
 
   it("rejects bad inputs", () => {

@@ -11,10 +11,14 @@
  * not do its own math beyond passing values through.
  */
 
-import type { FeeSchedule } from "./fees";
+import { DEFAULT_SHIPPING_MARKUP_BPS, type FeeSchedule } from "./fees";
 
-/** Markup applied on top of the carrier's quoted shipping cost. 10% v1. */
-export const SHIPPING_MARKUP_BPS = 1000; // 10.00%
+/**
+ * Markup applied on top of the carrier's quoted shipping cost. The live value
+ * comes from the admin-editable fee schedule (`schedule.shippingMarkupBps`);
+ * this constant is only the fallback when a schedule predates that field.
+ */
+export const SHIPPING_MARKUP_BPS = DEFAULT_SHIPPING_MARKUP_BPS; // 10.00%
 
 /** Insurance is 1.5% of declared value, when requested. */
 export const INSURANCE_RATE_BPS = 150;
@@ -49,8 +53,14 @@ export function computeOrderFees(args: ComputeOrderFeesArgs): OrderFeeBreakdown 
     throw new Error("declaredValueCents must be a non-negative integer.");
   }
 
-  // Shipping fee: cost + markup. Round UP so we never under-bill ourselves.
-  const markup = Math.ceil((args.carrierCostCents * SHIPPING_MARKUP_BPS) / 10_000);
+  // Shipping fee: cost + markup. The markup rate is admin-configurable via the
+  // fee schedule; fall back to the default for schedules that predate it.
+  const markupBps =
+    typeof args.schedule.shippingMarkupBps === "number" && args.schedule.shippingMarkupBps >= 0
+      ? args.schedule.shippingMarkupBps
+      : SHIPPING_MARKUP_BPS;
+  // Round UP so we never under-bill ourselves.
+  const markup = Math.ceil((args.carrierCostCents * markupBps) / 10_000);
   const shippingFeeCents = args.carrierCostCents + markup;
 
   // Fulfillment fee: base for the first unit + per-additional for the rest.

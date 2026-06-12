@@ -37,6 +37,7 @@ const SCHEDULE: FeeSchedule = {
   monthlyStorage: { SMALL: 100, MEDIUM: 200, LARGE: 400, X_LARGE: 600, PALLET: 4500 },
   fulfillment: { baseCents: 299, perAdditionalUnitCents: 99 },
   returnsHandlingCents: 500,
+  shippingMarkupBps: 1000,
 };
 
 describe("computeOnboardingFeeCents — LOOSE mode", () => {

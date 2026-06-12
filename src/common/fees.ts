@@ -53,7 +53,17 @@ export interface FeeSchedule {
   monthlyStorage: Record<StorageTier, number | null>;
   fulfillment: { baseCents: number; perAdditionalUnitCents: number };
   returnsHandlingCents: number;
+  /**
+   * Markup applied on top of the carrier's quoted shipping cost, in basis
+   * points (1000 = 10.00%). Admin-editable. Config rows written before this
+   * field existed won't carry it — `loadFeeSchedule` backfills the default
+   * so existing pricing is unchanged until an admin saves a new value.
+   */
+  shippingMarkupBps: number;
 }
+
+/** Default carrier-shipping markup when the config row predates the field. */
+export const DEFAULT_SHIPPING_MARKUP_BPS = 1000; // 10.00%
 
 export type DeclaredBoxCounts = Partial<Record<StorageTier, number>>;
 
@@ -237,5 +247,15 @@ export async function loadFeeSchedule(prisma: PrismaService): Promise<FeeSchedul
       code: "fee_schedule_missing",
     });
   }
-  return row.value as unknown as FeeSchedule;
+  const schedule = row.value as unknown as FeeSchedule;
+  // Backfill the markup for config rows written before the field existed, and
+  // guard against an invalid value being saved through the generic config
+  // PATCH (which doesn't validate the schedule shape). Either way the rest of
+  // the app sees a sane, non-negative basis-points number.
+  const bps = schedule.shippingMarkupBps;
+  schedule.shippingMarkupBps =
+    typeof bps === "number" && Number.isFinite(bps) && bps >= 0
+      ? Math.round(bps)
+      : DEFAULT_SHIPPING_MARKUP_BPS;
+  return schedule;
 }

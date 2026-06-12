@@ -52,6 +52,9 @@ const FEE_SCHEDULE = {
     perAdditionalUnitCents: 99,
   },
   returnsHandlingCents: 600,
+  // Markup on the carrier's quoted shipping cost, in basis points (1000 = 10%).
+  // Admin-editable from Config → Fees.
+  shippingMarkupBps: 1000,
 };
 
 // Inches × inches × inches (L × W × H). maxWeightOz is an internal heuristic

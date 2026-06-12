@@ -54,6 +54,8 @@ export interface RateRequestParcel {
 export interface RateRequest {
   fromAddress: { state: string; postalCode: string; country: string };
   toAddress: {
+    /** Recipient name printed on the label. Falls back to a placeholder if absent. */
+    recipientName?: string | undefined;
     line1: string;
     line2?: string | undefined;
     city: string;
@@ -70,10 +72,60 @@ export interface RateRequest {
 export interface ShippingRate {
   /** Provider rate id — used to purchase a label. */
   rateId: string;
+  /**
+   * Provider shipment id this rate belongs to. Usually the base shipment,
+   * but flat-rate options come from their own per-container shipments, so
+   * each rate carries its own id for the later label purchase.
+   */
+  shipmentId: string;
   carrier: string;
   service: string;
   estimatedDeliveryDays: number;
   costCents: number;
+}
+
+/**
+ * USPS Priority Mail Flat Rate containers. Flat rate is only offered when
+ * the parcel demonstrably fits one of these AND weighs ≤ 70 lb — otherwise
+ * the goods aren't flat-rate eligible and we show weight-based rates only.
+ *
+ * `interiorIn` is the usable interior (sorted ascending at compare time so
+ * the parcel may be rotated). The envelope is modelled as a shallow box.
+ * Tokens are Shippo's USPS flat-rate parcel templates.
+ */
+interface FlatRateContainer {
+  template: string;
+  interiorIn: [number, number, number];
+}
+const FLAT_RATE_MAX_WEIGHT_OZ = 70 * 16; // USPS flat-rate cap: 70 lb.
+const FLAT_RATE_CONTAINERS: ReadonlyArray<FlatRateContainer> = [
+  { template: "USPS_FlatRateEnvelope", interiorIn: [12.5, 9.5, 0.75] },
+  { template: "USPS_SmallFlatRateBox", interiorIn: [8.625, 5.375, 1.625] },
+  { template: "USPS_MediumFlatRateBox1", interiorIn: [11, 8.5, 5.5] },
+  { template: "USPS_LargeFlatRateBox", interiorIn: [12, 12, 5.5] },
+];
+
+/**
+ * Which flat-rate containers a parcel qualifies for. A parcel qualifies only
+ * when (a) all three dimensions are known/measured, (b) total weight is at or
+ * under the 70 lb cap, and (c) it physically fits the container with rotation
+ * allowed. Unknown dimensions return `[]` — we never offer a flat-rate box we
+ * can't prove the goods fit into.
+ */
+export function eligibleFlatRateContainers(parcel: {
+  weightOz: number;
+  lengthIn: number;
+  widthIn: number;
+  heightIn: number;
+}): ReadonlyArray<FlatRateContainer> {
+  const dims = [parcel.lengthIn, parcel.widthIn, parcel.heightIn];
+  if (dims.some((d) => !(d > 0))) return []; // dimensions unknown → can't prove fit
+  if (parcel.weightOz > FLAT_RATE_MAX_WEIGHT_OZ) return [];
+  const sortedParcel = [...dims].sort((a, b) => a - b);
+  return FLAT_RATE_CONTAINERS.filter((c) => {
+    const sortedBox = [...c.interiorIn].sort((a, b) => a - b);
+    return sortedParcel.every((d, i) => d <= sortedBox[i]!);
+  });
 }
 
 export interface RateResponse {
@@ -261,33 +313,37 @@ export class ShippoService {
     const widthIn = req.parcel.widthIn > 0 ? req.parcel.widthIn : 1;
     const heightIn = req.parcel.heightIn > 0 ? req.parcel.heightIn : 1;
 
+    // Shippo creates the to_address + from_address inline as part of the
+    // shipment payload. We pass them as objects rather than ID refs to
+    // avoid the extra round-trip needed to pre-create address records.
+    // Held in locals so the flat-rate shipments below can reuse them.
+    const addressFrom = {
+      name: this.cfg.WAREHOUSE_FROM_NAME,
+      street1: this.cfg.WAREHOUSE_FROM_STREET1,
+      street2: this.cfg.WAREHOUSE_FROM_STREET2 ?? "",
+      city: this.cfg.WAREHOUSE_FROM_CITY,
+      state: this.cfg.WAREHOUSE_FROM_STATE,
+      zip: this.cfg.WAREHOUSE_FROM_ZIP,
+      country: "US",
+      phone: this.cfg.WAREHOUSE_FROM_PHONE,
+      // USPS rejects label purchase without sender email. See config.ts.
+      email: this.cfg.WAREHOUSE_FROM_EMAIL,
+    };
+    const addressTo = {
+      // Recipient name as printed on the label. Trim and fall back to a
+      // placeholder only if the caller genuinely has no name on file —
+      // an empty string here would make USPS reject the label.
+      name: req.toAddress.recipientName?.trim() || "Recipient",
+      street1: req.toAddress.line1,
+      street2: req.toAddress.line2 ?? "",
+      city: req.toAddress.city,
+      state: req.toAddress.state,
+      zip: req.toAddress.postalCode,
+      country: req.toAddress.country,
+    };
     const body = {
-      // Shippo creates the to_address + from_address inline as part of the
-      // shipment payload. We pass them as objects rather than ID refs to
-      // avoid the extra round-trip needed to pre-create address records.
-      address_from: {
-        name: this.cfg.WAREHOUSE_FROM_NAME,
-        street1: this.cfg.WAREHOUSE_FROM_STREET1,
-        street2: this.cfg.WAREHOUSE_FROM_STREET2 ?? "",
-        city: this.cfg.WAREHOUSE_FROM_CITY,
-        state: this.cfg.WAREHOUSE_FROM_STATE,
-        zip: this.cfg.WAREHOUSE_FROM_ZIP,
-        country: "US",
-        phone: this.cfg.WAREHOUSE_FROM_PHONE,
-        // USPS rejects label purchase without sender email. See config.ts.
-        email: this.cfg.WAREHOUSE_FROM_EMAIL,
-      },
-      address_to: {
-        // Shippo derives the recipient name from address fields if missing;
-        // we don't have a free-text name on the request type at this layer.
-        name: "Recipient",
-        street1: req.toAddress.line1,
-        street2: req.toAddress.line2 ?? "",
-        city: req.toAddress.city,
-        state: req.toAddress.state,
-        zip: req.toAddress.postalCode,
-        country: req.toAddress.country,
-      },
+      address_from: addressFrom,
+      address_to: addressTo,
       parcels: [
         {
           length: lengthIn.toString(),
@@ -316,11 +372,17 @@ export class ShippoService {
 
     const rates: ShippingRate[] = ship.rates.map((r) => ({
       rateId: r.object_id,
+      shipmentId: ship.object_id,
       carrier: r.provider,
       service: r.servicelevel?.name ?? r.servicelevel?.token ?? "Standard",
       estimatedDeliveryDays: this.normalizeDeliveryDays(r.estimated_days),
       costCents: this.dollarsToCents(r.amount),
     }));
+
+    // Flat-rate options live in their own per-container shipments (a Shippo
+    // shipment prices exactly one parcel). Fetch them in parallel and merge.
+    // Failures here must never sink the base quote — flat rate is additive.
+    const flatRates = await this.getFlatRateOptions(req, addressFrom, addressTo);
 
     this.log.debug({
       msg: "getRates",
@@ -328,9 +390,56 @@ export class ShippoService {
       toState: req.toAddress.state,
       toZipPrefix: req.toAddress.postalCode.slice(0, 3),
       count: rates.length,
+      flatRateCount: flatRates.length,
     });
 
-    return { shipmentId: ship.object_id, rates };
+    return { shipmentId: ship.object_id, rates: [...rates, ...flatRates] };
+  }
+
+  /**
+   * Returns USPS Priority Mail Flat Rate options for every container the
+   * parcel fits, or `[]` when none qualify (unknown dims, over 70 lb, or
+   * nothing fits). Each container is a separate Shippo shipment using its
+   * flat-rate template; we keep only the genuinely flat-rate service levels
+   * so we don't duplicate the weight-based rates from the base shipment.
+   */
+  private async getFlatRateOptions(
+    req: RateRequest,
+    addressFrom: Record<string, string>,
+    addressTo: Record<string, string>,
+  ): Promise<ShippingRate[]> {
+    const eligible = eligibleFlatRateContainers(req.parcel);
+    if (eligible.length === 0) return [];
+
+    const weightOz = Math.max(1, Math.round(req.parcel.weightOz));
+    const perContainer = await Promise.all(
+      eligible.map(async (c) => {
+        try {
+          const ship = await this.request<ShShipment>("POST", "/shipments/", {
+            address_from: addressFrom,
+            address_to: addressTo,
+            // A flat-rate template replaces explicit dimensions — USPS prices
+            // by the box, not by size, as long as weight stays under the cap.
+            parcels: [{ template: c.template, weight: weightOz.toString(), mass_unit: "oz" }],
+            async: false,
+          });
+          return (ship.rates ?? [])
+            .filter((r) => (r.servicelevel?.name ?? "").toLowerCase().includes("flat rate"))
+            .map<ShippingRate>((r) => ({
+              rateId: r.object_id,
+              shipmentId: ship.object_id,
+              carrier: r.provider,
+              service: r.servicelevel?.name ?? r.servicelevel?.token ?? "Flat Rate",
+              estimatedDeliveryDays: this.normalizeDeliveryDays(r.estimated_days),
+              costCents: this.dollarsToCents(r.amount),
+            }));
+        } catch (err) {
+          this.log.warn({ msg: "flat-rate lookup failed", template: c.template, err: `${err}` });
+          return [];
+        }
+      }),
+    );
+    return perContainer.flat();
   }
 
   // ---------------------------------------------------------------------------
@@ -348,6 +457,7 @@ export class ShippoService {
     const rates: ShippingRate[] = [
       {
         rateId: `rate_stub_usps_priority_${shipmentId}`,
+        shipmentId,
         carrier: "USPS",
         service: "Priority Mail",
         estimatedDeliveryDays: 3,
@@ -355,6 +465,7 @@ export class ShippoService {
       },
       {
         rateId: `rate_stub_ups_ground_${shipmentId}`,
+        shipmentId,
         carrier: "UPS",
         service: "Ground",
         estimatedDeliveryDays: 4,
@@ -362,12 +473,34 @@ export class ShippoService {
       },
       {
         rateId: `rate_stub_fedex_home_${shipmentId}`,
+        shipmentId,
         carrier: "FedEx",
         service: "Home Delivery",
         estimatedDeliveryDays: 5,
         costCents: baseFedEx,
       },
     ];
+
+    // Mirror the live path: surface flat-rate options for every container the
+    // parcel actually fits, so the dev/test quote view matches production.
+    const FLAT_RATE_STUB_CENTS: Record<string, { service: string; cents: number }> = {
+      USPS_FlatRateEnvelope: { service: "Priority Mail Flat Rate Envelope", cents: 1010 },
+      USPS_SmallFlatRateBox: { service: "Priority Mail Flat Rate Small Box", cents: 1065 },
+      USPS_MediumFlatRateBox1: { service: "Priority Mail Flat Rate Medium Box", cents: 1810 },
+      USPS_LargeFlatRateBox: { service: "Priority Mail Flat Rate Large Box", cents: 2395 },
+    };
+    for (const c of eligibleFlatRateContainers(req.parcel)) {
+      const meta = FLAT_RATE_STUB_CENTS[c.template];
+      if (!meta) continue;
+      rates.push({
+        rateId: `rate_stub_${c.template.toLowerCase()}_${shipmentId}`,
+        shipmentId,
+        carrier: "USPS",
+        service: meta.service,
+        estimatedDeliveryDays: 3,
+        costCents: meta.cents,
+      });
+    }
 
     this.log.debug({
       msg: "getRates (stub)",

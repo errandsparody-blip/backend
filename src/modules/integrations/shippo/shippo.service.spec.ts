@@ -99,7 +99,7 @@ describe("ShippoService — boundary helpers", () => {
       expect(svc.isLive()).toBe(false);
     });
 
-    it("getRates returns three carriers with positive integer cents", async () => {
+    it("getRates returns the three base carriers with positive integer cents", async () => {
       const resp = await svc.getRates({
         fromAddress: { state: "FL", postalCode: "33101", country: "US" },
         toAddress: {
@@ -109,7 +109,9 @@ describe("ShippoService — boundary helpers", () => {
           postalCode: "33101",
           country: "US",
         },
-        parcel: { weightOz: 16, lengthIn: 9, widthIn: 6, heightIn: 3 },
+        // Large/awkward parcel that fits no flat-rate container — so the
+        // result is exactly the three weight-based carriers.
+        parcel: { weightOz: 16, lengthIn: 20, widthIn: 16, heightIn: 10 },
         declaredValueCents: 5_000,
         insuranceRequested: false,
       });
@@ -120,7 +122,51 @@ describe("ShippoService — boundary helpers", () => {
         expect(rate.costCents).toBeGreaterThan(0);
         expect(Number.isInteger(rate.costCents)).toBe(true);
         expect(rate.carrier).toMatch(/USPS|UPS|FedEx/);
+        expect(rate.shipmentId).toBe(resp.shipmentId);
       }
+    });
+
+    it("getRates surfaces flat-rate options when the parcel fits a container", async () => {
+      const resp = await svc.getRates({
+        fromAddress: { state: "FL", postalCode: "33101", country: "US" },
+        toAddress: {
+          line1: "1 Test Way",
+          city: "Miami",
+          state: "FL",
+          postalCode: "33101",
+          country: "US",
+        },
+        // 9×6×3 @ 1 lb fits the Medium and Large flat-rate boxes.
+        parcel: { weightOz: 16, lengthIn: 9, widthIn: 6, heightIn: 3 },
+        declaredValueCents: 5_000,
+        insuranceRequested: false,
+      });
+
+      const flat = resp.rates.filter((r) => /flat rate/i.test(r.service));
+      expect(flat.length).toBeGreaterThan(0);
+      for (const rate of flat) {
+        expect(rate.carrier).toBe("USPS");
+        expect(rate.costCents).toBeGreaterThan(0);
+      }
+    });
+
+    it("getRates omits flat-rate options when dimensions are unknown", async () => {
+      const resp = await svc.getRates({
+        fromAddress: { state: "FL", postalCode: "33101", country: "US" },
+        toAddress: {
+          line1: "1 Test Way",
+          city: "Miami",
+          state: "FL",
+          postalCode: "33101",
+          country: "US",
+        },
+        // Weight-only listing: no measured dims → we can't prove fit.
+        parcel: { weightOz: 16, lengthIn: 0, widthIn: 0, heightIn: 0 },
+        declaredValueCents: 5_000,
+        insuranceRequested: false,
+      });
+
+      expect(resp.rates.filter((r) => /flat rate/i.test(r.service))).toHaveLength(0);
     });
 
     it("getRates rejects zero/negative weight", async () => {

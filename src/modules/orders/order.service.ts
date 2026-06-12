@@ -285,6 +285,7 @@ export class OrderService {
     const rateResp = await this.shippo.getRates({
       fromAddress: this.warehouseOrigin,
       toAddress: {
+        recipientName: input.recipient.recipientName,
         line1: input.recipient.shipAddressLine1,
         line2: input.recipient.shipAddressLine2,
         city: input.recipient.shipCity,
@@ -317,7 +318,7 @@ export class OrderService {
           declaredValueCents,
           insuranceRequested: input.insuranceRequested,
         }),
-        rateProviderRef: rateResp.shipmentId,
+        rateProviderRef: r.shipmentId,
         ratePurchasedRef: r.rateId,
       }));
 
@@ -459,6 +460,7 @@ export class OrderService {
       rateResp = await this.shippo.getRates({
         fromAddress: this.warehouseOrigin,
         toAddress: {
+          recipientName: input.recipient.recipientName,
           line1: input.recipient.shipAddressLine1,
           line2: input.recipient.shipAddressLine2,
           city: input.recipient.shipCity,
@@ -623,7 +625,7 @@ export class OrderService {
                 ? `${chosen.carrier} ${chosen.service}`
                 : null,
           rateProviderRef:
-            input.fulfillmentMode === "VENDOR_CARRIER" ? null : rateResp?.shipmentId ?? null,
+            input.fulfillmentMode === "VENDOR_CARRIER" ? null : chosen?.shipmentId ?? null,
           ratePurchasedRef:
             input.fulfillmentMode === "VENDOR_CARRIER" ? null : chosen?.rateId ?? null,
           // Migration 0037 — fulfillment branch + vendor-supplied label
