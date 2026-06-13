@@ -296,7 +296,13 @@ export class AdminShopperController {
         };
       }
 
-      let session: { sessionId: string; paymentIntentId: string | null; url: string };
+      let session: {
+        sessionId: string;
+        paymentIntentId: string | null;
+        url: string;
+        grossAmountCents: number;
+        processorFeeCents: number;
+      };
       try {
         session = await this.stripe.createShopperShippingSession({
           requestId: id,
@@ -305,8 +311,11 @@ export class AdminShopperController {
           description: `Shipping & handling · ${updated.reference}`,
           // Per-request + per-amount idempotency: changing the cost
           // produces a new session; re-saving the same cost returns
-          // the existing one (no orphaned Checkout pages).
-          idempotencyKey: `shopper:shipping:${id}:${chargedCents}`,
+          // the existing one (no orphaned Checkout pages). The `:fee`
+          // suffix invalidates any pre-gross-up session Stripe may still
+          // have cached (24h TTL) so the processing-fee line takes effect
+          // immediately on deploy rather than after the old session ages out.
+          idempotencyKey: `shopper:shipping:${id}:${chargedCents}:fee`,
           successUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(fresh)}?shipping=paid`,
           cancelUrl: `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(fresh)}?shipping=cancelled`,
         });
@@ -374,7 +383,8 @@ export class AdminShopperController {
       // message so it stands apart from the receipt note above. Best-
       // effort — a chat-post failure must not undo the Stripe call.
       const invoiceLine =
-        `Shipping invoice: ${dollars(chargedCents)}.\n\n` +
+        `Shipping invoice: ${dollars(chargedCents)} + ${dollars(session.processorFeeCents)} card ` +
+        `processing fee = ${dollars(session.grossAmountCents)}.\n\n` +
         `Pay securely (Stripe): ${session.url}\n\n` +
         `As soon as this is paid we'll release your package for shipment and email you tracking. ` +
         `The receipt above shows how this number was calculated.`;
@@ -395,6 +405,8 @@ export class AdminShopperController {
           threadToken: fresh,
           shippingPayUrl: session.url,
           amountCents: chargedCents,
+          processorFeeCents: session.processorFeeCents,
+          totalCents: session.grossAmountCents,
           shippingMethod,
           receiptHtml: receipt.html || undefined,
           receiptText: receipt.text || undefined,
@@ -408,7 +420,7 @@ export class AdminShopperController {
           // Per-request + per-amount key so a re-save with a NEW amount
           // sends a fresh email, but two clicks with the same number
           // don't spam the buyer.
-          idempotencyKey: `shopper:shipping_email:${id}:${chargedCents}`,
+          idempotencyKey: `shopper:shipping_email:${id}:${chargedCents}:fee`,
           type: "shopper.shipping_invoice",
         });
       } catch (err) {

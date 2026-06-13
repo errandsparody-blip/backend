@@ -472,11 +472,19 @@ export class StripeService {
     sessionId: string;
     paymentIntentId: string | null;
     url: string;
+    grossAmountCents: number;
+    processorFeeCents: number;
   }> {
     if (!this.stripe) throw new Error("Stripe is not configured.");
     if (!Number.isInteger(args.amountCents) || args.amountCents <= 0) {
       throw new Error("amountCents must be a positive integer for a shipping Checkout session.");
     }
+
+    // The buyer covers Stripe's processing fee on company-freight shipping —
+    // same gross-up math as wallet funding. The shipping cost is the net the
+    // platform must receive; the fee is surfaced as its own line so the buyer
+    // sees exactly what they're paying.
+    const { processorFeeCents } = StripeService.grossUpCents(args.amountCents);
 
     const session = await this.stripe.checkout.sessions.create(
       {
@@ -490,6 +498,14 @@ export class StripeService {
               currency: "usd",
               unit_amount: args.amountCents,
               product_data: { name: args.description ?? "Shipping & handling" },
+            },
+          },
+          {
+            quantity: 1,
+            price_data: {
+              currency: "usd",
+              unit_amount: processorFeeCents,
+              product_data: { name: "Card processing fee" },
             },
           },
         ],
@@ -516,6 +532,8 @@ export class StripeService {
           ? session.payment_intent
           : session.payment_intent?.id ?? null,
       url: session.url ?? "",
+      grossAmountCents: args.amountCents + processorFeeCents,
+      processorFeeCents,
     };
   }
 

@@ -712,12 +712,20 @@ export function shopperShippingInvoiceTemplate(args: {
   threadToken: string;
   shippingPayUrl: string;
   amountCents: number;
+  /** Stripe card processing fee added on top (gross-up). Optional for legacy callers. */
+  processorFeeCents?: number;
+  /** Total the buyer is charged (shipping + fee). Defaults to amountCents when no fee. */
+  totalCents?: number;
   shippingMethod: string;
   receiptHtml?: string;
   receiptText?: string;
   receiptImageUrl?: string | null;
 }): RenderedEmail {
-  const amount = `$${(args.amountCents / 100).toFixed(2)}`;
+  const dollars = (cents: number): string => `$${(cents / 100).toFixed(2)}`;
+  const amount = dollars(args.amountCents);
+  const feeCents = args.processorFeeCents ?? 0;
+  const totalCents = args.totalCents ?? args.amountCents + feeCents;
+  const total = dollars(totalCents);
   const methodLabel =
     args.shippingMethod === "PLATFORM_FREIGHT"
       ? "USA Errands freight"
@@ -729,22 +737,33 @@ export function shopperShippingInvoiceTemplate(args: {
     args.receiptImageUrl
       ? `<p style="margin:8px 0 0 0;font-size:12px;color:#777270;">Prefer the visual version? <a href="${escape(args.receiptImageUrl)}" style="color:#777270;text-decoration:underline;">Open the receipt image</a> in your browser.</p>`
       : "";
+  // Show the fee breakdown only when a processing fee is actually applied.
+  const breakdownHtml =
+    feeCents > 0
+      ? `<p style="margin:0 0 4px 0;color:#9C9892;font-size:13px;">Shipping &amp; handling: ${amount}</p>
+        <p style="margin:0 0 4px 0;color:#9C9892;font-size:13px;">Card processing fee: ${dollars(feeCents)}</p>
+        <p style="margin:0 0 12px 0;color:#3A3A3A;font-size:16px;"><strong>Total due: ${total}</strong></p>`
+      : `<p style="margin:0 0 12px 0;color:#3A3A3A;font-size:16px;"><strong>Shipping &amp; handling: ${amount}</strong></p>`;
+  const breakdownText =
+    feeCents > 0
+      ? `Shipping & handling: ${amount}\nCard processing fee: ${dollars(feeCents)}\nTotal due: ${total}\n\n`
+      : `Amount: ${amount}\n\n`;
   const base: RenderedEmail = {
-    subject: `Shipping invoice — ${amount}`,
+    subject: `Shipping invoice — ${total}`,
     html: shell({
       eyebrow: "  Shipping invoice",
       title: "One more step before we ship",
       bodyHtml: `<p style="margin:0 0 12px 0;">Your items are at our warehouse. Pay the shipping line to release the package via <strong>${escape(methodLabel)}</strong>.</p>
-        <p style="margin:0 0 12px 0;color:#3A3A3A;font-size:16px;"><strong>Shipping &amp; handling: ${amount}</strong></p>
+        ${breakdownHtml}
         <p style="margin:0 0 16px 0;color:#9C9892;font-size:13px;">As soon as this is paid we'll dispatch your package and email tracking.</p>
         ${receiptBody}
         ${receiptImgLink}`,
-      cta: { label: `Pay ${amount} securely`, href: shopperPayUrl(args.shippingPayUrl) },
+      cta: { label: `Pay ${total} securely`, href: shopperPayUrl(args.shippingPayUrl) },
     }),
     text:
-      `Shipping invoice — ${amount}\n\n` +
+      `Shipping invoice — ${total}\n\n` +
       `Shipping method: ${methodLabel}\n` +
-      `Amount: ${amount}\n\n` +
+      breakdownText +
       `Pay securely: ${args.shippingPayUrl}\n\n` +
       (args.receiptText ? `${args.receiptText}\n\n` : "") +
       `Thread: ${shopperThreadUrl(args.threadToken)}`,
