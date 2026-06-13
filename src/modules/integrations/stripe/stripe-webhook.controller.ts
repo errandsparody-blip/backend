@@ -196,6 +196,15 @@ export class StripeWebhookController {
       await this.shopper.markIntakePaid({ requestId, stripeIntentId: intent.id });
       return;
     }
+    if (purpose === "shopper.card_intake") {
+      const requestId = intent.metadata?.["shopperRequestId"];
+      if (!requestId) {
+        this.logger.error({ id: intent.id }, "Shopper card intake intent missing requestId.");
+        return;
+      }
+      await this.shopper.markCardIntakePaid({ requestId, stripeIntentId: intent.id });
+      return;
+    }
     if (purpose === "shopper.followup") {
       const requestId = intent.metadata?.["shopperRequestId"];
       if (!requestId) {
@@ -299,6 +308,9 @@ export class StripeWebhookController {
 
     if (purpose === "shopper.intake") {
       await this.shopper.markIntakePaid({ requestId, stripeIntentId: intentId });
+    } else if (purpose === "shopper.card_intake") {
+      // Buyer paid by card at the manual-payment picker — lands in PROCURING.
+      await this.shopper.markCardIntakePaid({ requestId, stripeIntentId: intentId });
     } else if (purpose === "shopper.followup") {
       await this.shopper.markFollowupPaid({ requestId, stripeIntentId: intentId });
     } else if (purpose === "shopper.shipping") {

@@ -122,6 +122,11 @@ export class StripeService {
     }
   }
 
+  /** True when a Stripe API key is configured (card payments are possible). */
+  isConfigured(): boolean {
+    return this.stripe !== null;
+  }
+
   /**
    * Compute the gross-up amount, rounded up to the nearest cent.
    * Pure function — no Stripe call. Exposed as a static helper so unit tests
@@ -290,6 +295,113 @@ export class StripeService {
           ? session.payment_intent
           : session.payment_intent?.id ?? null,
       url: session.url ?? "",
+    };
+  }
+
+  /**
+   * Create a Checkout Session for a buyer who picks "card" at the manual-
+   * payment picker. Unlike the legacy intake session above, the buyer here
+   * covers the Stripe processing fee: we gross up (items + commission + tax)
+   * with the same 2.9% + $0.30 math the wallet funding uses, and surface the
+   * fee as its own line so the buyer sees exactly what they're paying.
+   *
+   * Carries `purpose: "shopper.card_intake"` so the webhook routes it to the
+   * card-confirm path (which lands the request straight in PROCURING, the
+   * same place an admin-confirmed wire lands it).
+   */
+  async createShopperCardIntakeSession(args: CreateShopperIntakeSessionArgs): Promise<{
+    sessionId: string;
+    paymentIntentId: string | null;
+    url: string;
+    grossAmountCents: number;
+    processorFeeCents: number;
+  }> {
+    if (!this.stripe) throw new Error("Stripe is not configured.");
+    if (!Number.isInteger(args.itemsSubtotalCents) || args.itemsSubtotalCents <= 0) {
+      throw new Error("itemsSubtotalCents must be a positive integer.");
+    }
+    if (!Number.isInteger(args.commissionCents) || args.commissionCents < 0) {
+      throw new Error("commissionCents must be a non-negative integer.");
+    }
+
+    // Net is what the platform must net after Stripe's cut. The processor fee
+    // is the difference the buyer pays on top.
+    const netCents = args.itemsSubtotalCents + args.commissionCents + args.estimatedTaxCents;
+    const { processorFeeCents } = StripeService.grossUpCents(netCents);
+
+    const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
+      {
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: args.itemsSubtotalCents,
+          product_data: { name: "Items (estimate, charged at procurement)" },
+        },
+      },
+    ];
+    if (args.commissionCents > 0) {
+      lineItems.push({
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: args.commissionCents,
+          product_data: { name: "USA Errands service fee" },
+        },
+      });
+    }
+    if (args.estimatedTaxCents > 0) {
+      lineItems.push({
+        quantity: 1,
+        price_data: {
+          currency: "usd",
+          unit_amount: args.estimatedTaxCents,
+          product_data: {
+            name: "Estimated U.S. sales tax (reconciled at procurement)",
+          },
+        },
+      });
+    }
+    // Processor fee always > 0 (gross-up adds at least the $0.30 fixed part).
+    lineItems.push({
+      quantity: 1,
+      price_data: {
+        currency: "usd",
+        unit_amount: processorFeeCents,
+        product_data: { name: "Card processing fee" },
+      },
+    });
+
+    const metadata = {
+      purpose: "shopper.card_intake",
+      shopperRequestId: args.requestId,
+    };
+    const session = await this.stripe.checkout.sessions.create(
+      {
+        mode: "payment",
+        customer_email: args.buyerEmail,
+        payment_method_types: ["card"],
+        line_items: lineItems,
+        metadata,
+        payment_intent_data: {
+          metadata,
+          description: `USA Errands shopper card intake · ${args.requestId}`,
+        },
+        success_url: args.successUrl,
+        cancel_url: args.cancelUrl,
+        billing_address_collection: "auto",
+      },
+      { idempotencyKey: args.idempotencyKey },
+    );
+
+    return {
+      sessionId: session.id,
+      paymentIntentId:
+        typeof session.payment_intent === "string"
+          ? session.payment_intent
+          : session.payment_intent?.id ?? null,
+      url: session.url ?? "",
+      grossAmountCents: netCents + processorFeeCents,
+      processorFeeCents,
     };
   }
 

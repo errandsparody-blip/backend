@@ -647,6 +647,84 @@ export class ShopperRequestService {
     return updated;
   }
 
+  /**
+   * Card payment confirmed for a manual-track ("WIRE") request whose buyer
+   * chose "card" at the payment picker. Stripe is the source of truth, so —
+   * unlike a manual wire that an admin reviews — this lands the request
+   * straight in PROCURING, mirroring confirmWirePayment(). Idempotent on the
+   * intent id so a webhook replay (and the PI/checkout double-fire) is a no-op.
+   */
+  async markCardIntakePaid(args: {
+    requestId: string;
+    stripeIntentId: string;
+    paidAt?: Date;
+  }): Promise<RequestRow> {
+    const before = await this.getById(args.requestId, { includeLines: false });
+    // Idempotent: already settled by an earlier delivery of this intent.
+    if (before.intakePaidAt && before.intakeStripeIntentId === args.stripeIntentId) {
+      return before;
+    }
+    // Only advance from a payment-awaiting state. If the request already moved
+    // on (admin action, race), don't bounce it backward.
+    const allowed = new Set([
+      "QUOTE_SENT",
+      "AWAITING_WIRE_PAYMENT",
+      "WIRE_PROOF_UPLOADED",
+      "WIRE_UNDER_REVIEW",
+    ]);
+    if (!allowed.has(before.status as string)) {
+      return before;
+    }
+
+    const paidAt = args.paidAt ?? new Date();
+    const updated = await (
+      this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
+    ).shopperRequest.update({
+      where: { id: args.requestId },
+      data: {
+        // Reuse intakePaidAt + intakeStripeIntentId so downstream consumers
+        // (receipts, reports) read the payment uniformly across rails.
+        intakePaidAt: paidAt,
+        intakeStripeIntentId: args.stripeIntentId,
+        status: "PROCURING" as unknown as never,
+      },
+    });
+
+    await this.audit.log({
+      action: "shopper.card.paid",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      beforeState: { status: before.status },
+      afterState: {
+        status: "PROCURING",
+        stripeIntentId: args.stripeIntentId,
+        chain: ["PAID", "PURCHASE_APPROVED", "PROCURING"],
+      },
+    });
+
+    // Unified-finance ledger — same entries the Stripe-intake rail records.
+    // Idempotent on its own keys; best-effort so a ledger hiccup never blocks
+    // the buyer's confirmed payment.
+    void this.shopperLedger
+      .recordIntakePaid({
+        shopperRequestId: updated.id,
+        reference: updated.reference,
+        itemsCents: updated.itemsSubtotalCents,
+        commissionCents: updated.commissionCents,
+        occurredAt: updated.intakePaidAt ?? paidAt,
+      })
+      .catch((err: unknown) => {
+        this.logger.error(
+          { err: (err as Error).message, requestId: updated.id },
+          "Failed to record shopper ledger entries on card intake paid",
+        );
+      });
+
+    void this.notifyIntakePaid(updated).catch(() => undefined);
+
+    return updated;
+  }
+
   /** Admin starts procurement — flips PAID → PROCURING. */
   async startProcurement(args: { requestId: string; actorId: string }): Promise<RequestRow> {
     return this.transition(args.requestId, {

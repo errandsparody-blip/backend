@@ -578,10 +578,35 @@ export class ShopperController {
       }),
     );
 
-    return rows.filter(
+    const manual = rows.filter(
       (r): r is { code: string; label: string; details: Record<string, string> } =>
         r !== null,
     );
+
+    // Card (Stripe) — always offered LAST. It's a built-in rail with no
+    // credential details (the buyer pays on a hosted Checkout page, not by
+    // copying account numbers), so it bypasses the details requirement above.
+    // Gated on (a) an admin-toggled config row AND (b) Stripe actually being
+    // configured, so the option never appears when it can't complete.
+    if (this.stripe.isConfigured()) {
+      try {
+        const row = await this.prisma.configuration.findUnique({
+          where: { key: "shopper_payment_method_stripe" },
+        });
+        const value = row?.value as { active?: unknown; label?: unknown } | null;
+        if (value && typeof value === "object" && value.active === true) {
+          const label =
+            typeof value.label === "string" && value.label.trim().length > 0
+              ? value.label.trim()
+              : "Debit / credit card";
+          manual.push({ code: "stripe", label, details: {} });
+        }
+      } catch (err) {
+        this.logger.warn({ err }, "shopper.payment_methods.stripe_load_failed");
+      }
+    }
+
+    return manual;
   }
 
   // ---------------------------------------------------------------------------
@@ -874,7 +899,13 @@ export class ShopperController {
     @Param("token") token: string,
     @Body(new ZodValidationPipe(sendShopperPaymentInstructionsSchema))
     body: SendShopperPaymentInstructionsInput,
-  ): Promise<{ sentTo: string; methodLabel: string; methodCode: string }> {
+  ): Promise<{
+    sentTo: string;
+    methodLabel: string;
+    methodCode: string;
+    /** Present only for the card method — the hosted Stripe Checkout URL. */
+    checkoutUrl?: string;
+  }> {
     const resolved = await this.tokens.resolve(token);
     const request = await this.requests.getById(resolved.requestId, {
       includeLines: false,
@@ -932,6 +963,53 @@ export class ShopperController {
         code: "shopper_payment_method_not_active",
       });
     }
+    // Card (Stripe) rail — no emailed credentials. Create a hosted Checkout
+    // session (buyer covers the processing fee via gross-up) and hand the URL
+    // back for the client to redirect to. The webhook lands the request in
+    // PROCURING once payment confirms.
+    if (chosen.code === "stripe") {
+      const cfg = loadConfig();
+      const successUrl = `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(token)}?paid=1`;
+      const cancelUrl = `${cfg.WEB_PUBLIC_URL}/shopper/r/${encodeURIComponent(token)}?cancelled=1`;
+      // Bucket the idempotency key by minute: rapid double-clicks reuse one
+      // session, while a buyer returning later gets a fresh one.
+      const bucket = Math.floor(Date.now() / 60_000);
+      let session: { sessionId: string; paymentIntentId: string | null; url: string };
+      try {
+        session = await this.stripe.createShopperCardIntakeSession({
+          requestId: request.id,
+          buyerEmail: request.buyerEmail,
+          itemsSubtotalCents: request.itemsSubtotalCents,
+          commissionCents: request.commissionCents,
+          estimatedTaxCents: request.estimatedTaxCents,
+          idempotencyKey: `shopper:card_intake:${request.id}:${bucket}`,
+          successUrl,
+          cancelUrl,
+        });
+      } catch (err) {
+        this.logger.error(
+          { requestId: request.id, err: `${err}` },
+          "shopper.card_intake.session_failed",
+        );
+        throw new InternalServerErrorException({
+          message: "We couldn't start the card checkout. Please try again in a moment.",
+          code: "shopper_card_checkout_failed",
+        });
+      }
+      // Persist the session/intent so refund + dispute webhooks can find it.
+      await this.requests.attachIntakeSession(
+        request.id,
+        session.sessionId,
+        session.paymentIntentId,
+      );
+      return {
+        sentTo: request.buyerEmail,
+        methodLabel: chosen.label,
+        methodCode: chosen.code,
+        checkoutUrl: session.url,
+      };
+    }
+
     if (Object.keys(chosen.details).length === 0) {
       throw new BadRequestException({
         message: "That payment method isn't available right now.",

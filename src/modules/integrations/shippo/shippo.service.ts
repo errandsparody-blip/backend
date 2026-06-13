@@ -95,14 +95,16 @@ export interface ShippingRate {
  */
 interface FlatRateContainer {
   template: string;
+  /** Buyer-facing box name, e.g. "Medium Box". */
+  label: string;
   interiorIn: [number, number, number];
 }
 const FLAT_RATE_MAX_WEIGHT_OZ = 70 * 16; // USPS flat-rate cap: 70 lb.
 const FLAT_RATE_CONTAINERS: ReadonlyArray<FlatRateContainer> = [
-  { template: "USPS_FlatRateEnvelope", interiorIn: [12.5, 9.5, 0.75] },
-  { template: "USPS_SmallFlatRateBox", interiorIn: [8.625, 5.375, 1.625] },
-  { template: "USPS_MediumFlatRateBox1", interiorIn: [11, 8.5, 5.5] },
-  { template: "USPS_LargeFlatRateBox", interiorIn: [12, 12, 5.5] },
+  { template: "USPS_FlatRateEnvelope", label: "Envelope", interiorIn: [12.5, 9.5, 0.75] },
+  { template: "USPS_SmallFlatRateBox", label: "Small Box", interiorIn: [8.625, 5.375, 1.625] },
+  { template: "USPS_MediumFlatRateBox1", label: "Medium Box", interiorIn: [11, 8.5, 5.5] },
+  { template: "USPS_LargeFlatRateBox", label: "Large Box", interiorIn: [12, 12, 5.5] },
 ];
 
 /**
@@ -423,13 +425,27 @@ export class ShippoService {
             parcels: [{ template: c.template, weight: weightOz.toString(), mass_unit: "oz" }],
             async: false,
           });
+          // Shippo prices a flat-rate box under the standard "Priority Mail"
+          // service (token `usps_priority`) — the service NAME does not say
+          // "flat rate", so we must match the service, not a label. Keep only
+          // Priority Mail (the flat-rate-bearing service) to avoid duplicating
+          // the weight-based rates the base shipment already returned, then
+          // relabel with the box name so the buyer sees which container it is.
           return (ship.rates ?? [])
-            .filter((r) => (r.servicelevel?.name ?? "").toLowerCase().includes("flat rate"))
+            .filter((r) => {
+              const token = (r.servicelevel?.token ?? "").toLowerCase();
+              const name = (r.servicelevel?.name ?? "").toLowerCase();
+              return (
+                token === "usps_priority" ||
+                name === "priority mail" ||
+                name.includes("flat rate")
+              );
+            })
             .map<ShippingRate>((r) => ({
               rateId: r.object_id,
               shipmentId: ship.object_id,
               carrier: r.provider,
-              service: r.servicelevel?.name ?? r.servicelevel?.token ?? "Flat Rate",
+              service: `Priority Mail Flat Rate · ${c.label}`,
               estimatedDeliveryDays: this.normalizeDeliveryDays(r.estimated_days),
               costCents: this.dollarsToCents(r.amount),
             }));
