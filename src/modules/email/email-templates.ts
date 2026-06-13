@@ -78,7 +78,7 @@ function shell(args: { eyebrow: string; title: string; bodyHtml: string; cta?: {
           ${cta}
           <tr>
             <td style="padding:24px 32px;border-top:1px solid #E2DFD7;font-family:Helvetica,Arial,sans-serif;font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:#9C9892;">
-              You're receiving this because you have a USA Errands account.
+              
               Reply to <a href="mailto:${escape(cfg.EMAIL_REPLY_TO)}" style="color:#9C9892;text-decoration:underline;">${escape(cfg.EMAIL_REPLY_TO)}</a> for help.
             </td>
           </tr>
@@ -491,21 +491,19 @@ export function shopperIntakeReceivedTemplate(args: {
 
   const base: RenderedEmail = isWire
     ? {
-        subject: `Your USA Errands shopper request — ${total} (ID verification required)`,
+        subject: `Your USA Errands shopper request — ${total}`,
         html: shell({
           eyebrow: "  Shopper request",
-          title: "Your request is in. Two steps to finish.",
-          bodyHtml: `<p style="margin:0 0 12px 0;">Thanks for using USA Errands. Orders over $1,000 are paid by bank wire transfer.</p>
-            <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;"><strong>Step 1</strong> — open your private order page and upload a photo of your government-issued ID and a selfie holding it. We review within one business day.</p>
-            <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;"><strong>Step 2</strong> — once we approve your ID, we'll send the bank-transfer instructions on the same page. You wire ${total}, upload your receipt, and we start sourcing as soon as the bank confirms.</p>
+          title: "Your request is in.",
+          bodyHtml: `<p style="margin:0 0 12px 0;">Thanks for using USA Errands. Open your private order page to finish — we'll guide you through any verification and let you choose how to pay. We start sourcing as soon as your payment is confirmed.</p>
+            <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">Your request total is <strong>${total}</strong>.</p>
             <p style="margin:0 0 12px 0;color:#9C9892;font-size:13px;">Want to add more items later? Use the order reference above when you submit a new request and we'll link them.</p>`,
           cta: { label: "Open your order page", href: threadUrl },
         }),
         text:
-          `Your USA Errands shopper request — ${total} (ID verification required)\n\n` +
-          `Thanks for using USA Errands. Orders over $1,000 are paid by bank wire transfer.\n\n` +
-          `Step 1 — Open your private order page and upload a photo of your government-issued ID and a selfie holding it. We review within one business day.\n\n` +
-          `Step 2 — Once approved, we'll send bank-transfer instructions on the same page. You wire ${total}, upload your receipt, and we start sourcing as soon as the bank confirms.\n\n` +
+          `Your USA Errands shopper request — ${total}\n\n` +
+          `Thanks for using USA Errands. Open your private order page to finish — we'll guide you through any verification and let you choose how to pay. We start sourcing as soon as your payment is confirmed.\n\n` +
+          `Your request total is ${total}.\n\n` +
           `Open your order page: ${threadUrl}`,
       }
     : {

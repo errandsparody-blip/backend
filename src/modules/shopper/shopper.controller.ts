@@ -326,6 +326,10 @@ export class ShopperController {
       // buyer through the two-step ID-then-wire flow.
       intakePayUrl: "",
       intakeTotalCents: created.intakeTotalCents,
+      // Neutral "open your order page" copy — the thread itself walks the
+      // buyer through any required ID verification and the payment-method
+      // picker (wire / ACH / Zelle / Cash App / card), so the email no longer
+      // hard-codes a wire-only, two-step framing.
       paymentMethod: "WIRE",
     });
     void this.email.send({
