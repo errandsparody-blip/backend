@@ -84,37 +84,29 @@ export class AdminPsnService {
       statusFilter = input.status;
     }
 
-    // Detect "history mode" — any query that touches a terminal status
-    // (RECEIVED / PARTIALLY_RECEIVED / DISCREPANCY / REJECTED /
-    // RETURN_REQUESTED) should order by receivedAt desc so the
-    // operator sees the most-recent shipment first. The default inbox
-    // view stays submittedAt asc so the oldest queued shipment
-    // surfaces at the top.
-    const HISTORY_STATUSES = new Set([
-      "RECEIVED",
-      "PARTIALLY_RECEIVED",
-      "DISCREPANCY",
-      "REJECTED",
-      "RETURN_REQUESTED",
-    ]);
-    const statusList: string[] = Array.isArray(input.status)
-      ? input.status
-      : input.status
-      ? [input.status]
-      : [];
-    const isHistoryView = statusList.some((s) => HISTORY_STATUSES.has(s));
-
+    // Ordering policy (June 2026): newest request on top everywhere.
+    // Both the inbox and history views order by createdAt desc so the
+    // latest PSN always surfaces first — see findMany orderBy below.
     const where: Prisma.PsnWhereInput = {
       status: statusFilter,
       ...(input.vendorId ? { vendorId: input.vendorId } : {}),
+      // Optional createdAt date-range filter (admin Audit page pattern).
+      ...(input.from || input.to
+        ? {
+            createdAt: {
+              ...(input.from ? { gte: input.from } : {}),
+              ...(input.to ? { lte: input.to } : {}),
+            },
+          }
+        : {}),
     };
     const psns = await this.prisma.psn.findMany({
       where,
       include: { lines: true, vendor: { select: { id: true, businessName: true } } },
       take: input.limit + 1,
-      orderBy: isHistoryView
-        ? [{ receivedAt: "desc" }, { submittedAt: "desc" }]
-        : { submittedAt: "asc" },
+      // Newest-first by createdAt for BOTH inbox and history — the latest
+      // request always surfaces on top.
+      orderBy: { createdAt: "desc" },
       ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
     });
     let nextCursor: string | null = null;

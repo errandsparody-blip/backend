@@ -448,11 +448,17 @@ export class ReturnService {
   async adminList(input: ListReturnsInput) {
     const where: Prisma.ReturnWhereInput = {};
     if (input.status) where.status = input.status;
+    if (input.from || input.to) {
+      where.createdAt = {
+        ...(input.from ? { gte: input.from } : {}),
+        ...(input.to ? { lte: input.to } : {}),
+      };
+    }
     const items = await this.prisma.return.findMany({
       where,
       include: { lines: true, order: { select: { id: true, externalReference: true, vendorId: true } } },
       take: input.limit + 1,
-      orderBy: { createdAt: "asc" },
+      orderBy: { createdAt: "desc" },
       ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
     });
     let nextCursor: string | null = null;

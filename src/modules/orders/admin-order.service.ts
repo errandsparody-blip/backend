@@ -39,6 +39,8 @@ export interface AdminOrderListInput {
    * and history queries work.
    */
   view?: "queue" | "all";
+  from?: Date | undefined;
+  to?: Date | undefined;
   cursor?: string | undefined;
   limit: number;
 }
@@ -234,6 +236,14 @@ export class AdminOrderService {
         ? {}
         : { status: { in: ["ALLOCATED", "LABEL_PURCHASED", "PICKING", "PACKED"] } };
 
+    // Date-range filter on order creation time (mirrors the audit-log viewer).
+    if (input.from || input.to) {
+      where.createdAt = {
+        ...(input.from ? { gte: input.from } : {}),
+        ...(input.to ? { lte: input.to } : {}),
+      };
+    }
+
     const orders = await this.prisma.order.findMany({
       where,
       include: {
@@ -241,7 +251,7 @@ export class AdminOrderService {
         vendor: { select: { id: true, businessName: true, country: true } },
       },
       take: input.limit + 1,
-      orderBy: { allocatedAt: "asc" },
+      orderBy: { createdAt: "desc" },
       ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
     });
 

@@ -58,6 +58,8 @@ export type CreateReturnInput = z.infer<typeof createReturnSchema>;
 
 export const listReturnsSchema = z.object({
   status: z.enum(RETURN_STATUS).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().positive().max(100).default(50),
 });

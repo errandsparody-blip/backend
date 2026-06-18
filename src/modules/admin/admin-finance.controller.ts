@@ -48,6 +48,8 @@ const listTransactionsSchema = z.object({
   // Optional subject filter — "vendor" shows only wallet rows, "shopper"
   // shows only shopper-request rows. Default: both.
   subject: z.enum(["vendor", "shopper", "both"]).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().positive().max(200).optional(),
 });
@@ -81,6 +83,8 @@ const listVendorsSchema = z.object({
     },
     z.array(kycStatusEnum).optional(),
   ),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
   cursor: z.string().uuid().optional(),
   // Optional. `.default()` would make the schema's input type asymmetric
   // (number | undefined → number) and ZodValidationPipe requires a symmetric
@@ -102,11 +106,18 @@ export class AdminFinanceController {
       status?: ListVendorsInput["status"];
       kycStatus?: { in: NonNullable<ListVendorsInput["kycStatus"]> };
       OR?: Array<{ businessName?: { contains: string; mode: "insensitive" } } | { id?: { equals: string } }>;
+      createdAt?: { gte?: Date; lte?: Date };
     } = {};
     if (q.status) where.status = q.status;
     if (q.kycStatus && q.kycStatus.length > 0) where.kycStatus = { in: q.kycStatus };
     if (q.search) {
       where.OR = [{ businessName: { contains: q.search, mode: "insensitive" } }];
+    }
+    if (q.from || q.to) {
+      where.createdAt = {
+        ...(q.from ? { gte: q.from } : {}),
+        ...(q.to ? { lte: q.to } : {}),
+      };
     }
 
     const items = await this.prisma.vendor.findMany({
@@ -225,6 +236,12 @@ export class AdminFinanceController {
       where.shopperRequestId = { not: null };
     }
     // subject === "both" or undefined: no extra filter.
+    if (q.from || q.to) {
+      where.createdAt = {
+        ...(q.from ? { gte: q.from } : {}),
+        ...(q.to ? { lte: q.to } : {}),
+      };
+    }
 
     const items = await this.prisma.ledgerEntry.findMany({
       where: where as unknown as Prisma.LedgerEntryWhereInput,

@@ -271,6 +271,8 @@ export const adminListShopperRequestsSchema = z.object({
   status: z.enum(ShopperRequestStatusValues).optional(),
   view: z.enum(["queue", "all"]).optional(),
   search: z.string().trim().min(1).max(120).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().positive().max(100).default(50),
 });

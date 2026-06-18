@@ -52,6 +52,8 @@ const listSchema = z.object({
    * needed for "where's my shipped order?" lookups and audit trails.
    */
   view: z.enum(["queue", "all"]).optional(),
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().positive().max(100).default(50),
 });

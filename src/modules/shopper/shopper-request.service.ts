@@ -536,6 +536,12 @@ export class ShopperRequestService {
         { buyerName: { contains: q, mode: "insensitive" } },
       ];
     }
+    if (input.from || input.to) {
+      where.createdAt = {
+        ...(input.from ? { gte: input.from } : {}),
+        ...(input.to ? { lte: input.to } : {}),
+      };
+    }
 
     const limit = Math.min(Math.max(input.limit, 1), 100);
     const findArgs: Record<string, unknown> = {

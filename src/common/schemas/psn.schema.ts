@@ -79,6 +79,11 @@ export const listPsnsSchema = z.object({
   // tab to a single vendor's shipments without losing the cross-vendor
   // default.
   vendorId: z.string().uuid().optional(),
+  // Optional createdAt date-range filter. Mirrors the admin Audit page
+  // pattern — the admin PSN list passes datetime-local From/To values
+  // which we coerce into Dates and apply to the where-clause below.
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().positive().max(100).default(50),
 });
