@@ -51,7 +51,16 @@ export interface FeeSchedule {
     | { negotiated: true }
   >;
   monthlyStorage: Record<StorageTier, number | null>;
-  fulfillment: { baseCents: number; perAdditionalUnitCents: number };
+  fulfillment: {
+    baseCents: number;
+    perAdditionalUnitCents: number;
+    /**
+     * Cap on the total fulfillment fee per order, regardless of unit count.
+     * e.g. 1099 ($10.99) means a 10-item order pays $10.99 instead of the
+     * uncapped $11.90. Admin-editable; backfilled by `loadFeeSchedule`.
+     */
+    maxCents: number;
+  };
   returnsHandlingCents: number;
   /**
    * Markup applied on top of the carrier's quoted shipping cost, in basis
@@ -64,6 +73,9 @@ export interface FeeSchedule {
 
 /** Default carrier-shipping markup when the config row predates the field. */
 export const DEFAULT_SHIPPING_MARKUP_BPS = 1000; // 10.00%
+
+/** Default fulfillment-fee cap when the config row predates the field. */
+export const DEFAULT_FULFILLMENT_MAX_CENTS = 1099; // $10.99
 
 export type DeclaredBoxCounts = Partial<Record<StorageTier, number>>;
 
@@ -257,5 +269,14 @@ export async function loadFeeSchedule(prisma: PrismaService): Promise<FeeSchedul
     typeof bps === "number" && Number.isFinite(bps) && bps >= 0
       ? Math.round(bps)
       : DEFAULT_SHIPPING_MARKUP_BPS;
+  // Same treatment for the fulfillment cap — backfill for legacy rows and
+  // guard a bad saved value so the cap is always a sane positive number.
+  const maxCents = schedule.fulfillment?.maxCents;
+  if (schedule.fulfillment) {
+    schedule.fulfillment.maxCents =
+      typeof maxCents === "number" && Number.isFinite(maxCents) && maxCents > 0
+        ? Math.round(maxCents)
+        : DEFAULT_FULFILLMENT_MAX_CENTS;
+  }
   return schedule;
 }

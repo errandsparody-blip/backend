@@ -11,7 +11,11 @@
  * not do its own math beyond passing values through.
  */
 
-import { DEFAULT_SHIPPING_MARKUP_BPS, type FeeSchedule } from "./fees";
+import {
+  DEFAULT_FULFILLMENT_MAX_CENTS,
+  DEFAULT_SHIPPING_MARKUP_BPS,
+  type FeeSchedule,
+} from "./fees";
 
 /**
  * Markup applied on top of the carrier's quoted shipping cost. The live value
@@ -63,10 +67,18 @@ export function computeOrderFees(args: ComputeOrderFeesArgs): OrderFeeBreakdown 
   const markup = Math.ceil((args.carrierCostCents * markupBps) / 10_000);
   const shippingFeeCents = args.carrierCostCents + markup;
 
-  // Fulfillment fee: base for the first unit + per-additional for the rest.
+  // Fulfillment fee: base for the first unit + per-additional for the rest,
+  // capped at the admin-configurable max so a large multi-item order to one
+  // customer never exceeds it (e.g. 10 items → $10.99, not $11.90).
   const { baseCents, perAdditionalUnitCents } = args.schedule.fulfillment;
   const additional = Math.max(0, args.totalUnits - 1);
-  const fulfillmentFeeCents = baseCents + additional * perAdditionalUnitCents;
+  const uncappedFulfillmentCents = baseCents + additional * perAdditionalUnitCents;
+  const maxCents =
+    typeof args.schedule.fulfillment.maxCents === "number" &&
+    args.schedule.fulfillment.maxCents > 0
+      ? args.schedule.fulfillment.maxCents
+      : DEFAULT_FULFILLMENT_MAX_CENTS;
+  const fulfillmentFeeCents = Math.min(uncappedFulfillmentCents, maxCents);
 
   // Insurance: 1.5% of declared value, only when requested.
   const insuranceFeeCents = args.insuranceRequested

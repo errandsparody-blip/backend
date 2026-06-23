@@ -50,6 +50,9 @@ const FEE_SCHEDULE = {
   fulfillment: {
     baseCents: 299,
     perAdditionalUnitCents: 99,
+    // Cap the total fulfillment fee per order at $10.99 regardless of unit
+    // count. Admin-editable from Config → Fees.
+    maxCents: 1099,
   },
   returnsHandlingCents: 600,
   // Markup on the carrier's quoted shipping cost, in basis points (1000 = 10%).

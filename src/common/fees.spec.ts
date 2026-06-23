@@ -35,7 +35,7 @@ const SCHEDULE: FeeSchedule = {
     PALLET:  { negotiated: true },
   },
   monthlyStorage: { SMALL: 100, MEDIUM: 200, LARGE: 400, X_LARGE: 600, PALLET: 4500 },
-  fulfillment: { baseCents: 299, perAdditionalUnitCents: 99 },
+  fulfillment: { baseCents: 299, perAdditionalUnitCents: 99, maxCents: 1099 },
   returnsHandlingCents: 500,
   shippingMarkupBps: 1000,
 };
