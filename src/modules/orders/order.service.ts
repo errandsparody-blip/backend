@@ -244,6 +244,24 @@ export class OrderService {
     };
   }
 
+  /**
+   * Parse a single pasted address string into structured recipient fields via
+   * Shippo's address parser. Powers the "paste a full address" convenience on
+   * the order form — the vendor pastes one line and we split it into the
+   * line1 / city / state / ZIP inputs for them to confirm.
+   */
+  async parseAddress(raw: string): Promise<{
+    line1: string;
+    line2: string | null;
+    city: string;
+    state: string;
+    postalCode: string;
+    country: string;
+    phone: string | null;
+  }> {
+    return this.shippo.parseAddress(raw);
+  }
+
   // ===========================================================================
   // QUOTE — pure read, no DB writes (besides the address validation cache).
   // ===========================================================================

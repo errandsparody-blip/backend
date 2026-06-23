@@ -41,12 +41,14 @@ import {
   createOrderSchema,
   fulfillmentEstimateSchema,
   listOrdersSchema,
+  parseAddressSchema,
   presignOrderLabelUploadSchema,
   quoteOrderSchema,
   validateAddressSchema,
   type CancelOrderInput,
   type CreateOrderInput,
   type FulfillmentEstimateInput,
+  type ParseAddressInput,
   type ListOrdersInput,
   type PresignOrderLabelUploadInput,
   type QuoteOrderInput,
@@ -87,6 +89,18 @@ export class OrderController {
     @Body(new ZodValidationPipe(validateAddressSchema)) body: ValidateAddressInput,
   ) {
     return this.orders.validateAddress(body);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Parse a single pasted address string into structured fields (Shippo's
+  // address parser). Powers the "paste a full address" convenience on the
+  // order form. Throttled like validate-address — the form fires it on demand.
+  // ---------------------------------------------------------------------------
+  @Post("parse-address")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  parseAddress(@Body(new ZodValidationPipe(parseAddressSchema)) body: ParseAddressInput) {
+    return this.orders.parseAddress(body.address);
   }
 
   // ---------------------------------------------------------------------------

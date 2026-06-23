@@ -120,6 +120,12 @@ export const validateAddressSchema = z.object({
 });
 export type ValidateAddressInput = z.infer<typeof validateAddressSchema>;
 
+/** Free-text address to split into structured fields via Shippo's parser. */
+export const parseAddressSchema = z.object({
+  address: z.string().trim().min(3).max(500),
+});
+export type ParseAddressInput = z.infer<typeof parseAddressSchema>;
+
 // ---------------------------------------------------------------------------
 // Order line input
 // ---------------------------------------------------------------------------

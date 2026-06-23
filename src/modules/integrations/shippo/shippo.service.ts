@@ -198,6 +198,17 @@ export interface AddressValidationOutcome {
   providerRef: string | null;
 }
 
+/** Structured address fields parsed from a single free-text string. */
+export interface ParsedAddress {
+  line1: string;
+  line2: string | null;
+  city: string;
+  state: string;
+  postalCode: string;
+  country: string;
+  phone: string | null;
+}
+
 // =============================================================================
 // Shippo REST response shapes — narrow types covering only the fields we
 // consume. Shippo adds new fields over time; keeping the surface small means
@@ -270,6 +281,18 @@ interface ShAddress {
   state?: string;
   zip?: string;
   country?: string;
+}
+
+/** Raw response from Shippo's v2 address parser (GET /v2/addresses/parse). */
+interface ShParsedAddress {
+  address_line_1?: string;
+  address_line_2?: string;
+  city_locality?: string;
+  state_province?: string;
+  postal_code?: string;
+  country_code?: string;
+  phone?: string;
+  email?: string;
 }
 
 // =============================================================================
@@ -732,6 +755,69 @@ export class ShippoService {
       };
     }
     return this.isLive() ? this.validateAddressLive(req) : this.validateAddressStub(req);
+  }
+
+  /**
+   * Parse a single free-text address string into structured fields via
+   * Shippo's v2 address parser (GET /v2/addresses/parse). Best results when
+   * the input is comma-delimited in the order: line1, line2, city, state,
+   * ZIP, country — but the parser tolerates loose input. Returns blank fields
+   * for anything it can't extract so the caller can populate what it got and
+   * let the user fill the rest.
+   */
+  async parseAddress(raw: string): Promise<ParsedAddress> {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      throw new BadRequestException({
+        code: "address_parse_empty",
+        message: "Provide an address to parse.",
+      });
+    }
+    if (!this.isLive()) return this.parseAddressStub(trimmed);
+
+    const parsed = await this.request<ShParsedAddress>(
+      "GET",
+      `/v2/addresses/parse?address=${encodeURIComponent(trimmed)}`,
+    );
+    return {
+      line1: parsed.address_line_1?.trim() ?? "",
+      line2: parsed.address_line_2?.trim() || null,
+      city: parsed.city_locality?.trim() ?? "",
+      state: (parsed.state_province ?? "").trim().toUpperCase(),
+      postalCode: parsed.postal_code?.trim() ?? "",
+      country: (parsed.country_code ?? "US").trim().toUpperCase() || "US",
+      phone: parsed.phone?.trim() || null,
+    };
+  }
+
+  /**
+   * Stub parser for dev/test (no SHIPPO_API_KEY). Naive comma split assuming
+   * the documented order without a line2: "line1, city, state, zip[, country]".
+   * Good enough to exercise the UI locally; production uses the live parser.
+   */
+  private parseAddressStub(raw: string): ParsedAddress {
+    const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length >= 4) {
+      const [line1 = "", city = "", state = "", postalCode = "", country = "US"] = parts;
+      return {
+        line1,
+        line2: null,
+        city,
+        state: state.toUpperCase(),
+        postalCode,
+        country: (country || "US").toUpperCase(),
+        phone: null,
+      };
+    }
+    return {
+      line1: raw,
+      line2: null,
+      city: "",
+      state: "",
+      postalCode: "",
+      country: "US",
+      phone: null,
+    };
   }
 
   private async validateAddressLive(req: AddressValidationRequest): Promise<AddressValidationOutcome> {
