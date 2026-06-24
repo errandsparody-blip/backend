@@ -46,6 +46,9 @@ describe("computeOnboardingFeeCents — LOOSE mode", () => {
     // 4 × $4 (= stocking $2 + first-month $2) = $16
     expect(r.totalCents).toBe(1600);
     expect(r.perTier).toEqual([{ tier: "MEDIUM", count: 4, subtotalCents: 1600 }]);
+    // Waivable receiving portion = 4 × $2 stocking = $8 (first PSN pays the
+    // remaining $8 storage only).
+    expect(r.stockingCents).toBe(800);
   });
 
   it("sums across multiple tiers", () => {
@@ -108,6 +111,9 @@ describe("computeOnboardingFeeCents — PALLET mode", () => {
         { tier: "PALLET", count: 1, subtotalCents: 4500 },
       ]),
     );
+    // Only the per-box stocking is waivable; the pallet's $45 is storage.
+    // First PSN here pays $45 (pallet storage) only.
+    expect(r.stockingCents).toBe(800);
   });
 
   it("rejects when no PALLET tier is declared", () => {
@@ -139,6 +145,9 @@ describe("computeOnboardingFeeCents — ADD_TO_PALLET mode", () => {
     // pallet-mode line).
     expect(r.totalCents).toBe(800);
     expect(r.perTier).toEqual([{ tier: "MEDIUM", count: 4, subtotalCents: 800 }]);
+    // Entire fee is receiving here, so a first PSN in this mode pays $0.
+    expect(r.stockingCents).toBe(800);
+    expect(r.totalCents - r.stockingCents).toBe(0);
   });
 
   it("rejects a declaration with a PALLET tier (no new pallet is being created)", () => {

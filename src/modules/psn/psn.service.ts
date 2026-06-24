@@ -237,7 +237,7 @@ export class PsnService {
     }
 
     const schedule = await loadFeeSchedule(this.prisma);
-    const { totalCents } = computeOnboardingFeeCents(
+    const { totalCents, stockingCents } = computeOnboardingFeeCents(
       schedule,
       before.declaredBoxCounts as DeclaredBoxCounts,
       before.shippingMode,
@@ -247,56 +247,82 @@ export class PsnService {
     // If the wallet has insufficient funds, the entire transaction rolls back —
     // the PSN stays a DRAFT, no ledger entry is written, no fee is locked in.
     // Implementation Plan §5.2 step 4, §6.4.
-    const updated = await this.prisma.$transaction(async (tx) => {
-      // Skip the debit when the fee is zero (e.g., declared only PALLETs which
-      // are negotiated). We still flip the status; the operator-side flow
-      // takes over from here.
-      if (totalCents > 0) {
-        await this.wallet.debit(
-          {
-            vendorId,
-            amountCents: totalCents,
-            type: "ONBOARDING",
-            description: `Onboarding fee for PSN ${id.slice(0, 8)}`,
-            referenceType: "psn",
-            referenceId: id,
-            actorId,
+    //
+    // First-PSN waiver: a vendor's first ever PSN has all receiving (stocking)
+    // fees knocked off — only storage is due. We detect "first ever" inside the
+    // transaction by counting PSNs the vendor has previously submitted
+    // (submittedAt set). The current PSN is still a DRAFT here, so it isn't
+    // counted.
+    const { psn: updated, chargedCents, waivedCents } = await this.prisma.$transaction(
+      async (tx) => {
+        const priorSubmitted = await tx.psn.count({
+          where: { vendorId, submittedAt: { not: null } },
+        });
+        const isFirstPsn = priorSubmitted === 0;
+        const waived = isFirstPsn ? stockingCents : 0;
+        const charged = totalCents - waived;
+
+        // Skip the debit when nothing is owed (zero fee, or first PSN whose
+        // entire fee was receiving — e.g. ADD_TO_PALLET). Status still flips.
+        if (charged > 0) {
+          await this.wallet.debit(
+            {
+              vendorId,
+              amountCents: charged,
+              type: "ONBOARDING",
+              description: isFirstPsn
+                ? `Onboarding fee for PSN ${id.slice(0, 8)} (first-PSN receiving fees waived)`
+                : `Onboarding fee for PSN ${id.slice(0, 8)}`,
+              referenceType: "psn",
+              referenceId: id,
+              actorId,
+            },
+            tx as unknown as Parameters<typeof this.wallet.debit>[1],
+          );
+        }
+        const psn = await tx.psn.update({
+          where: { id },
+          data: {
+            status: "AWAITING_RECEIPT",
+            submittedAt: new Date(),
+            onboardingFeeCents: charged,
+            onboardingFeePaidAt: charged > 0 ? new Date() : null,
           },
-          tx as unknown as Parameters<typeof this.wallet.debit>[1],
-        );
-      }
-      return tx.psn.update({
-        where: { id },
-        data: {
-          status: "AWAITING_RECEIPT",
-          submittedAt: new Date(),
-          onboardingFeeCents: totalCents,
-          onboardingFeePaidAt: totalCents > 0 ? new Date() : null,
-        },
-        include: { lines: true },
-      });
-    });
+          include: { lines: true },
+        });
+        return { psn, chargedCents: charged, waivedCents: waived };
+      },
+    );
 
     await this.audit.log({
       actorId,
       action: "psn.submitted",
       resourceType: "psn",
       resourceId: id,
-      afterState: { onboardingFeeCents: totalCents },
+      afterState: {
+        onboardingFeeCents: chargedCents,
+        // Capture the waiver for finance reconciliation when it applied.
+        ...(waivedCents > 0 ? { firstPsnReceivingWaivedCents: waivedCents } : {}),
+      },
     });
 
-    // Vendor notification + ops alert. Best-effort.
+    // Vendor notification + ops alert. Best-effort. We surface the amount the
+    // vendor was actually charged (after any first-PSN waiver).
     const tpl = psnSubmittedTemplate({
       psnId: id,
       lineCount: updated.lines.length,
-      onboardingFeeCents: totalCents,
+      onboardingFeeCents: chargedCents,
     });
+    const waiverNote =
+      waivedCents > 0
+        ? ` Welcome! Receiving fees on your first PSN were waived ($${(waivedCents / 100).toFixed(2)} off) — only storage was charged.`
+        : "";
     await this.notifications.emit({
       vendorId,
       type: "psn.submitted",
       severity: "INFO",
       title: `PSN ${id.slice(0, 8)} submitted`,
-      body: `${updated.lines.length} line(s); onboarding fee $${(totalCents / 100).toFixed(2)} debited.`,
+      body: `${updated.lines.length} line(s); onboarding fee $${(chargedCents / 100).toFixed(2)} debited.${waiverNote}`,
       href: `/psn/${id}`,
       email: { subject: tpl.subject, html: tpl.html, text: tpl.text },
     });
@@ -311,7 +337,7 @@ export class PsnService {
         psnId: id,
         vendorBusinessName: vendor.businessName,
         lineCount: updated.lines.length,
-        onboardingFeeCents: totalCents,
+        onboardingFeeCents: chargedCents,
       });
       void this.opsAlerts
         .send({

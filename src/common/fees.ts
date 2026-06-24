@@ -132,9 +132,21 @@ export function computeOnboardingFeeCents(
   schedule: FeeSchedule,
   declared: DeclaredBoxCounts,
   mode: ShippingMode,
-): { totalCents: number; perTier: Array<{ tier: StorageTier; count: number; subtotalCents: number }> } {
+): {
+  totalCents: number;
+  /**
+   * The receiving/stocking portion of `totalCents` — i.e. everything that is
+   * NOT first-month storage. This is the amount waived on a vendor's first
+   * ever PSN ("only storage due on the first PSN"). Pallet first-month storage
+   * and LOOSE per-box first-month storage are excluded; box stocking in every
+   * mode is included.
+   */
+  stockingCents: number;
+  perTier: Array<{ tier: StorageTier; count: number; subtotalCents: number }>;
+} {
   const perTier: Array<{ tier: StorageTier; count: number; subtotalCents: number }> = [];
   let totalCents = 0;
+  let stockingCents = 0;
 
   const palletCount = Math.max(0, Number(declared.PALLET ?? 0));
   const boxTiersDeclared = (Object.entries(declared) as Array<[StorageTier, number]>).filter(
@@ -223,10 +235,19 @@ export function computeOnboardingFeeCents(
       const subtotal = stocking * count;
       perTier.push({ tier, count, subtotalCents: subtotal });
       totalCents += subtotal;
+      // The whole box subtotal here is stocking (storage is covered by the
+      // pallet), so all of it is waivable on a first PSN.
+      stockingCents += subtotal;
     } else {
       // Loose mode — full stocking + first-month storage per box.
       const totalCentsForTier = (fee as { totalCents?: number }).totalCents;
-      if (typeof totalCentsForTier !== "number" || !Number.isFinite(totalCentsForTier)) {
+      const stockingForTier = (fee as { stockingCents?: number }).stockingCents;
+      if (
+        typeof totalCentsForTier !== "number" ||
+        !Number.isFinite(totalCentsForTier) ||
+        typeof stockingForTier !== "number" ||
+        !Number.isFinite(stockingForTier)
+      ) {
         // Same defence as above: an inconsistent config row should produce
         // a structured response, not a NaN that propagates into the ledger.
         throw new MissingTierFeeError(tier);
@@ -234,10 +255,12 @@ export function computeOnboardingFeeCents(
       const subtotal = totalCentsForTier * count;
       perTier.push({ tier, count, subtotalCents: subtotal });
       totalCents += subtotal;
+      // Only the stocking part is waivable; the first-month storage stays.
+      stockingCents += stockingForTier * count;
     }
   }
 
-  return { totalCents, perTier };
+  return { totalCents, stockingCents, perTier };
 }
 
 /**
