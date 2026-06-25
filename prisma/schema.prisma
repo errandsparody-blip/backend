@@ -322,10 +322,22 @@ model Vendor {
 
   status        VendorStatus  @default(PENDING_KYC)
 
+  // ---------------------------------------------------------------------------
+  // Migration 0038 — storefront-integration defaults. When an order is ingested
+  // from the vendor's website there is no human to pick a shipping service, so
+  // the vendor configures it once here. `integrationDefaultCarrierService` is
+  // either a concrete service label ("USPS Priority") or NULL, which the
+  // ingestion service treats as "cheapest available". `integrationDefaultInsurance`
+  // mirrors the per-order insurance toggle for the automated path.
+  // ---------------------------------------------------------------------------
+  integrationDefaultCarrierService String?  @map("integration_default_carrier_service")
+  integrationDefaultInsurance      Boolean  @default(false) @map("integration_default_insurance")
+
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime      @updatedAt @map("updated_at")
 
   users         User[]
+  apiKeys       VendorApiKey[]
   products      Product[]
   skus          Sku[]
   psns          Psn[]
@@ -340,6 +352,45 @@ model Vendor {
   @@index([status])
   @@index([kycStatus])
   @@map("vendors")
+}
+
+// =============================================================================
+// VendorApiKey (Migration 0038) — machine credential for the storefront
+// integration. A vendor's website authenticates to POST /v1/integration/orders
+// with this key instead of a human session/JWT.
+//
+// Key format presented to the vendor ONCE at creation:
+//   uer_live_<keyId>_<secret>
+// We persist only:
+//   keyId      — public, indexed lookup token (safe to display)
+//   secretHash — SHA-256 hex of <secret>; compared in constant time at auth
+// The plaintext secret is never stored, so a leaked DB row cannot be replayed.
+// Revocation is a soft delete (revokedAt) to preserve the audit trail and any
+// orders that reference which key created them.
+// =============================================================================
+model VendorApiKey {
+  id          String    @id @default(uuid()) @db.Uuid
+  vendorId    String    @map("vendor_id") @db.Uuid
+  vendor      Vendor    @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // Human label so the vendor can tell keys apart ("Main site", "Staging").
+  name        String
+
+  // Public lookup token (the portion before the secret). Unique across the
+  // platform so auth is an O(1) indexed lookup, not a scan of every hash.
+  keyId       String    @unique @map("key_id")
+  // SHA-256 hex digest of the secret half of the key.
+  secretHash  String    @map("secret_hash")
+
+  lastUsedAt  DateTime? @map("last_used_at")
+  revokedAt   DateTime? @map("revoked_at")
+  createdBy   String?   @map("created_by") @db.Uuid
+
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([vendorId])
+  @@map("vendor_api_keys")
 }
 
 // =============================================================================
@@ -950,6 +1001,14 @@ model WebhookEvent {
 enum OrderStatus {
   DRAFT
   SUBMITTED
+  // Migration 0038 — storefront-integration hold. An order ingested from
+  // a vendor's website that could NOT be allocated immediately: either the
+  // wallet can't cover the fee (INSUFFICIENT_FUNDS) or a line's SKU didn't
+  // match a product code (UNMAPPED_SKU). The reason is on orders.hold_reason.
+  // INSUFFICIENT_FUNDS holds DO reserve stock (the customer already paid the
+  // vendor, so we protect the units); UNMAPPED_SKU holds do not, since we
+  // don't yet know which SKU to reserve. Released to ALLOCATED once resolved.
+  ON_HOLD
   ALLOCATED          // stock reserved, label not yet generated
   LABEL_PURCHASED    // shipping label bought from carrier
   PICKING
@@ -1006,6 +1065,19 @@ model Order {
   // `orderNumber` above. external_reference exists for vendors who want to
   // cross-reference back to their own store / OMS.
   externalReference        String?         @map("external_reference")
+
+  // Migration 0038 — where this order came from. MANUAL = entered by a human
+  // in the portal (the historical default, so every existing row is MANUAL).
+  // API = ingested from the vendor's storefront via the integration endpoint.
+  // Drives the admin "source" column/filter and the storefront status lookup.
+  source                   String          @default("MANUAL")
+  // Set only while status = ON_HOLD. One of INSUFFICIENT_FUNDS | UNMAPPED_SKU
+  // | ADDRESS_INVALID. Cleared when the order is released to ALLOCATED.
+  holdReason               String?         @map("hold_reason")
+  // Normalized inbound payload retained on held orders so an admin can resolve
+  // the hold (remap a SKU, see the recipient/lines) without the storefront
+  // re-sending. Null on normally-allocated orders.
+  sourcePayload            Json?           @map("source_payload")
 
   status                   OrderStatus     @default(DRAFT)
 
@@ -1094,6 +1166,9 @@ model Order {
   @@index([trackingNumber])
   @@index([carrier, status])
   @@index([fulfillmentMode, status])
+  // Migration 0038 — admin "storefront orders" + held-orders queues filter on
+  // these, e.g. WHERE source = 'API' AND status = 'ON_HOLD'.
+  @@index([source, status, createdAt])
   @@map("orders")
 }
 

@@ -28,6 +28,7 @@ import { EmailModule } from "./modules/email/email.module";
 import { ExportModule } from "./modules/exports/export.module";
 import { FeesModule } from "./modules/fees/fees.module";
 import { HealthModule } from "./modules/health/health.module";
+import { IntegrationModule } from "./modules/integration/integration.module";
 import { KycModule } from "./modules/integrations/kyc/kyc.module";
 import { R2Module } from "./modules/integrations/r2/r2.module";
 import { StripeModule } from "./modules/integrations/stripe/stripe.module";
@@ -105,6 +106,7 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     PsnModule,
     WalletModule,
     OrderModule,
+    IntegrationModule,
     ReturnModule,
     ShopperModule,
     ExportModule,

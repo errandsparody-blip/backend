@@ -38,6 +38,7 @@ import { PrismaService } from "../../../common/prisma.service";
 import { AuditService } from "../../audit/audit.service";
 import { depositReceiptTemplate } from "../../email/email-templates";
 import { NotificationService } from "../../notifications/notification.service";
+import { IntegrationOrderService } from "../../integration/integration-order.service";
 import { ShopperRequestService } from "../../shopper/shopper-request.service";
 import { WalletService } from "../../wallet/wallet.service";
 
@@ -54,6 +55,9 @@ export class StripeWebhookController {
     private readonly prisma: PrismaService,
     private readonly shopper: ShopperRequestService,
     private readonly notifications: NotificationService,
+    // Migration 0038 — a top-up may unblock storefront orders that were held
+    // for INSUFFICIENT_FUNDS; release them instantly after the credit lands.
+    private readonly integrationOrders: IntegrationOrderService,
   ) {}
 
   @Public()
@@ -269,6 +273,15 @@ export class StripeWebhookController {
       href: "/wallet",
       email: { subject: tpl.subject, html: tpl.html, text: tpl.text },
     });
+
+    // Best-effort: auto-release any storefront orders that were held because
+    // this vendor's wallet was short. Never let a release failure roll back the
+    // deposit (Stripe already settled it); the cron sweep is the safety net.
+    void this.integrationOrders
+      .releaseFundedHoldsForVendor(vendorId)
+      .catch((err) =>
+        this.logger.warn({ err, vendorId }, "Post-deposit hold release failed."),
+      );
   }
 
   /**

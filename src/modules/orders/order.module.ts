@@ -2,6 +2,7 @@ import { forwardRef, Module } from "@nestjs/common";
 
 import { IdempotencyModule } from "../../common/idempotency.module";
 import { AuditModule } from "../audit/audit.module";
+import { IntegrationModule } from "../integration/integration.module";
 import { ShippoModule } from "../integrations/shippo/shippo.module";
 import { SmartyModule } from "../integrations/smarty/smarty.module";
 import { NotificationModule } from "../notifications/notification.module";
@@ -30,6 +31,7 @@ import { OrderService } from "./order.service";
     // signal a vendor had placed an order — they had to refresh the
     // admin orders list to discover work.
     NotificationModule,
+    IntegrationModule,
     forwardRef(() => ReturnModule),
   ],
   controllers: [OrderController, AdminOrderController],

@@ -21,6 +21,8 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 
+import { IntegrationOrderService } from "../integration/integration-order.service";
+
 import { AdminOrderService } from "./admin-order.service";
 
 const forceCancelSchema = z.object({
@@ -33,6 +35,7 @@ type ForceCancelInput = z.infer<typeof forceCancelSchema>;
 const listSchema = z.object({
   status: z
     .enum([
+      "ON_HOLD",
       "ALLOCATED",
       "LABEL_PURCHASED",
       "PICKING",
@@ -62,11 +65,25 @@ type ListInput = z.infer<typeof listSchema>;
 @Controller({ path: "admin/orders", version: "1" })
 @Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
 export class AdminOrderController {
-  constructor(private readonly orders: AdminOrderService) {}
+  constructor(
+    private readonly orders: AdminOrderService,
+    // Migration 0038 — resolving a storefront ON_HOLD order re-runs allocation
+    // (re-maps SKUs, re-checks funds, reserves + debits) on the held row.
+    private readonly integrationOrders: IntegrationOrderService,
+  ) {}
 
   @Get()
   list(@Query(new ZodValidationPipe(listSchema)) q: ListInput) {
     return this.orders.list(q);
+  }
+
+  // Migration 0038 — retry allocation on a held storefront order. Use after the
+  // blocker is fixed (wallet topped up, SKU received, address corrected). Idempotent:
+  // a non-held order is a no-op; a still-blocked order stays held with an updated reason.
+  @Post(":id/release")
+  @HttpCode(HttpStatus.OK)
+  release(@CurrentUser() user: AuthenticatedUser, @Param("id", new ParseUUIDPipe()) id: string) {
+    return this.integrationOrders.releaseHeldOrder(id, user.sub);
   }
 
   @Get(":id")
