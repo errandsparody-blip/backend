@@ -57,6 +57,13 @@ export interface CreateShopperIntakeSessionArgs {
    * silently when zero — buyer's checkout still shows the right total.
    */
   estimatedTaxCents: number;
+  /**
+   * Tax state (e.g. "TX") + rate in basis points (e.g. 825 = 8.25%), used to
+   * label the tax line as "TX sales tax (8.25%)". Optional — when absent the
+   * tax line falls back to a generic "Sales tax" label.
+   */
+  taxState?: string | null;
+  taxRateBps?: number;
   /** Idempotency key — typically `shopper:intake:<requestId>`. */
   idempotencyKey: string;
   /** Where Stripe sends the buyer after success — must include {CHECKOUT_SESSION_ID}. */
@@ -190,6 +197,27 @@ export class StripeService {
   // ---------------------------------------------------------------------------
 
   /**
+   * Build the buyer-facing service-fee + tax line-item names with their exact
+   * rates, e.g. "Service fee (10%)" and "TX sales tax (8.25%)". The service
+   * rate is derived from commission ÷ items so it always matches the charge;
+   * the tax state + rate come from the request when available.
+   */
+  private shopperFeeLineNames(args: {
+    itemsSubtotalCents: number;
+    commissionCents: number;
+    taxState?: string | null;
+    taxRateBps?: number;
+  }): { service: string; tax: string } {
+    const fmtPct = (p: number): string => Number(p.toFixed(2)).toString();
+    const servicePct =
+      args.itemsSubtotalCents > 0 ? (args.commissionCents / args.itemsSubtotalCents) * 100 : 0;
+    const service = `Service fee (${fmtPct(servicePct)}%)`;
+    const rate = typeof args.taxRateBps === "number" ? ` (${fmtPct(args.taxRateBps / 100)}%)` : "";
+    const tax = args.taxState ? `${args.taxState} sales tax${rate}` : `Sales tax${rate}`;
+    return { service, tax };
+  }
+
+  /**
    * Create a Checkout Session for the buyer's intake payment.
    *
    * NOTE (May 2026): The buyer-facing intake flow has moved to manual
@@ -222,6 +250,7 @@ export class StripeService {
     // a line with `unit_amount: 0`. Tax can legitimately be zero in dev or
     // for tax-free states; commission too if the operator sets the rate
     // to 0%. Items must always be > 0 (validated above).
+    const feeNames = this.shopperFeeLineNames(args);
     const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
       {
         quantity: 1,
@@ -238,7 +267,7 @@ export class StripeService {
         price_data: {
           currency: "usd",
           unit_amount: args.commissionCents,
-          product_data: { name: "USA Errands service fee" },
+          product_data: { name: feeNames.service },
         },
       });
     }
@@ -249,7 +278,7 @@ export class StripeService {
           currency: "usd",
           unit_amount: args.estimatedTaxCents,
           product_data: {
-            name: "Estimated U.S. sales tax (reconciled at procurement)",
+            name: feeNames.tax,
           },
         },
       });
@@ -329,6 +358,7 @@ export class StripeService {
     const netCents = args.itemsSubtotalCents + args.commissionCents + args.estimatedTaxCents;
     const { processorFeeCents } = StripeService.grossUpCents(netCents);
 
+    const feeNames = this.shopperFeeLineNames(args);
     const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
       {
         quantity: 1,
@@ -345,7 +375,7 @@ export class StripeService {
         price_data: {
           currency: "usd",
           unit_amount: args.commissionCents,
-          product_data: { name: "USA Errands service fee" },
+          product_data: { name: feeNames.service },
         },
       });
     }
@@ -356,7 +386,7 @@ export class StripeService {
           currency: "usd",
           unit_amount: args.estimatedTaxCents,
           product_data: {
-            name: "Estimated U.S. sales tax (reconciled at procurement)",
+            name: feeNames.tax,
           },
         },
       });
