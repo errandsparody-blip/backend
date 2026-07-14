@@ -22,7 +22,7 @@
  * UNMAPPED_SKU, INSUFFICIENT_STOCK, ADDRESS_INVALID (admin resolves).
  */
 
-import { Injectable, Logger } from "@nestjs/common";
+import { HttpException, HttpStatus, Injectable, Logger } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import type { Order, OrderLine, OrderStatus, PrismaClient } from "@prisma/client";
 
@@ -90,6 +90,24 @@ export interface IntegrationOrderResult {
  *  stock shortfall (only knowable under the row lock) into an ON_HOLD. */
 class InsufficientStockError extends Error {}
 
+/**
+ * Migration 0047 — thrown by `ingest` while the v2 rewrite is
+ * outstanding. Surfaces as HTTP 501 with a stable code so a
+ * storefront integration can distinguish it from a transient error.
+ */
+export class IntegrationV2NotImplementedError extends HttpException {
+  constructor() {
+    super(
+      {
+        message:
+          "Storefront integration is temporarily disabled during migration to Fulfillment v2. Contact support to enable.",
+        code: "integration_v2_migration_pending",
+      },
+      HttpStatus.NOT_IMPLEMENTED,
+    );
+  }
+}
+
 @Injectable()
 export class IntegrationOrderService {
   private readonly logger = new Logger(IntegrationOrderService.name);
@@ -114,46 +132,33 @@ export class IntegrationOrderService {
   // INGEST — entry point from the API-key-authed controller.
   // ===========================================================================
 
-  async ingest(args: {
+  async ingest(_args: {
     vendorId: string;
     apiKeyId: string | null;
     input: IntegrationOrderInput;
   }): Promise<IntegrationOrderResult> {
-    const { vendorId, input } = args;
-
-    // Idempotency: a re-send of the same store order returns the existing one
-    // unchanged. The DB unique [vendorId, externalReference] is the hard guard;
-    // this is the friendly fast path that also makes retries cheap.
-    const existing = await this.prisma.order.findUnique({
-      where: {
-        vendor_external_ref_unique: { vendorId, externalReference: input.externalReference },
-      },
-      include: { lines: true },
-    });
-    if (existing) return this.toResult(existing);
-
-    const outcome = await this.tryAllocate(vendorId, args.apiKeyId, input, null);
-    if (outcome.kind === "ALLOCATED") {
-      await this.audit.log({
-        actorId: args.apiKeyId,
-        action: "order.ingested",
-        resourceType: "order",
-        resourceId: outcome.order.id,
-        afterState: {
-          source: "API",
-          status: outcome.order.status,
-          totalChargedCents: outcome.order.totalChargedCents,
-          externalReference: input.externalReference,
-        },
-      });
-      void this.alertOpsNewOrder(outcome.order, vendorId, input.lines.length);
-      return this.toResult(outcome.order);
-    }
-
-    // Held — persist a placeholder and alert.
-    const held = await this.createHoldOrder(vendorId, args.apiKeyId, input, outcome.reason);
-    void this.alertHold(held, vendorId, outcome.reason);
-    return this.toResult(held);
+    // ---- Migration 0047 — Fulfillment v1 abolition ----
+    //
+    // Per the v2 spec ("Studio mvp task 71326.pdf", page 4, yellow
+    // highlight): "FOR ORDERS FLOWING IN THROUGH INTEGRATION FROM
+    // VENDOR ECOMMERCE STORE, ONLY FULFILLMENT SHOULD BE CHARGED, AND
+    // WHEN ADMIN OR WAREHOUSE STAFF PROCEEDS TO WORK ON ORDER THEY
+    // CAN CHARGE THE WALLET FOR SHIPMENT".
+    //
+    // The pre-existing implementation of ingest / tryAllocate /
+    // reserveDebitAndPersist was v1 semantics (Shippo quote + full
+    // wallet debit at intake). Rewriting that ~700 lines of financial
+    // code to v2 is a phase in its own right and is deferred alongside
+    // the Shopify/WooCommerce integrations that would consume it
+    // (product plan: vendor dashboard only for now).
+    //
+    // The prior code is preserved below in `tryAllocate` /
+    // `reserveDebitAndPersist` for reference and for the eventual
+    // rewrite. `ingest` itself hard-rejects so no v1 order can be
+    // created via the API-key path in the meantime. The
+    // `releaseHeldOrder` path is also unreachable in production while
+    // ingest is gated, but its type surface stays valid.
+    throw new IntegrationV2NotImplementedError();
   }
 
   // ===========================================================================

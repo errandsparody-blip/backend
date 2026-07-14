@@ -85,23 +85,17 @@ export class OrderController {
   ) {}
 
   // ---------------------------------------------------------------------------
-  // Migration 0041 — vendor-facing config bit for Fulfillment v2.
-  //
-  // The order/new wizard reads this once on mount to decide whether
-  // to render the legacy Shippo-quote-at-submit flow or the v2
-  // fulfillment-fee-only flow. Cheap; no auth-specific data; safe
-  // to cache on the client for the session. Rate-limited high
-  // because it's a single page-load hit.
-  //
-  // Kept as a small tailored endpoint (not tacked onto some
-  // /vendors/config/public) so the frontend only pulls what it
-  // needs. If the config surface grows we consolidate then.
+  // Migration 0047 — the /fulfillment-config endpoint was removed. v1
+  // has been abolished per spec so there's no branch for the frontend
+  // to select. Leave a no-op stub returning { v2Enabled: true } for a
+  // release cycle so an older cached web client doesn't hard-fail on
+  // its startup query; drop the stub next release.
   // ---------------------------------------------------------------------------
   @Get("fulfillment-config")
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { limit: 120, ttl: 60_000 } })
-  async fulfillmentConfig(): Promise<{ v2Enabled: boolean }> {
-    return { v2Enabled: await this.orders.isFulfillmentV2Enabled() };
+  fulfillmentConfig(): { v2Enabled: boolean } {
+    return { v2Enabled: true };
   }
 
   // ---------------------------------------------------------------------------

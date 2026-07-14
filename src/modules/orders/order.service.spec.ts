@@ -122,10 +122,10 @@ class FakePrisma {
   // Stubs not exercised by these tests — kept here so the type is satisfied.
   sku = { findMany: jest.fn(async () => []) };
 
-  // Migration 0041 — OrderService.create() calls isFulfillmentV2Enabled()
-  // on every submit, which reads the configuration table. Returning
-  // null makes the loader default to `false`, keeping every test on
-  // the legacy code path (which is what these tests exercise).
+  // Migration 0047 — configuration table access was removed alongside
+  // the v1 abolition, but the field stays on the fake so a future
+  // dependency doesn't need a spec-file rewrite. Returns null (row
+  // absent) as a safe default.
   configuration = { findUnique: jest.fn(async () => null) };
 }
 
