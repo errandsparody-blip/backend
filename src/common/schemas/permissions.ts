@@ -65,6 +65,19 @@ export const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Permission[]>> = {
     Permission.ReadAnyVendor,
   ],
   [Role.SUPER_ADMIN]: Object.values(Permission),
+  // Migration 0039 — the ADMIN role is intentionally NOT gated by this
+  // static permission matrix. Its real capabilities come from the
+  // per-page overrides in the `admin_role_page_permissions` config row
+  // and are enforced by PagePermissionGuard. The static map here is
+  // legacy (pre-page-permissions) and is bypassed for ADMIN callers.
+  // Empty array = "opt-in via page permissions" — a defensive default
+  // that ensures a mis-wired guard falls closed for ADMIN rather than
+  // silently inheriting SUPER_ADMIN capabilities.
+  //
+  // Referenced as the literal string because the local Prisma client
+  // may not yet have regenerated for the ADMIN enum value in every
+  // environment (Railway regenerates on deploy).
+  ["ADMIN" as Role]: [],
 };
 
 export function hasPermission(role: Role, permission: Permission): boolean {
