@@ -42,10 +42,15 @@ import { Role } from "@prisma/client";
 
 import { loadConfig } from "../../common/config";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
+import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { PrismaService } from "../../common/prisma.service";
+
+// Migration 0039 — ADMIN role reference. Cast because the local
+// Prisma client may lag; runtime is exact string equality.
+const ROLE_ADMIN = "ADMIN" as Role;
 import {
   adminApproveShopperIdSchema,
   adminCancelShopperSchema,
@@ -101,7 +106,15 @@ import { ShopperTokenService } from "./shopper-token.service";
 const FINANCE_ROLES = [Role.FINANCE_ADMIN, Role.SUPER_ADMIN] as const;
 
 @Controller({ path: "admin/shopper", version: "1" })
-@Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+// Migration 0039 — ADMIN is added to the compile-time role list here.
+// The class-level @RequiresPage("admin.shopper.write") is the default
+// dynamic gate; GET endpoints override at the method level to
+// admin.shopper.read so a SUPER_ADMIN can grant read-only shopper
+// access without giving mutation rights. WAREHOUSE_OPERATOR /
+// FINANCE_ADMIN / SUPER_ADMIN retain their compiled-in access — no
+// config toggle affects them.
+@Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
+@RequiresPage("admin.shopper.write")
 export class AdminShopperController {
   private readonly logger = new Logger(AdminShopperController.name);
 
@@ -120,7 +133,11 @@ export class AdminShopperController {
   // List + detail
   // ---------------------------------------------------------------------------
 
+  // Migration 0039 — override to the read key so a SUPER_ADMIN can
+  // grant an ADMIN read-only shopper access (list + detail) without
+  // opening every mutation.
   @Get()
+  @RequiresPage("admin.shopper.read")
   list(
     @Query(new ZodValidationPipe(adminListShopperRequestsSchema))
     q: AdminListShopperRequestsInput,
@@ -129,6 +146,7 @@ export class AdminShopperController {
   }
 
   @Get(":id")
+  @RequiresPage("admin.shopper.read")
   async get(@Param("id", new ParseUUIDPipe()) id: string) {
     const [request, messages] = await Promise.all([
       this.requests.getById(id),
@@ -1243,7 +1261,11 @@ export class AdminShopperController {
    * canonical method ordering + last-known default rates (used to
    * pre-fill the rate input when admin first opens the shipping form).
    */
+  // Migration 0039 — pre-fill data for the shopper shipping form.
+  // Read-only; ADMIN with admin.shopper.read can hit this so the
+  // detail page renders its rate input with the current defaults.
   @Get("freight-rates")
+  @RequiresPage("admin.shopper.read")
   async listFreightRates(): Promise<{
     rates: Record<string, number>;
     methods: ReadonlyArray<string>;

@@ -9,6 +9,7 @@
 import {
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Post,
@@ -23,6 +24,7 @@ import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { Public } from "../../common/decorators/public.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
+import { PagePermissionService } from "../../common/services/page-permission.service";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import {
   enrollMfaConfirmSchema,
@@ -61,7 +63,12 @@ function metaOf(req: Request): ReqMeta {
 
 @Controller({ path: "auth", version: "1" })
 export class AuthController {
-  constructor(private readonly auth: AuthService) {}
+  constructor(
+    private readonly auth: AuthService,
+    // Migration 0039 — resolves the current user's effective page
+    // permissions. Injected via @Global() PagePermissionModule.
+    private readonly pagePermissions: PagePermissionService,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // Signup + email verification
@@ -272,6 +279,34 @@ export class AuthController {
     const refreshToken = cookies[cfg.COOKIE_REFRESH_NAME];
     await this.auth.logout(refreshToken);
     this.clearRefreshCookie(res);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration 0039 — page-permission hydration for the frontend.
+  //
+  // The web app calls this once on layout mount (cached in React
+  // Query) to know which admin sidebar items to render and which
+  // client-side redirects to enforce. Any authenticated user can hit
+  // it; the response is scoped to *their* role:
+  //   * SUPER_ADMIN → every key true.
+  //   * ADMIN       → resolved from the admin-role-permissions
+  //                   config row + compile-in defaults.
+  //   * anyone else → every key false (this endpoint is meaningful
+  //                   only for the admin UI; a vendor calling it
+  //                   just gets a full "no" map, never an error).
+  //
+  // Returning the exhaustive map lets the client hide/show items
+  // in one round-trip and lets the UI stay a pure function of the
+  // response.
+  // ---------------------------------------------------------------------------
+  @UseGuards(JwtAuthGuard)
+  @Get("me/page-permissions")
+  @HttpCode(HttpStatus.OK)
+  async myPagePermissions(
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<{ permissions: Record<string, boolean> }> {
+    const permissions = await this.pagePermissions.getEffectivePermissions(user);
+    return { permissions };
   }
 
   // ---------------------------------------------------------------------------

@@ -236,15 +236,16 @@ export const createOrderSchema = z.object({
   vendorCarrier: vendorCarrierDetailsSchema.optional(),
 }).superRefine((data, ctx) => {
   // Per-mode required-field check that Zod can express cleanly.
-  if (data.fulfillmentMode === "PLATFORM_SHIP") {
-    if (!data.carrierService) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "carrierService is required for platform-shipped orders.",
-        path: ["carrierService"],
-      });
-    }
-  } else if (data.fulfillmentMode === "VENDOR_CARRIER") {
+  //
+  // Migration 0041 — PLATFORM_SHIP no longer requires carrierService
+  // at the schema layer. v2 orders (fulfillment_v2_enabled=true) don't
+  // pick a carrier at submit; the admin does at pack time. The
+  // legacy (v1) code path enforces carrierService presence inside
+  // OrderService.create by throwing `order_carrier_unavailable` when
+  // no matching rate is found — so removing the schema check doesn't
+  // let a v1 submit slip through silently. VENDOR_CARRIER still needs
+  // vendor-supplied label OR carrier+tracking; that check stays.
+  if (data.fulfillmentMode === "VENDOR_CARRIER") {
     const vc = data.vendorCarrier ?? {};
     const hasLabel = !!vc.vendorLabelUrl;
     const hasManual = !!vc.vendorCarrierName && !!vc.vendorTrackingNumber;

@@ -59,12 +59,19 @@ const readCategorySchema = z.object({
 type ReadCategoryInput = z.infer<typeof readCategorySchema>;
 
 @Controller({ path: "notifications", version: "1" })
+// Migration 0039 — ADMIN added. NotificationService scopes by
+// recipient (userId/vendorId), so the endpoint cannot leak someone
+// else's notifications regardless of role. No @RequiresPage needed
+// — every authenticated user sees their own inbox. The sidebar's
+// "Notifications" item visibility is gated separately on the
+// admin.notifications.read page key.
 @Roles(
   Role.VENDOR,
   Role.VENDOR_SUB_USER,
   Role.WAREHOUSE_OPERATOR,
   Role.FINANCE_ADMIN,
   Role.SUPER_ADMIN,
+  "ADMIN" as Role,
 )
 export class NotificationController {
   constructor(private readonly notifications: NotificationService) {}

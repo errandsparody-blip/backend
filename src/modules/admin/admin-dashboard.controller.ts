@@ -22,11 +22,23 @@
 import { Controller, Get } from "@nestjs/common";
 import { Role } from "@prisma/client";
 
+import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import { PrismaService } from "../../common/prisma.service";
 
+// Migration 0039 — the ADMIN enum member ships in this migration.
+// Referenced as a string cast so the file builds cleanly whether or
+// not the local Prisma client has been regenerated (Railway
+// regenerates on deploy; local sandboxes may lag).
+const ROLE_ADMIN = "ADMIN" as Role;
+
 @Controller({ path: "admin/dashboard", version: "1" })
-@Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+// ADMIN is added to the compile-time role list here so a SUPER_ADMIN
+// can grant `admin.dashboard` via the role-permissions config. The
+// PagePermissionGuard is what actually decides — an ADMIN without
+// the key set to true will get a 403 even though the role passes.
+@Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
+@RequiresPage("admin.dashboard")
 export class AdminDashboardController {
   constructor(private readonly prisma: PrismaService) {}
 

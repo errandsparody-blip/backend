@@ -29,6 +29,7 @@ import {
 import { Throttle } from "@nestjs/throttler";
 import { Role } from "@prisma/client";
 import type { Response } from "express";
+import { z } from "zod";
 
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
@@ -58,6 +59,13 @@ import {
 import { R2Service } from "../integrations/r2/r2.service";
 import { ReturnService } from "../returns/return.service";
 
+// Migration 0046 — vendor CSV bulk-import service. Delegated to; the
+// controller only validates the upload envelope and defers to the
+// service for parsing + per-row order creation.
+import {
+  IMPORT_MAX_BYTES,
+  OrderImportService,
+} from "./order-import.service";
 import { OrderService } from "./order.service";
 
 @Controller({ path: "orders", version: "1" })
@@ -72,7 +80,54 @@ export class OrderController {
     // import a module here; we just inject the service to presign
     // vendor-supplied label uploads on the new VENDOR_CARRIER flow.
     private readonly r2: R2Service,
+    // Migration 0046 — CSV bulk-import.
+    private readonly imports: OrderImportService,
   ) {}
+
+  // ---------------------------------------------------------------------------
+  // Migration 0041 — vendor-facing config bit for Fulfillment v2.
+  //
+  // The order/new wizard reads this once on mount to decide whether
+  // to render the legacy Shippo-quote-at-submit flow or the v2
+  // fulfillment-fee-only flow. Cheap; no auth-specific data; safe
+  // to cache on the client for the session. Rate-limited high
+  // because it's a single page-load hit.
+  //
+  // Kept as a small tailored endpoint (not tacked onto some
+  // /vendors/config/public) so the frontend only pulls what it
+  // needs. If the config surface grows we consolidate then.
+  // ---------------------------------------------------------------------------
+  @Get("fulfillment-config")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  async fulfillmentConfig(): Promise<{ v2Enabled: boolean }> {
+    return { v2Enabled: await this.orders.isFulfillmentV2Enabled() };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration 0041 — vendor-facing shipping estimate preview for the
+  // v2 wizard. The wizard calls this on the Review step (v2 only) so
+  // the vendor sees the exact estimate range + wallet-cover
+  // requirement before clicking Submit. Backend uses the same points
+  // math at submit — no drift possible.
+  //
+  // Same shape as /orders/fulfillment-estimate (which returns fee-only
+  // info) but keyed to the shipping-points path. Kept separate so a
+  // change to one doesn't accidentally alter the other.
+  // ---------------------------------------------------------------------------
+  @Post("shipping-estimate")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  shippingEstimate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body(new ZodValidationPipe(fulfillmentEstimateSchema))
+    body: FulfillmentEstimateInput,
+  ) {
+    // Reuse the same body schema as /fulfillment-estimate — both take
+    // {lines, insuranceRequested?}. shippingEstimate ignores
+    // insuranceRequested (v2 has no submit-time insurance).
+    return this.orders.shippingEstimate(user.vendorId!, { lines: body.lines });
+  }
 
   // ---------------------------------------------------------------------------
   // Validate address — pre-flight check before the vendor pays. Lets the
@@ -264,5 +319,55 @@ export class OrderController {
     @Body(new ZodValidationPipe(cancelOrderSchema)) body: CancelOrderInput,
   ) {
     return this.orders.cancel(user.vendorId!, user.sub, id, body);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Migration 0046 — Vendor CSV bulk import.
+  //
+  // The CSV is uploaded as a JSON payload `{ csv, sourceFilename }`
+  // so we don't need multipart parsing plumbing. The controller
+  // enforces the outer size limit; the service enforces per-row and
+  // per-cell limits.
+  //
+  // Rate limited (default = 60/min) to keep a runaway integration
+  // script from tying up the request pipeline; the service is
+  // synchronous per row.
+  // ---------------------------------------------------------------------------
+  @Post("import")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  importCsv(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body(
+      new ZodValidationPipe(
+        z.object({
+          csv: z.string().max(IMPORT_MAX_BYTES, {
+            message: `csv exceeds ${IMPORT_MAX_BYTES} bytes.`,
+          }),
+          sourceFilename: z.string().trim().min(1).max(200),
+        }),
+      ),
+    )
+    body: { csv: string; sourceFilename: string },
+  ) {
+    return this.imports.importCsv(user.vendorId!, user.sub, {
+      csv: body.csv,
+      sourceFilename: body.sourceFilename,
+    });
+  }
+
+  @Get("imports")
+  listImports(@CurrentUser() user: AuthenticatedUser) {
+    return this.imports
+      .listForVendor(user.vendorId!, 50)
+      .then((items) => ({ items }));
+  }
+
+  @Get("imports/:id")
+  getImport(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.imports.getForVendor(user.vendorId!, id);
   }
 }

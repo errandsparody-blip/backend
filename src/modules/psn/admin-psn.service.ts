@@ -25,6 +25,7 @@ import type { Prisma, PrismaClient, PsnStatus } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
 import type { CompleteReceivingInput, ListPsnsInput } from "../../common/schemas/psn.schema";
+import { ShippingPointService } from "../../common/services/shipping-point.service";
 import { AuditService } from "../audit/audit.service";
 import { computeFirstBillingDate, SkuService } from "../sku/sku.service";
 import { WalletService } from "../wallet/wallet.service";
@@ -44,6 +45,10 @@ export class AdminPsnService {
     private readonly skus: SkuService,
     private readonly audit: AuditService,
     private readonly wallet: WalletService,
+    // Migration 0040 — Fulfillment v2 requires every product on a
+    // PSN to have shippingPoints assigned before the PSN can be
+    // sealed. The service is @Global(); we just consume it.
+    private readonly shippingPoints: ShippingPointService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -141,7 +146,16 @@ export class AdminPsnService {
                 // next `prisma generate` runs. Surfacing the locked
                 // product image here lets the admin receive page
                 // visually match incoming stock without an extra hop.
-                ...({ storageTier: true, imageUrl: true } as Record<string, unknown>),
+                //
+                // Migration 0040 — `shippingPoints` (Decimal, nullable)
+                // rides through the same cast so the admin receive UI
+                // can render a per-product super-admin editor + gate
+                // Complete Receiving on unassigned lines.
+                ...({
+                  storageTier: true,
+                  imageUrl: true,
+                  shippingPoints: true,
+                } as Record<string, unknown>),
               },
             },
           },
@@ -182,6 +196,37 @@ export class AdminPsnService {
         throw new ConflictException({
           message: `PSN cannot be received from status ${psn.status} — receiving is a one-time action and this PSN is already sealed.`,
           code: "psn_wrong_status",
+        });
+      }
+
+      // Migration 0040 — Fulfillment v2. Every product on this PSN
+      // must have shippingPoints assigned before we can seal it.
+      // Reason: the vendor-facing shipping-cost estimate at order
+      // submit (Phase B) reads this value; without it, we can't
+      // gate wallet-cover validation and would ship product the
+      // vendor can't afford to send. Only SUPER_ADMIN can set the
+      // points — a WAREHOUSE_OPERATOR hitting this branch means
+      // they need to escalate before the receive can close out.
+      //
+      // Uses sumForLines because it returns per-line resolutions,
+      // giving us a specific error listing which products are
+      // blocking. The `totalPoints` value is discarded here — the
+      // Phase A infrastructure is in place, but Phase B is what
+      // consumes it at order-submit time.
+      const productQuantities = psn.lines.map((line) => ({
+        productId: line.productId,
+        quantity: line.declaredQty,
+      }));
+      const pointResolution = await this.shippingPoints.sumForLines(productQuantities);
+      if (!pointResolution.allAssigned) {
+        const missing = pointResolution.resolutions
+          .filter((r) => !r.assigned)
+          .map((r) => r.productId);
+        throw new BadRequestException({
+          message:
+            "This PSN can't be sealed until every product has shipping points assigned. A super admin must set them on each product before Complete Receiving.",
+          code: "psn_missing_shipping_points",
+          missingProductIds: missing,
         });
       }
 

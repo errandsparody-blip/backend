@@ -1,0 +1,23 @@
+-- Migration 0039 — Introduce the ADMIN role.
+--
+-- ADMIN sits between the tenant-scoped VENDOR roles and SUPER_ADMIN /
+-- FINANCE_ADMIN. Unlike the existing admin flavours which have a fixed,
+-- code-defined permission set, ADMIN's page-level access is DYNAMIC —
+-- SUPER_ADMIN edits a JSON config row (`admin_role_page_permissions`)
+-- to grant or revoke individual admin pages. See:
+--   * common/schemas/page-permissions.ts   (canonical page-key union)
+--   * common/services/page-permission.service.ts (guard + resolver)
+--   * common/guards/page-permission.guard.ts
+--
+-- Rationale for a NEW enum value vs. reusing FINANCE_ADMIN or WAREHOUSE_OPERATOR:
+--   * Those roles carry compiled-in permission sets (money movement /
+--     warehouse ops) that a support-flavoured admin doesn't need.
+--   * A separate enum keeps audit-log queries clean ("all ADMIN actions
+--     in June") and lets us evolve the two paths independently.
+--
+-- Postgres note: adding an enum value is transactional in modern
+-- Postgres (14+). No follow-up code path required; existing rows are
+-- unaffected because no user starts with the new role — SUPER_ADMIN
+-- promotes users into ADMIN via PATCH /admin/users/:id/role in a
+-- subsequent phase.
+ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'ADMIN';

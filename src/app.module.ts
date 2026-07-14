@@ -19,7 +19,12 @@ import { AllExceptionsFilter } from "./common/filters/all-exceptions.filter";
 import { IdempotencyModule } from "./common/idempotency.module";
 import { AgreementVersionGuard } from "./common/guards/agreement-version.guard";
 import { JwtAuthGuard } from "./common/guards/jwt-auth.guard";
+import { PagePermissionGuard } from "./common/guards/page-permission.guard";
 import { RolesGuard } from "./common/guards/roles.guard";
+import { InventoryLocationModule } from "./common/services/inventory-location.module";
+import { PackagingLibraryModule } from "./common/services/packaging-library.module";
+import { PagePermissionModule } from "./common/services/page-permission.module";
+import { ShippingPointModule } from "./common/services/shipping-point.module";
 import { PrismaModule } from "./common/prisma.module";
 import { AdminModule } from "./modules/admin/admin.module";
 import { AuditModule } from "./modules/audit/audit.module";
@@ -95,6 +100,25 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     PrismaModule,
     CryptoModule,
     IdempotencyModule,
+    // Migration 0039 — PagePermissionService needs to be a process-
+    // wide singleton (cache lives inside it). The @Global() module
+    // exposes it to both the app-level guard and any feature-module
+    // controller in one wiring.
+    PagePermissionModule,
+    // Migration 0040 — same reasoning: ShippingPointService caches
+    // the range-table config, so it must be a process-wide
+    // singleton. @Global() wrapper keeps every future consumer
+    // (order create in Phase B, wizard preview, wallet validator)
+    // one injection away.
+    ShippingPointModule,
+    // Migration 0043 — Packaging library. Global cache means every
+    // pack-modal read (per-operator, per-order) hits the same 5 s
+    // memoised list.
+    PackagingLibraryModule,
+    // Migration 0045 — Warehouse inventory locations. Also global
+    // (5 s cache) — the pack modal and PSN receive UI both read
+    // via SKU → location lookup.
+    InventoryLocationModule,
     AuditModule,
     EmailModule,
     NotificationModule,
@@ -125,6 +149,16 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    // Migration 0039 — PagePermissionGuard runs AFTER RolesGuard.
+    // A route with no @RequiresPage(...) decorator passes through
+    // as a no-op, so this is safe to enable globally without
+    // touching existing controllers. Ordered here (rather than
+    // before RolesGuard) so an unauthorised role short-circuits
+    // before we hit the config lookup. PagePermissionService is
+    // provided by the @Global()-flagged PagePermissionModule below
+    // so both this guard AND feature-module controllers see the
+    // same cached singleton.
+    { provide: APP_GUARD, useClass: PagePermissionGuard },
     // AgreementVersionGuard runs after JWT + Roles. NestJS executes APP_GUARDs
     // in order, so a JWT failure short-circuits before we hit the agreement
     // check (we never need to query Postgres for an unauth'd request).

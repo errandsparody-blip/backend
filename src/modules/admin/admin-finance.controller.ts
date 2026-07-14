@@ -10,9 +10,13 @@ import { LedgerEntryType, Role } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
+import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { PrismaService } from "../../common/prisma.service";
+
+// Migration 0039 — ADMIN role reference.
+const ROLE_ADMIN = "ADMIN" as Role;
 
 // All ledger types the admin transactions filter accepts. Mirrors the
 // LedgerEntryType enum exactly; we re-declare the literal union here so
@@ -95,11 +99,16 @@ type ListVendorsInput = z.infer<typeof listVendorsSchema>;
 const DEFAULT_LIMIT = 50;
 
 @Controller({ path: "admin", version: "1" })
-@Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+// Migration 0039 — ADMIN added at the class level; each method
+// declares its own @RequiresPage because this controller mixes
+// vendor-list traffic (admin.vendors.read) with reconciliation +
+// transactions (admin.finance.read).
+@Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
 export class AdminFinanceController {
   constructor(private readonly prisma: PrismaService) {}
 
   @Get("vendors")
+  @RequiresPage("admin.vendors.read")
   async listVendors(@Query(new ZodValidationPipe(listVendorsSchema)) q: ListVendorsInput) {
     const limit = q.limit ?? DEFAULT_LIMIT;
     const where: {
@@ -163,6 +172,7 @@ export class AdminFinanceController {
    * to finance admins on demand.
    */
   @Get("finance/reconciliation")
+  @RequiresPage("admin.finance.read")
   async reconciliationReport() {
     // Pull every vendor + wallet + sum(ledger). N+1 acceptable for v1 since
     // N is small (50–200 vendors at launch). Replace with a single SQL
@@ -216,6 +226,7 @@ export class AdminFinanceController {
    * If we add one later, it goes here as `?vendorId=<uuid>`.
    */
   @Get("finance/transactions")
+  @RequiresPage("admin.finance.read")
   async listTransactions(
     @Query(new ZodValidationPipe(listTransactionsSchema)) q: ListTransactionsInput,
   ) {

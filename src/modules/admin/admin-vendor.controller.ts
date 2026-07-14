@@ -26,6 +26,7 @@ import { Role } from "@prisma/client";
 import { Throttle } from "@nestjs/throttler";
 
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
+import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
@@ -39,6 +40,11 @@ import {
   type RequestResubmissionInput,
   type VerifySocialInput,
 } from "../../common/schemas/admin-vendor.schema";
+
+// Migration 0039 — ADMIN role reference. Cast because the local
+// Prisma client may lag behind the schema in the sandbox. Runtime is
+// exact string equality so the reference is stable across envs.
+const ROLE_ADMIN = "ADMIN" as Role;
 
 import { VendorService } from "../vendors/vendor.service";
 
@@ -59,7 +65,11 @@ export class AdminVendorController {
   // Read
   // ---------------------------------------------------------------------------
 
-  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+  // Migration 0039 — ADMIN can be granted vendor read access via the
+  // admin.vendors.read page key. FINANCE_ADMIN + SUPER_ADMIN keep their
+  // compiled-in access (no config toggle for them).
+  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
+  @RequiresPage("admin.vendors.read")
   @Get(":id")
   async detail(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.vendors.getVendorDetail(id);
@@ -74,7 +84,8 @@ export class AdminVendorController {
    * without a waterfall. Read-only — same FINANCE_ADMIN + SUPER_ADMIN
    * scope as the detail endpoint.
    */
-  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
+  @RequiresPage("admin.vendors.read")
   @Get(":id/overview")
   async overview(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.vendors.getVendorOverview(id);
@@ -87,7 +98,8 @@ export class AdminVendorController {
    * /wallet/recurring, including the per-PSN box itemisation, so
    * billing questions can be triaged without assuming the vendor.
    */
-  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
+  @RequiresPage("admin.vendors.read")
   @Get(":id/recurring-storage")
   async recurringStorage(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.vendorReadonly.getRecurringStorage(id);
@@ -100,7 +112,8 @@ export class AdminVendorController {
    * boxes empty / remove them and have those exclusions reflect
    * immediately in the next billing run.
    */
-  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
+  @RequiresPage("admin.vendors.read")
   @Get(":id/storage-boxes")
   async storageBoxes(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.vendors.listStorageBoxes(id);

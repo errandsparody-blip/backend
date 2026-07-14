@@ -18,11 +18,15 @@ import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
+import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
+
+// Migration 0039 — ADMIN role reference.
+const ROLE_ADMIN = "ADMIN" as Role;
 
 const listSchema = z.object({
   actorId: z.string().uuid().optional(),
@@ -55,7 +59,10 @@ const listSchema = z.object({
 type ListInput = z.infer<typeof listSchema>;
 
 @Controller({ path: "admin/audit", version: "1" })
-@Roles(Role.SUPER_ADMIN, Role.FINANCE_ADMIN)
+// Migration 0039 — ADMIN opt-in via admin.audit.read. Off by default;
+// SUPER_ADMIN toggles it on for admins who need to review changes.
+@Roles(Role.SUPER_ADMIN, Role.FINANCE_ADMIN, ROLE_ADMIN)
+@RequiresPage("admin.audit.read")
 export class AdminAuditController {
   constructor(
     private readonly prisma: PrismaService,

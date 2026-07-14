@@ -17,6 +17,7 @@ import { Role } from "@prisma/client";
 import { z } from "zod";
 
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
+import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
@@ -24,6 +25,9 @@ import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { IntegrationOrderService } from "../integration/integration-order.service";
 
 import { AdminOrderService } from "./admin-order.service";
+
+// Migration 0039 — ADMIN role reference.
+const ROLE_ADMIN = "ADMIN" as Role;
 
 const forceCancelSchema = z.object({
   // 5..280: short enough to surface in audit log UI, long enough for a real
@@ -63,7 +67,13 @@ const listSchema = z.object({
 type ListInput = z.infer<typeof listSchema>;
 
 @Controller({ path: "admin/orders", version: "1" })
-@Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+// Migration 0039 — ADMIN added at class level. Default @RequiresPage
+// is `admin.orders.write`; GETs override to `admin.orders.read` so a
+// SUPER_ADMIN can grant read-only order queue access without also
+// granting pick/pack/ship. `force-cancel` opts BACK OUT of ADMIN at
+// the method level because it refunds real money — SUPER_ADMIN only.
+@Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
+@RequiresPage("admin.orders.write")
 export class AdminOrderController {
   constructor(
     private readonly orders: AdminOrderService,
@@ -73,6 +83,7 @@ export class AdminOrderController {
   ) {}
 
   @Get()
+  @RequiresPage("admin.orders.read")
   list(@Query(new ZodValidationPipe(listSchema)) q: ListInput) {
     return this.orders.list(q);
   }
@@ -87,6 +98,7 @@ export class AdminOrderController {
   }
 
   @Get(":id")
+  @RequiresPage("admin.orders.read")
   get(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.orders.get(id);
   }
@@ -146,6 +158,13 @@ export class AdminOrderController {
    * that (PICKING and beyond) requires the return flow because real-world
    * activity has happened.
    */
+  // Migration 0039 — force-cancel refunds the wallet in the same
+  // transaction as the inventory release. Method-level @Roles
+  // OVERRIDES the class-level list, dropping ADMIN + WAREHOUSE_OPERATOR
+  // so this is only ever reachable by FINANCE_ADMIN or SUPER_ADMIN.
+  // Deliberately has no @RequiresPage — no config toggle can grant
+  // it to an ADMIN.
+  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
   @Post(":id/force-cancel")
   @HttpCode(HttpStatus.OK)
   forceCancel(

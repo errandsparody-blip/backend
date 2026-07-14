@@ -56,6 +56,7 @@ import type {
   OrderLineInput,
   QuoteOrderInput,
 } from "../../common/schemas/order.schema";
+import { ShippingPointService } from "../../common/services/shipping-point.service";
 import { AuditService } from "../audit/audit.service";
 import { opsNewOrderTemplate } from "../email/email-templates";
 import { ShippoService, type ShippingRate } from "../integrations/shippo/shippo.service";
@@ -159,6 +160,21 @@ export interface PublicOrder {
   cancelledAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  /**
+   * Migration 0041 — Fulfillment v2 discriminator.
+   *   1 = legacy flow (Shippo quoted at submit, everything debited)
+   *   2 = v2 flow (fulfillment fee only at submit, estimate range shown)
+   * Vendor UI branches on this to render either the legacy money
+   * breakdown or the v2 "estimate range + fulfillment paid" view.
+   */
+  workflowVersion: number;
+  /**
+   * Migration 0041 — v2 shipping estimate captured at submit time.
+   * Both null for legacy (workflowVersion=1) orders AND for v2
+   * VENDOR_CARRIER orders (no platform shipping to estimate).
+   */
+  estimatedShippingMinCents: number | null;
+  estimatedShippingMaxCents: number | null;
   lines: Array<{
     id: string;
     skuId: string;
@@ -192,6 +208,10 @@ export class OrderService {
     // creates an order, so ops sees the new pick/pack work without
     // having to refresh the admin orders list.
     private readonly opsAlerts: OpsAlertService,
+    // Migration 0041 — Fulfillment v2 uses shipping points to compute
+    // the vendor-facing estimate range at submit time. Injected via
+    // the @Global() ShippingPointModule (migration 0040).
+    private readonly shippingPoints: ShippingPointService,
   ) {}
 
   // ===========================================================================
@@ -404,6 +424,24 @@ export class OrderService {
     actorId: string,
     input: CreateOrderInput,
   ): Promise<PublicOrder> {
+    // Migration 0041 — Fulfillment v2 dispatch. The `fulfillment_v2_enabled`
+    // config row is a kill-switch a SUPER_ADMIN toggles after Phase C's
+    // admin pack pipeline is live. While it's false (default), every
+    // submit stays on the legacy Shippo-quote-at-submit path defined
+    // below. When true, we hand off to createV2() which:
+    //   * skips the Shippo quote entirely
+    //   * blocks submit if any product on the order lacks shipping points
+    //   * shows a shipping-points-based ESTIMATE range to the vendor
+    //   * requires wallet to cover fulfillment + top-of-estimate
+    //   * debits ONLY the fulfillment fee at submit (not shipping)
+    //   * lands the order in PENDING_PACKING with workflowVersion=2
+    // Old rows created before the flag flipped keep behaving under the
+    // legacy transition machine — the workflowVersion column is set at
+    // create time and never mutated.
+    if (await this.isFulfillmentV2Enabled()) {
+      return this.createV2(vendorId, actorId, input);
+    }
+
     // 1. Address validation.
     const addressValidation = await this.smarty.verifyUS({
       line1: input.recipient.shipAddressLine1,
@@ -821,6 +859,500 @@ export class OrderService {
   }
 
   // ===========================================================================
+  // CREATE V2 — Fulfillment v2 (migration 0041). Feature-flag gated by
+  // `fulfillment_v2_enabled`. See create() above for the dispatch entry
+  // point.
+  //
+  // Divergence vs. legacy create() worth calling out:
+  //
+  //   * NO Shippo quote at submit. The vendor sees a shipping-points-
+  //     based ESTIMATE range instead. Actual shipping is bought at pack
+  //     time by admin (Phase C).
+  //
+  //   * NO insurance handling. Insurance is inherently tied to the
+  //     carrier's insurance product, which we buy alongside the label.
+  //     v2 defers that decision to pack time.
+  //
+  //   * Wallet debit is ONLY the fulfillment fee. Actual shipping is
+  //     debited at pack-and-charge time (Phase C).
+  //
+  //   * Blocks submit when ANY product on the order lacks a
+  //     shippingPoints value — a super admin must set it before the
+  //     order can be created. This is what makes the ESTIMATE range
+  //     honest.
+  //
+  //   * Wallet-cover validation: balance >= fulfillmentFee +
+  //     estimatedShippingMaxCents. The top of the range is used so
+  //     the vendor is protected from ordering something they can't
+  //     afford to eventually ship. Backend enforcement mirrors the
+  //     frontend gate.
+  //
+  //   * Terminal status is PENDING_PACKING, not ALLOCATED. Every
+  //     downstream v2 transition service reads workflowVersion + this
+  //     status to dispatch correctly.
+  //
+  // VENDOR_CARRIER (Fulfill Only) branch inside v2: same fulfillment
+  // fee debit; skips shipping-points check, estimate resolution, and
+  // wallet-cover check (no shipping to cover). Status still lands
+  // PENDING_PACKING — the warehouse still barcode-scans + packs, then
+  // hands off to the vendor's carrier at pack time.
+  // ===========================================================================
+
+  private async createV2(
+    vendorId: string,
+    actorId: string,
+    input: CreateOrderInput,
+  ): Promise<PublicOrder> {
+    // 1. Address validation — same rules as legacy.
+    const addressValidation = await this.smarty.verifyUS({
+      line1: input.recipient.shipAddressLine1,
+      line2: input.recipient.shipAddressLine2,
+      city: input.recipient.shipCity,
+      state: input.recipient.shipState,
+      postalCode: input.recipient.shipPostalCode,
+      country: input.recipient.shipCountry,
+    });
+    if (addressValidation.outcome === "REJECTED") {
+      throw new BadRequestException({
+        message: `Address rejected: ${addressValidation.detail ?? "invalid"}`,
+        code: "address_rejected",
+      });
+    }
+
+    // 2. Duplicate external-reference guard (same as legacy).
+    if (input.externalReference) {
+      const dup = await this.prisma.order.findUnique({
+        where: {
+          vendor_external_ref_unique: {
+            vendorId,
+            externalReference: input.externalReference,
+          },
+        },
+        select: { id: true },
+      });
+      if (dup) {
+        throw new ConflictException({
+          message: "An order with this external reference already exists.",
+          code: "order_external_ref_duplicate",
+        });
+      }
+    }
+
+    // 3. Resolve products (read-only). Reuses the legacy loader.
+    const productsByCode = await this.loadProducts(vendorId, input.lines);
+
+    const totalUnits = input.lines.reduce((s, l) => s + l.quantity, 0);
+    const declaredValueCents = input.lines.reduce((s, l) => {
+      const sku = productsByCode.bySkuId.get(l.skuId);
+      if (!sku) {
+        throw new BadRequestException({
+          message: `Unknown SKU ${l.skuId}`,
+          code: "order_invalid_sku",
+        });
+      }
+      return s + sku.product.declaredValueCents * l.quantity;
+    }, 0);
+
+    // 4. Compute the fulfillment fee. carrierCost=0 by definition in v2
+    // (no shipping bought yet). Insurance is deferred to pack time.
+    const schedule = await loadFeeSchedule(this.prisma);
+    const fees = computeOrderFees({
+      schedule,
+      totalUnits,
+      carrierCostCents: 0,
+      declaredValueCents,
+      insuranceRequested: false,
+    });
+    const fulfillmentFeeCents = fees.fulfillmentFeeCents;
+
+    // 5. Branch on fulfillmentMode for the shipping-side checks.
+    // VENDOR_CARRIER (Fulfill Only) → skip everything shipping-related;
+    // vendor pays their own carrier. PLATFORM_SHIP → resolve estimate
+    // range + gate on shipping points + wallet cover.
+    const isVendorCarrier = input.fulfillmentMode === "VENDOR_CARRIER";
+    let estimatedShippingMinCents: number | null = null;
+    let estimatedShippingMaxCents: number | null = null;
+
+    if (!isVendorCarrier) {
+      // 5a. Every product on the order must have shipping points
+      // assigned. Super admin sets them at PSN receive time
+      // (migration 0040). We refuse submit here so the vendor sees a
+      // clear error rather than a $0 estimate that sails through
+      // wallet validation.
+      const productLines = input.lines.map((l) => {
+        const r = productsByCode.bySkuId.get(l.skuId);
+        return { productId: r!.product.id, quantity: l.quantity };
+      });
+      const pointRes = await this.shippingPoints.sumForLines(productLines);
+      if (!pointRes.allAssigned) {
+        const unassigned = pointRes.resolutions
+          .filter((r) => !r.assigned)
+          .map((r) => r.productId);
+        throw new BadRequestException({
+          message:
+            "Some products on this order don't have shipping points assigned yet. A super admin must set them before this order can be submitted.",
+          code: "order_missing_shipping_points",
+          missingProductIds: unassigned,
+        });
+      }
+
+      // 5b. Resolve the estimate range from the summed points.
+      const range = await this.shippingPoints.resolveRange(pointRes.totalPoints);
+      estimatedShippingMinCents = range.dollarsMin;
+      estimatedShippingMaxCents = range.dollarsMax;
+
+      // 5c. Wallet-cover validation. Balance must cover the
+      // fulfillment fee AND the top of the estimated shipping range.
+      // The top (not the bottom) is used so the vendor is protected
+      // against ordering something the actual carrier quote would put
+      // them under-funded on. The check is repeated at pack time
+      // (Phase C) against the actual rate; this pre-flight is just
+      // to catch obvious cases before we reserve inventory.
+      const requiredCoverage = fulfillmentFeeCents + estimatedShippingMaxCents;
+      const walletSnapshot = await this.wallet.get(vendorId);
+      const walletBalance = walletSnapshot.balanceCents;
+      if (walletBalance < requiredCoverage) {
+        throw new ConflictException({
+          message:
+            `Wallet balance $${(walletBalance / 100).toFixed(2)} is below the required coverage $${(requiredCoverage / 100).toFixed(2)} ` +
+            `(fulfillment $${(fulfillmentFeeCents / 100).toFixed(2)} + estimated shipping max $${(estimatedShippingMaxCents / 100).toFixed(2)}). ` +
+            "Fund your wallet before submitting.",
+          code: "order_wallet_insufficient",
+          walletBalanceCents: walletBalance,
+          requiredCoverageCents: requiredCoverage,
+        });
+      }
+    }
+
+    // 6. Optional hard cap. maxAcceptableTotalCents applies to the
+    // fulfillment fee here (v2 doesn't charge shipping at submit).
+    if (input.maxAcceptableTotalCents && fulfillmentFeeCents > input.maxAcceptableTotalCents) {
+      throw new ConflictException({
+        message: `Fulfillment fee $${(fulfillmentFeeCents / 100).toFixed(2)} exceeds your max of $${(input.maxAcceptableTotalCents / 100).toFixed(2)}.`,
+        code: "order_total_exceeds_max",
+      });
+    }
+
+    // 7. Transactional core.
+    const order = await this.prisma.$transaction(async (tx) => {
+      // 7a. Lock SKUs, validate, reserve — identical to legacy.
+      const skuIds = Array.from(new Set(input.lines.map((l) => l.skuId))).sort();
+      const lockedSkus = await this.lockSkus(tx, vendorId, skuIds);
+
+      const linesByQty = new Map<string, number>();
+      for (const l of input.lines) {
+        linesByQty.set(l.skuId, (linesByQty.get(l.skuId) ?? 0) + l.quantity);
+      }
+      for (const skuId of skuIds) {
+        const sku = lockedSkus.get(skuId);
+        if (!sku) throw new NotFoundException(`SKU ${skuId} not found.`);
+        if (sku.vendor_id !== vendorId) throw new NotFoundException(`SKU ${skuId} not found.`);
+        if (sku.status !== "ACTIVE") {
+          throw new ConflictException({
+            message: `SKU ${skuId} is ${sku.status} and cannot be ordered.`,
+            code: "order_sku_inactive",
+          });
+        }
+        const need = linesByQty.get(skuId)!;
+        if (sku.quantity_available < need) {
+          throw new ConflictException({
+            message: `Insufficient stock on SKU ${skuId}: have ${sku.quantity_available}, need ${need}.`,
+            code: "order_insufficient_stock",
+          });
+        }
+      }
+
+      for (const [skuId, need] of linesByQty.entries()) {
+        await tx.sku.update({
+          where: { id: skuId },
+          data: {
+            quantityAvailable: { decrement: need },
+            quantityReserved: { increment: need },
+          },
+        });
+        await tx.inventoryMovement.create({
+          data: {
+            vendorId,
+            skuId,
+            type: "RESERVE",
+            deltaAvailable: -need,
+            deltaReserved: need,
+            referenceType: "order",
+            referenceId: null,
+            actorId,
+          },
+        });
+      }
+
+      // 7b. Debit the FULFILLMENT FEE only. Shipping is charged at
+      // pack time in Phase C.
+      await this.wallet.debit(
+        {
+          vendorId,
+          amountCents: fulfillmentFeeCents,
+          type: "FULFILLMENT",
+          description:
+            `Fulfillment fee for ${input.lines.length} SKU(s) → ${input.recipient.shipCity}` +
+            (isVendorCarrier ? " (Fulfill Only)" : ""),
+          referenceType: "order",
+          referenceId: undefined,
+          actorId,
+        },
+        tx as unknown as Parameters<typeof this.wallet.debit>[1],
+      );
+
+      // 7c. Create the Order row. status=PENDING_PACKING;
+      // workflowVersion=2; shipping-money-columns all zero (charged
+      // at pack time); estimate range populated so the vendor sees
+      // what they were told at submit.
+      const created = await tx.order.create({
+        data: {
+          vendorId,
+          externalReference: input.externalReference ?? null,
+          status: "PENDING_PACKING" as OrderStatus,
+          recipientName: input.recipient.recipientName,
+          recipientPhone: input.recipient.recipientPhone ?? null,
+          recipientEmail: input.recipient.recipientEmail ?? null,
+          shipAddressLine1: input.recipient.shipAddressLine1,
+          shipAddressLine2: input.recipient.shipAddressLine2 ?? null,
+          shipCity: input.recipient.shipCity,
+          shipState: input.recipient.shipState,
+          shipPostalCode: input.recipient.shipPostalCode,
+          shipCountry: input.recipient.shipCountry,
+          addressValidationStatus: addressValidation.outcome,
+          addressValidationDetail: addressValidation.detail
+            ? ({
+                note: addressValidation.detail,
+                providerRef: addressValidation.providerRef ?? null,
+              } as Prisma.InputJsonValue)
+            : Prisma.JsonNull,
+          // v2 records carrier identity only for VENDOR_CARRIER (the
+          // vendor tells us who's shipping it). PLATFORM_SHIP has no
+          // carrier known until pack time.
+          carrier: isVendorCarrier
+            ? input.vendorCarrier?.vendorCarrierName ?? null
+            : null,
+          carrierService: isVendorCarrier ? "Vendor carrier" : null,
+          rateProviderRef: null,
+          ratePurchasedRef: null,
+          // Migration 0037 fulfillmentMode + vendor-carrier fields.
+          // Cast through unknown for the Railway/local Prisma-client
+          // stale-generation pattern.
+          ...({
+            fulfillmentMode: input.fulfillmentMode,
+            vendorCarrierName: isVendorCarrier
+              ? input.vendorCarrier?.vendorCarrierName ?? null
+              : null,
+            vendorTrackingNumber: isVendorCarrier
+              ? input.vendorCarrier?.vendorTrackingNumber ?? null
+              : null,
+            vendorLabelUrl: isVendorCarrier
+              ? input.vendorCarrier?.vendorLabelUrl ?? null
+              : null,
+            // Migration 0041 columns — workflowVersion + estimate range.
+            workflowVersion: 2,
+            estimatedShippingMinCents,
+            estimatedShippingMaxCents,
+          } as Record<string, unknown>),
+          trackingNumber: isVendorCarrier
+            ? input.vendorCarrier?.vendorTrackingNumber ?? null
+            : null,
+          itemsDeclaredValueCents: declaredValueCents,
+          // v2 shipping money is zero at submit — actual is charged
+          // at pack time. totalChargedCents reflects ONLY what's
+          // been debited so far (fulfillment fee).
+          shippingCostCents: 0,
+          shippingFeeCents: 0,
+          fulfillmentFeeCents,
+          insuranceFeeCents: 0,
+          totalChargedCents: fulfillmentFeeCents,
+          submittedAt: new Date(),
+          // v2 doesn't stamp allocatedAt at submit — allocation is
+          // gated on pack completion. Keeping the column null makes
+          // "when did the warehouse actually take responsibility"
+          // queryable.
+          allocatedAt: null,
+          createdBy: actorId,
+        },
+      });
+
+      // 7d. OrderLines snapshot — identical to legacy.
+      for (const l of input.lines) {
+        const r = productsByCode.bySkuId.get(l.skuId);
+        if (!r) throw new BadRequestException(`Unknown SKU ${l.skuId} during create.`);
+        await tx.orderLine.create({
+          data: {
+            orderId: created.id,
+            vendorId,
+            productId: r.product.id,
+            skuId: l.skuId,
+            productCode: r.product.code,
+            productName: r.product.name,
+            variant: r.sku.variant,
+            quantity: l.quantity,
+            declaredValueCents: r.product.declaredValueCents * l.quantity,
+            allocationStatus: "RESERVED",
+          },
+        });
+      }
+
+      // 7e. Patch referenceIds on the movements + ledger entries we
+      // just wrote (couldn't set them before the order id existed).
+      await tx.inventoryMovement.updateMany({
+        where: {
+          vendorId,
+          referenceType: "order",
+          referenceId: null,
+          createdAt: { gte: created.createdAt },
+        },
+        data: { referenceId: created.id },
+      });
+      await tx.ledgerEntry.updateMany({
+        where: {
+          vendorId,
+          referenceType: "order",
+          referenceId: null,
+          createdAt: { gte: created.createdAt },
+        },
+        data: { referenceId: created.id },
+      });
+
+      // 7f. Append-only timeline. v2 records the estimate range so
+      // audit reproductions can prove "this is what the vendor was
+      // told at submit" if a dispute arises later.
+      await tx.orderEvent.create({
+        data: {
+          orderId: created.id,
+          type: "order.submitted",
+          description:
+            `Order submitted (Fulfillment v2) — ${input.lines.length} line(s).` +
+            (isVendorCarrier ? " Fulfill Only." : ""),
+          source: "VENDOR",
+          actorId,
+          metadata: {
+            workflowVersion: 2,
+            fulfillmentMode: input.fulfillmentMode,
+            fulfillmentFeeCents,
+            estimatedShippingMinCents,
+            estimatedShippingMaxCents,
+          },
+        },
+      });
+
+      return created;
+    });
+
+    // 8. Ops alert (best-effort, outside the transaction). Uses the
+    // same opsNewOrderTemplate as the legacy path so the ops inbox
+    // format stays consistent across the two flows.
+    void (async () => {
+      try {
+        const vendorRow = await this.prisma.vendor.findUnique({
+          where: { id: vendorId },
+          select: { businessName: true },
+        });
+        const tpl = opsNewOrderTemplate({
+          orderId: order.id,
+          orderRef: formatOrderRef((order as unknown as { orderNumber: number }).orderNumber),
+          vendorBusinessName: vendorRow?.businessName ?? "(unknown vendor)",
+          lineCount: input.lines.length,
+          // v2 has only charged the fulfillment fee at this point.
+          // Ops sees "$X.XX (fulfillment only)" so they don't confuse
+          // this with the legacy "everything at submit" number.
+          totalChargedCents: fulfillmentFeeCents,
+        });
+        await this.opsAlerts.send({
+          type: "ops.order.new",
+          subject: tpl.subject,
+          html: tpl.html,
+          text: tpl.text,
+          idempotencyKey: `ops:order:new:${order.id}`,
+          href: `/admin/orders/${order.id}`,
+        });
+      } catch {
+        // Fire-and-forget; a failed ops alert must never roll back
+        // the order.
+      }
+    })();
+
+    // 9. Refetch with lines included — toPublic requires them.
+    const withLines = await this.prisma.order.findUnique({
+      where: { id: order.id },
+      include: { lines: true },
+    });
+    if (!withLines) {
+      throw new NotFoundException(`Order ${order.id} disappeared after create.`);
+    }
+    return this.toPublic(withLines);
+  }
+
+  /**
+   * Read the fulfillment-v2 kill-switch. Default false — the legacy
+   * flow keeps running until a SUPER_ADMIN flips this to true from
+   * the admin config page (Phase B6).
+   *
+   * Public because the vendor order wizard needs to read the same
+   * flag to decide whether to render the v2 or legacy submit flow.
+   * A GET endpoint on the controller forwards to this method.
+   *
+   * Deliberately NOT cached in-process — the check runs on order
+   * submit (not high-QPS) and we want an ops toggle to take effect
+   * immediately. If this becomes a hot path later, wrap it in the
+   * same 30-second cache pattern used by ShippingPointService.
+   */
+  async isFulfillmentV2Enabled(): Promise<boolean> {
+    const row = await this.prisma.configuration.findUnique({
+      where: { key: "fulfillment_v2_enabled" },
+    });
+    if (!row) return false;
+    return row.value === true;
+  }
+
+  /**
+   * Migration 0041 — vendor-facing shipping estimate preview for the
+   * v2 wizard. Returns the same numbers the backend will use at
+   * submit time, so the vendor sees the exact wallet-cover
+   * requirement before they commit.
+   *
+   * `allAssigned` = false surfaces which products still lack
+   * shipping points so the wizard can render a clear "this SKU
+   * isn't ready" error rather than a $0 estimate.
+   *
+   * Not used in the legacy flow — the wizard only calls this
+   * endpoint when `/orders/fulfillment-config` reports v2Enabled=true.
+   */
+  async shippingEstimate(
+    vendorId: string,
+    input: { lines: OrderLineInput[] },
+  ): Promise<{
+    totalPoints: number;
+    allAssigned: boolean;
+    missingProductIds: string[];
+    estimateMinCents: number;
+    estimateMaxCents: number;
+  }> {
+    const resolved = await this.resolveLinesReadOnly(vendorId, input.lines);
+    const productLines = resolved.map((r) => ({
+      productId: r.product.id,
+      quantity: r.input.quantity,
+    }));
+    const points = await this.shippingPoints.sumForLines(productLines);
+    // Even when a line has unassigned points, resolve the range from
+    // the (partial) sum so the wizard has SOMETHING to show — the
+    // wallet-cover gate will refuse until allAssigned=true anyway.
+    const range = await this.shippingPoints.resolveRange(points.totalPoints);
+    return {
+      totalPoints: points.totalPoints,
+      allAssigned: points.allAssigned,
+      missingProductIds: points.resolutions
+        .filter((r) => !r.assigned)
+        .map((r) => r.productId),
+      estimateMinCents: range.dollarsMin,
+      estimateMaxCents: range.dollarsMax,
+    };
+  }
+
+  // ===========================================================================
   // READS
   // ===========================================================================
 
@@ -1117,6 +1649,20 @@ export class OrderService {
       cancelledAt: o.cancelledAt,
       createdAt: o.createdAt,
       updatedAt: o.updatedAt,
+      // Migration 0041 — cast because the local Prisma client may
+      // not include workflow_version / estimated_shipping_*_cents
+      // until `prisma generate` runs on the deploy machine. Runtime
+      // Postgres returns the columns just fine. Legacy rows default
+      // workflowVersion to 1 (DB default) and both estimate columns
+      // to null (nullable, no default).
+      workflowVersion:
+        (o as unknown as { workflowVersion?: number }).workflowVersion ?? 1,
+      estimatedShippingMinCents:
+        (o as unknown as { estimatedShippingMinCents?: number | null })
+          .estimatedShippingMinCents ?? null,
+      estimatedShippingMaxCents:
+        (o as unknown as { estimatedShippingMaxCents?: number | null })
+          .estimatedShippingMaxCents ?? null,
       lines: o.lines.map((l) => ({
         id: l.id,
         skuId: l.skuId,

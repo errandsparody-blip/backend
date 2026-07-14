@@ -24,6 +24,7 @@ import { Test, type TestingModule } from "@nestjs/testing";
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import { ShippoService } from "../integrations/shippo/shippo.service";
+import { ShippingPointService } from "../../common/services/shipping-point.service";
 import { OpsAlertService } from "../notifications/ops-alert.service";
 import { SmartyService } from "../integrations/smarty/smarty.service";
 import { WalletService } from "../wallet/wallet.service";
@@ -120,6 +121,12 @@ class FakePrisma {
 
   // Stubs not exercised by these tests — kept here so the type is satisfied.
   sku = { findMany: jest.fn(async () => []) };
+
+  // Migration 0041 — OrderService.create() calls isFulfillmentV2Enabled()
+  // on every submit, which reads the configuration table. Returning
+  // null makes the loader default to `false`, keeping every test on
+  // the legacy code path (which is what these tests exercise).
+  configuration = { findUnique: jest.fn(async () => null) };
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +223,20 @@ describe("OrderService — tenant isolation + address rejection", () => {
     // test don't depend on the alert succeeding.
     const opsAlerts = { send: jest.fn().mockResolvedValue(undefined) };
 
+    // Migration 0041 — Fulfillment v2 requires ShippingPointService.
+    // Every test in this file exercises the LEGACY path (v2 flag is
+    // false by default because the fake config table is empty), so
+    // the service methods are never called. Provide a no-op mock
+    // that satisfies the DI check without dragging the real service
+    // (and its Prisma dependency) into the test module.
+    const shippingPoints = {
+      getPoints: jest.fn().mockResolvedValue(null),
+      sumForLines: jest
+        .fn()
+        .mockResolvedValue({ totalPoints: 0, resolutions: [], allAssigned: true }),
+      resolveRange: jest.fn().mockResolvedValue({ dollarsMin: 0, dollarsMax: 0 }),
+    };
+
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         OrderService,
@@ -229,6 +250,7 @@ describe("OrderService — tenant isolation + address rejection", () => {
         // dependency. The local mock only implements the subset of
         // methods exercised by these specs.
         { provide: OpsAlertService, useValue: opsAlerts },
+        { provide: ShippingPointService, useValue: shippingPoints },
       ],
     }).compile();
     svc = moduleRef.get(OrderService);

@@ -24,6 +24,14 @@ enum Role {
   VENDOR_SUB_USER
   WAREHOUSE_OPERATOR
   FINANCE_ADMIN
+  // Migration 0039 — general-purpose admin whose page-level access is
+  // dynamic. SUPER_ADMIN edits `admin_role_page_permissions` (a
+  // configuration row) to grant or revoke individual admin pages. The
+  // page-permission guard checks that row for ADMIN users; SUPER_ADMIN
+  // always passes; other roles retain their compiled-in permission
+  // sets. See common/schemas/page-permissions.ts for the canonical
+  // page-key list.
+  ADMIN
   SUPER_ADMIN
 }
 
@@ -348,6 +356,9 @@ model Vendor {
   // Migration 0035 — physical boxes held in the warehouse for this
   // vendor; the per-box storage billing iterates these.
   storageBoxes  StorageBox[]
+  // Migration 0046 — CSV bulk-import jobs the vendor kicked off from
+  // the dashboard. Retained for audit / dispute review.
+  orderImportJobs OrderImportJob[]
 
   @@index([status])
   @@index([kycStatus])
@@ -470,6 +481,17 @@ model Product {
   // working without forcing a backfill.
   storageTier     StorageTier @default(SMALL) @map("storage_tier")
 
+  // Migration 0040 — Fulfillment v2 shipping-cost proxy. Super-admin
+  // assigns this decimal value at inventory receive time; the vendor
+  // never sees it. Order-time flow: sum shippingPoints across the
+  // order's product lines, look up the range in the
+  // shipping_point_estimate_ranges config, show that range to the
+  // vendor as a non-billable estimate. NULL means "not yet
+  // assigned" — Phase B blocks order submit on any line whose
+  // product still has NULL. Decimal (not Float) so bucket-boundary
+  // comparisons don't drift on FP rounding.
+  shippingPoints  Decimal? @map("shipping_points") @db.Decimal(10, 4)
+
   // Migration 0022 — optional product image. URL points at our R2 bucket;
   // upload flow mirrors shopper attachments (presigned PUT). Nullable so
   // existing products keep working without backfill.
@@ -482,10 +504,47 @@ model Product {
 
   skus            Sku[]
   psnLines        PsnLine[]
+  // Migration 0044 — barcodes for the scan-at-pack workflow.
+  barcodes        ProductBarcode[]
 
   @@unique([vendorId, code])
   @@index([vendorId, status])
   @@map("products")
+}
+
+// =============================================================================
+// ProductBarcode — Migration 0044.
+//
+// N barcodes per product (UPC, GTIN14, internal Code128, etc.). One
+// barcode maps to ONE product globally; the DB unique constraint on
+// `barcode` enforces that so scan-at-pack can't disambiguate. Deleting
+// a product cascades its barcodes (a stale code silently pointing at
+// nothing is worse than gone).
+// =============================================================================
+enum BarcodeSymbology {
+  EAN13
+  UPC_A
+  CODE128
+  GTIN14
+  OTHER
+}
+
+model ProductBarcode {
+  id         String           @id @default(uuid()) @db.Uuid
+  productId  String           @map("product_id") @db.Uuid
+  product    Product          @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  barcode    String           @unique @db.VarChar(48)
+  symbology  BarcodeSymbology @default(OTHER)
+  /// Vendor / admin marks their canonical retail barcode as primary.
+  /// At most one primary per product (partial unique index in SQL).
+  isPrimary  Boolean          @default(false) @map("is_primary")
+
+  createdBy  String?          @map("created_by") @db.Uuid
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  @@index([productId, isPrimary(sort: Desc), createdAt(sort: Asc)])
+  @@map("product_barcodes")
 }
 
 // =============================================================================
@@ -511,6 +570,13 @@ model Sku {
   storageTier       StorageTier @default(SMALL) @map("storage_tier")
   warehouseLocation String?     @map("warehouse_location")
 
+  // Migration 0045 — structured location assignment. The free-text
+  // `warehouseLocation` column above is kept for legacy operators
+  // who dropped a room label into it, but new work should read
+  // `location` which points at a curated row in inventory_locations.
+  locationId        String?     @map("location_id") @db.Uuid
+  location          InventoryLocation? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
   status            SkuStatus   @default(ACTIVE)
 
   // Migration 0034 — Model B recurring storage. Set at receive time to
@@ -528,7 +594,38 @@ model Sku {
 
   @@index([vendorId, status])
   @@index([productId])
+  @@index([locationId])
   @@map("skus")
+}
+
+// =============================================================================
+// InventoryLocation — Migration 0045.
+//
+// Curated catalog of warehouse locations (aisle/bay/shelf/bin). SKUs
+// point at these via `sku.location_id`. Warehouse UIs read the assigned
+// location on pack + PSN receive so operators know where to walk.
+// =============================================================================
+model InventoryLocation {
+  id          String   @id @default(uuid()) @db.Uuid
+  code        String   @unique @db.VarChar(32)
+  label       String   @db.VarChar(80)
+
+  aisle       String?  @db.VarChar(16)
+  bay         String?  @db.VarChar(16)
+  shelf       String?  @db.VarChar(16)
+  bin         String?  @db.VarChar(16)
+
+  isActive    Boolean  @default(true) @map("is_active")
+  sortOrder   Int      @default(100) @map("sort_order")
+  notes       String?  @db.VarChar(280)
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  skus        Sku[]
+
+  @@index([isActive, sortOrder, code])
+  @@map("inventory_locations")
 }
 
 // =============================================================================
@@ -1025,6 +1122,37 @@ enum OrderStatus {
   // automatic tracking webhook fires after this point — the vendor or
   // their recipient tracks via the vendor's carrier portal.
   HANDED_OFF
+
+  // -------------------------------------------------------------------------
+  // Migration 0041 — Fulfillment v2 status flow.
+  //
+  // Orders created under workflowVersion=2 (feature-flag gated by
+  // fulfillment_v2_enabled) live in this side of the state machine:
+  //
+  //   PENDING_PACKING              →  order accepted, fulfillment fee
+  //                                   debited. Waiting for warehouse to
+  //                                   start packing.
+  //   PACKING_COMPLETED            →  warehouse finished packing; entered
+  //                                   actual weight + dimensions.
+  //   AWAITING_SHIPPING_SELECTION  →  live Shippo rates ready; admin
+  //                                   picks any option.
+  //   AWAITING_WALLET_FUNDING      →  rate picked but wallet couldn't
+  //                                   cover actual shipping cost. Order
+  //                                   is packed and sitting on the dock
+  //                                   until the vendor funds the wallet.
+  //   SHIPPING_PAID                →  wallet debited for actual shipping,
+  //                                   label buy is the next step.
+  //
+  // From SHIPPING_PAID → LABEL_PURCHASED (existing enum) → SHIPPED →
+  // DELIVERED. The tail statuses are shared with the legacy flow so
+  // downstream code (returns, tracking webhook, reassessment cron)
+  // doesn't need a second dispatch.
+  // -------------------------------------------------------------------------
+  PENDING_PACKING
+  PACKING_COMPLETED
+  AWAITING_SHIPPING_SELECTION
+  AWAITING_WALLET_FUNDING
+  SHIPPING_PAID
 }
 
 // Migration 0037 — fulfillment branch chosen by the vendor at order
@@ -1058,6 +1186,18 @@ model Order {
   // application omits this field on create so the DB default populates it
   // atomically; we never compute it in app code to avoid races.
   orderNumber              Int             @unique @default(dbgenerated("nextval('orders_order_number_seq'::regclass)")) @map("order_number")
+
+  // Migration 0040 — Fulfillment workflow discriminator.
+  //   1 = legacy flow (vendor picks carrier at submit, wallet debited
+  //       for everything, admin buys label)
+  //   2 = v2 flow (fulfillment fee only at submit, warehouse packs
+  //       first, live Shippo rates at pack time, wallet debited for
+  //       actual shipping, then label bought)
+  // Existing rows backfill to 1 so nothing in flight changes
+  // behaviour. Set at create time; never mutated. Every transition
+  // service reads this and dispatches to the correct handler so the
+  // two flows can coexist while old orders finish under old rules.
+  workflowVersion          Int             @default(1) @map("workflow_version")
 
   // Vendor's external order id (their Shopify/WooCommerce/etc. number). Indexed
   // for lookup; uniqueness scoped to vendor so two vendors can share an id.
@@ -1138,6 +1278,44 @@ model Order {
   reassessmentDeltaCents   Int             @default(0) @map("reassessment_delta_cents")
   reassessedAt             DateTime?       @map("reassessed_at")
 
+  // Migration 0041 — Fulfillment v2 estimated shipping range.
+  //
+  // Set only when the order is created under workflowVersion=2 (feature-flag
+  // gated by fulfillment_v2_enabled). Populated from
+  // ShippingPointService.resolveRange(sum-of-product-points) at submit time
+  // and shown to the vendor as a non-billable estimate. `Max` is ALSO used
+  // by wallet-cover validation: the vendor must have wallet balance >=
+  // fulfillmentFeeCents + estimatedShippingMaxCents to submit.
+  //
+  // Both NULL for legacy (workflowVersion=1) orders — those already have a
+  // Shippo-quoted shippingCostCents at submit.
+  estimatedShippingMinCents Int?           @map("estimated_shipping_min_cents")
+  estimatedShippingMaxCents Int?           @map("estimated_shipping_max_cents")
+
+  // Migration 0042 — Fulfillment v2 pack-step columns.
+  //
+  // Populated by the warehouse when they physically pack the order and
+  // record real box dimensions + weight. All four are null until then.
+  // Enforced ALL-OR-NONE by a DB check constraint so a partial write
+  // can't leave the row half-populated. Units:
+  //   * length/width/height in INCHES (decimal, 1 fractional digit)
+  //   * weight              in OUNCES (integer)
+  //
+  // Values feed the live Shippo rate fetch that follows the pack step.
+  packedLengthIn           Decimal?        @db.Decimal(6, 1) @map("packed_length_in")
+  packedWidthIn            Decimal?        @db.Decimal(6, 1) @map("packed_width_in")
+  packedHeightIn           Decimal?        @db.Decimal(6, 1) @map("packed_height_in")
+  packedWeightOz           Int?            @map("packed_weight_oz")
+  packedByUserId           String?         @map("packed_by_user_id") @db.Uuid
+  packingNotes             String?         @map("packing_notes")
+
+  // Migration 0043 — optional link to the packaging preset selected
+  // by the operator at pack time. NULL when dims were typed ad-hoc.
+  // ON DELETE SET NULL so retiring a preset never nulls historical
+  // pack rows (the concrete dims stay on packed_*_in columns).
+  packagingOptionId        String?         @map("packaging_option_id") @db.Uuid
+  packagingOption          PackagingOption? @relation(fields: [packagingOptionId], references: [id], onDelete: SetNull)
+
   // ---- Cancellation
   cancelReason             OrderCancelReason? @map("cancel_reason")
   cancelNote               String?         @map("cancel_note")
@@ -1159,6 +1337,8 @@ model Order {
   lines                    OrderLine[]
   events                   OrderEvent[]
   returns                  Return[]
+  // Migration 0042 — cached Shippo rate options fetched at pack time.
+  rateOptions              OrderShippingRateOption[]
 
   @@unique([vendorId, externalReference], name: "vendor_external_ref_unique")
   @@index([vendorId, status, createdAt])
@@ -1261,6 +1441,110 @@ enum ReturnReason {
   ARRIVED_DAMAGED
   NEVER_DELIVERED
   OTHER
+}
+
+// =============================================================================
+// PackagingOption — Migration 0043.
+//
+// Shared, admin-maintained catalog of shippable box / mailer presets.
+// The warehouse pack step reads from this table so an operator can
+// pick "Medium Flat Rate Box" instead of typing 11 × 8.5 × 5.5. When a
+// preset is selected, its dims populate the pack-time dimensions and
+// its tare weight is added to the operator-entered goods weight.
+// =============================================================================
+model PackagingOption {
+  id             String   @id @default(uuid()) @db.Uuid
+  code           String   @unique @db.VarChar(32)
+  label          String   @db.VarChar(80)
+
+  lengthIn       Decimal  @db.Decimal(6, 1) @map("length_in")
+  widthIn        Decimal  @db.Decimal(6, 1) @map("width_in")
+  heightIn       Decimal  @db.Decimal(6, 1) @map("height_in")
+
+  /// Empty-box weight added to the operator-entered goods weight before
+  /// the parcel is priced. Ounces.
+  tareWeightOz   Int      @default(0) @map("tare_weight_oz")
+
+  isActive       Boolean  @default(true) @map("is_active")
+  sortOrder      Int      @default(100) @map("sort_order")
+
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  orders         Order[]
+
+  @@index([isActive, sortOrder, label])
+  @@map("packaging_options")
+}
+
+// =============================================================================
+// OrderImportJob — Migration 0046.
+//
+// Bulk CSV import from the vendor dashboard. One row per uploaded
+// file; per-row failures are captured in `errors` (JSONB array of
+// `{ row: number, message: string }`). Retained indefinitely for
+// dispute review — finance may need to correlate a mis-charged
+// order against the row that produced it.
+// =============================================================================
+enum ImportJobStatus {
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model OrderImportJob {
+  id              String          @id @default(uuid()) @db.Uuid
+  vendorId        String          @map("vendor_id") @db.Uuid
+  vendor          Vendor          @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  status          ImportJobStatus @default(PROCESSING)
+  sourceFilename  String          @map("source_filename") @db.VarChar(200)
+
+  rowCount        Int             @default(0) @map("row_count")
+  successCount    Int             @default(0) @map("success_count")
+  errorCount      Int             @default(0) @map("error_count")
+  /// Bounded at write time (service caps to 100 entries) — a fully
+  /// failed 400-row file still serialises cleanly.
+  errors          Json            @default("[]")
+
+  createdBy       String?         @map("created_by") @db.Uuid
+  createdAt       DateTime        @default(now()) @map("created_at")
+  completedAt     DateTime?       @map("completed_at")
+
+  @@index([vendorId, createdAt(sort: Desc)])
+  @@index([status])
+  @@map("order_import_jobs")
+}
+
+// =============================================================================
+// OrderShippingRateOption — Migration 0042.
+//
+// Cached Shippo rate options fetched at pack-completion time. The admin
+// picker reads these instead of re-hitting the carrier API. The chosen
+// row's rate_provider_ref is passed straight through to Shippo when the
+// label is bought. Rows are CASCADE-deleted with the order.
+// =============================================================================
+model OrderShippingRateOption {
+  id                     String   @id @default(uuid()) @db.Uuid
+  orderId                String   @map("order_id") @db.Uuid
+  order                  Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  /// Provider-supplied rate id — the token Shippo uses to purchase a label.
+  rateProviderRef        String   @map("rate_provider_ref")
+  /// Provider-supplied shipment id this rate belongs to.
+  shipmentProviderRef    String   @map("shipment_provider_ref")
+
+  carrier                String
+  service                String
+  costCents              Int      @map("cost_cents")
+  estimatedDeliveryDays  Int      @map("estimated_delivery_days")
+
+  fetchedAt              DateTime @default(now()) @map("fetched_at")
+
+  @@unique([orderId, rateProviderRef], name: "order_rate_provider_ref_unique")
+  @@index([orderId])
+  @@index([fetchedAt])
+  @@map("order_shipping_rate_options")
 }
 
 model Return {

@@ -12,9 +12,13 @@ import {
 import { Role } from "@prisma/client";
 
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
+import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
+
+// Migration 0039 — ADMIN role reference.
+const ROLE_ADMIN = "ADMIN" as Role;
 import {
   completeReceivingSchema,
   listPsnsSchema,
@@ -42,7 +46,10 @@ import { AdminPsnService } from "./admin-psn.service";
 import { PsnMessageService } from "./psn-message.service";
 
 @Controller({ path: "admin/psns", version: "1" })
-@Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+// Migration 0039 — ADMIN added; default page key is write. Read
+// endpoints override at method level.
+@Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
+@RequiresPage("admin.psn.write")
 export class AdminPsnController {
   constructor(
     private readonly admin: AdminPsnService,
@@ -51,17 +58,20 @@ export class AdminPsnController {
   ) {}
 
   @Get()
+  @RequiresPage("admin.psn.read")
   list(@Query(new ZodValidationPipe(listPsnsSchema)) q: ListPsnsInput) {
     return this.admin.listIncoming(q);
   }
 
   @Get(":id")
+  @RequiresPage("admin.psn.read")
   get(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.admin.get(id);
   }
 
   /** Phase 2 — return the currently-active hold (or null) for a PSN. */
   @Get(":id/active-hold")
+  @RequiresPage("admin.psn.read")
   activeHold(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.admin.activeHoldFor(id);
   }
@@ -141,6 +151,7 @@ export class AdminPsnController {
 
   /** GET /v1/admin/psns/:id/messages — full thread for this PSN. */
   @Get(":id/messages")
+  @RequiresPage("admin.psn.read")
   listMessages(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.messages.listForPsn(id);
   }
