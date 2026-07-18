@@ -26,6 +26,13 @@ class FakePrisma {
     findUnique: jest.fn<Promise<unknown>, [unknown]>(async () => null),
     delete: jest.fn<Promise<unknown>, [unknown]>(async () => ({})),
   };
+  // Migration 0044 → Phase J — the barcode service now falls through
+  // to a SKU-ID lookup when the product_barcodes table misses. Fake
+  // returns null by default; tests override to simulate the fall-
+  // through match.
+  sku = {
+    findUnique: jest.fn<Promise<unknown>, [unknown]>(async () => null),
+  };
   // Simple $transaction that just runs the callback with `this`.
   // Widen the parameter type so tests can override via mockImplementationOnce.
   $transaction = jest.fn(
@@ -153,7 +160,49 @@ describe("BarcodeService", () => {
       productCode: "WDG",
       variant: "STD",
       symbology: "UPC_A",
+      // Tier-1 hit — skuId stays null so scanner falls back to
+      // product-level matching (a single retail UPC can cover
+      // multiple variants of the same product).
+      skuId: null,
     });
+    // Tier-1 hit should NOT drop to the SKU fall-through.
+    expect(prisma.sku.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("lookup: falls through to SKU ID when product_barcodes has no match", async () => {
+    // Tier 1 misses.
+    prisma.productBarcode.findUnique.mockResolvedValueOnce(null);
+    // Tier 2 hits — Avery label printed from /admin/inventory/[skuId]/label.
+    prisma.sku.findUnique.mockResolvedValueOnce({
+      id: "UER-AA571B-BIKINI-STD",
+      productId: PRODUCT_ID,
+      variant: "M",
+      product: {
+        vendorId: "vendor-1",
+        name: "Juicy Pineapple Colada",
+        code: "BIKINI",
+        variant: "STD",
+      },
+    });
+    const match = await svc.lookup("UER-AA571B-BIKINI-STD");
+    expect(match).toEqual({
+      barcodeId: "UER-AA571B-BIKINI-STD",
+      productId: PRODUCT_ID,
+      vendorId: "vendor-1",
+      productName: "Juicy Pineapple Colada",
+      productCode: "BIKINI",
+      variant: "M",
+      symbology: "CODE128",
+      // Tier-2 hit — skuId is set so the pack scanner can match at
+      // SKU-level per spec ("Match the barcode to an expected SKU").
+      skuId: "UER-AA571B-BIKINI-STD",
+    });
+  });
+
+  it("lookup: returns null when neither tier matches", async () => {
+    prisma.productBarcode.findUnique.mockResolvedValueOnce(null);
+    prisma.sku.findUnique.mockResolvedValueOnce(null);
+    await expect(svc.lookup("UER-NOPE-NOPE-NOPE")).resolves.toBeNull();
   });
 
   // -------------------------------------------------------------------------

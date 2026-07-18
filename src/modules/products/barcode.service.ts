@@ -74,6 +74,18 @@ export interface BarcodeLookupResult {
   productCode: string;
   variant: string;
   symbology: BarcodeSymbology;
+  /**
+   * Set only when the lookup fell through to a SKU-ID match (tier 2 —
+   * Avery-printed labels). Null when the match came from the
+   * product_barcodes table (tier 1 — retail UPC/EAN registered by a
+   * super admin) because a single product-barcode row can cover
+   * multiple SKUs (different variants of the same product).
+   *
+   * The pack scanner uses this to match at the SKU level per the v2
+   * spec ("Match the barcode to an expected SKU"). When null, it
+   * falls back to product-level matching.
+   */
+  skuId: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,20 +109,66 @@ export class BarcodeService {
   async lookup(barcode: string): Promise<BarcodeLookupResult | null> {
     const cleaned = this.normalise(barcode);
     if (cleaned === null) return null;
+    // Tier 1 — registered product_barcodes lookup (retail UPC/EAN/GTIN
+    // deliberately typed in by super-admin on the product page).
     const row = await this.prismaAny().productBarcode.findUnique({
       where: { barcode: cleaned },
       include: { product: true },
     });
-    if (!row) return null;
-    return {
-      barcodeId: row.id,
-      productId: row.productId,
-      vendorId: row.product.vendorId,
-      productName: row.product.name,
-      productCode: row.product.code,
-      variant: row.product.variant,
-      symbology: row.symbology,
-    };
+    if (row) {
+      return {
+        barcodeId: row.id,
+        productId: row.productId,
+        vendorId: row.product.vendorId,
+        productName: row.product.name,
+        productCode: row.product.code,
+        variant: row.product.variant,
+        symbology: row.symbology,
+        skuId: null,
+      };
+    }
+
+    // Tier 2 — fall through to SKU-ID match. The warehouse prints Avery
+    // labels from /admin/inventory/[skuId]/label that encode the SKU
+    // ID (e.g. `UER-AA571B-BIKINI-STD`) as CODE128. That printed label
+    // IS the barcode for private-label / no-manufacturer-barcode
+    // inventory; no separate registration is required. If the scan
+    // matches a SKU id verbatim, synthesise the same lookup shape so
+    // downstream consumers (pack scanner) don't need to know which
+    // tier resolved it.
+    //
+    // SRP note: BarcodeService remains the single lookup surface. The
+    // pack service, PSN receive, and any future consumer all call
+    // this one method and get a uniform response.
+    const sku = await this.prisma.sku.findUnique({
+      where: { id: cleaned },
+      include: {
+        product: {
+          select: {
+            vendorId: true,
+            name: true,
+            code: true,
+            variant: true,
+          },
+        },
+      },
+    });
+    if (sku) {
+      return {
+        // No product_barcode row exists — barcodeId is the SKU id itself
+        // for traceability. Consumers should treat this as opaque.
+        barcodeId: sku.id,
+        productId: sku.productId,
+        vendorId: sku.product.vendorId,
+        productName: sku.product.name,
+        productCode: sku.product.code,
+        variant: sku.variant ?? sku.product.variant,
+        symbology: "CODE128",
+        skuId: sku.id,
+      };
+    }
+
+    return null;
   }
 
   // =========================================================================
