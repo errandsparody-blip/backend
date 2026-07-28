@@ -48,6 +48,8 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  InternalServerErrorException,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma, type OrderStatus } from "@prisma/client";
@@ -117,6 +119,7 @@ export type SelectRateOutcome =
 
 @Injectable()
 export class OrderPackService {
+  private readonly logger = new Logger(OrderPackService.name);
   private readonly cfg = loadConfig();
   private readonly warehouseOrigin = {
     state: this.cfg.WAREHOUSE_FROM_STATE,
@@ -312,7 +315,9 @@ export class OrderPackService {
     });
     if (!exists) throw new NotFoundException();
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    let result: PackResult;
+    try {
+      result = await this.prisma.$transaction(async (tx) => {
       const lockedRows = await tx.$queryRaw<
         Array<{
           id: string;
@@ -387,6 +392,57 @@ export class OrderPackService {
         packagingOptionId,
       };
     });
+    } catch (err) {
+      // Business-level errors thrown inside the transaction are already
+      // Nest HttpException subclasses — pass those through so the client
+      // sees the intended 4xx code. Only wrap what's left, which is
+      // usually a Prisma raw-SQL failure (P2010) or an unknown Prisma
+      // error (missing column, missing enum literal — both symptoms of
+      // migrations being behind in the current environment).
+      if (
+        err instanceof BadRequestException ||
+        err instanceof ConflictException ||
+        err instanceof NotFoundException
+      ) {
+        throw err;
+      }
+      // Extract as much detail as we can without leaking internals.
+      // Prisma known-request errors carry a `code` string (e.g. "P2010")
+      // and a `meta` object with the Postgres error code + message.
+      // Log the FULL error server-side so ops can correlate, but keep
+      // the client-facing response tight.
+      const prismaCode =
+        typeof err === "object" && err !== null && "code" in err
+          ? String((err as { code?: unknown }).code ?? "")
+          : "";
+      const pgCode =
+        typeof err === "object" &&
+        err !== null &&
+        "meta" in err &&
+        typeof (err as { meta?: { code?: unknown } }).meta === "object"
+          ? String((err as { meta?: { code?: unknown } }).meta?.code ?? "")
+          : "";
+      this.logger.error(
+        {
+          msg: "recordPack: raw SQL failure",
+          orderId,
+          prismaCode,
+          pgCode,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        err instanceof Error ? err.stack : undefined,
+      );
+      throw new InternalServerErrorException({
+        message:
+          "Could not record pack — a database write failed. This usually means database migrations have not been applied in this environment.",
+        code: "pack_write_failed",
+        // Non-secret error codes are safe to surface: Prisma codes and
+        // Postgres error codes are documented publicly, and the codes
+        // help ops search the logs quickly.
+        prismaCode: prismaCode || undefined,
+        pgCode: pgCode || undefined,
+      });
+    }
 
     await this.audit.log({
       actorId,

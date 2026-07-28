@@ -22,6 +22,9 @@ import { JwtAuthGuard } from "./common/guards/jwt-auth.guard";
 import { PagePermissionGuard } from "./common/guards/page-permission.guard";
 import { RolesGuard } from "./common/guards/roles.guard";
 import { InventoryLocationModule } from "./common/services/inventory-location.module";
+// Migration 0047 / Phase K2 — boot-time schema check. Refuses to
+// serve requests if migrations 0040–0045 haven't been applied.
+import { MigrationSanityService } from "./common/services/migration-sanity.service";
 import { PackagingLibraryModule } from "./common/services/packaging-library.module";
 import { PagePermissionModule } from "./common/services/page-permission.module";
 import { ShippingPointModule } from "./common/services/shipping-point.module";
@@ -163,6 +166,11 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     // in order, so a JWT failure short-circuits before we hit the agreement
     // check (we never need to query Postgres for an unauth'd request).
     { provide: APP_GUARD, useClass: AgreementVersionGuard },
+    // Phase K2 — boot-time migration sanity check. Runs once on
+    // onApplicationBootstrap and throws if the pack-step columns
+    // aren't present. Skipped in NODE_ENV=test; can be force-skipped
+    // via SKIP_MIGRATION_SANITY_CHECK=true for emergency recovery.
+    MigrationSanityService,
   ],
 })
 export class AppModule {}
