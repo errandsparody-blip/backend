@@ -56,6 +56,7 @@ import { Prisma, type OrderStatus } from "@prisma/client";
 
 import { loadConfig } from "../../common/config";
 import { PrismaService } from "../../common/prisma.service";
+import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
 import { PackagingLibraryService } from "../../common/services/packaging-library.service";
 import { AuditService } from "../audit/audit.service";
 import { ShippoService, type ShippingRate } from "../integrations/shippo/shippo.service";
@@ -79,6 +80,20 @@ export interface RecordPackInput {
    * top to arrive at the parcel weight sent to Shippo.
    */
   packagingOptionId?: string | undefined;
+  /**
+   * Migration 0049 / Phase N — direct carrier packaging template
+   * (Option A in the spec). Provided when the operator selected from
+   * the "Carrier packaging" tab in the pack modal. Mutually
+   * exclusive with `packagingOptionId` from the pack UI, but the
+   * server accepts both: if `packagingOptionId` is set AND the
+   * resolved library preset has its own `shippoTemplate`, that value
+   * flows through. Direct `shippoTemplate` on the input wins over the
+   * library preset when both are provided.
+   *
+   * Validated against KNOWN_CARRIER_TEMPLATES so a spoofed value can't
+   * reach the Shippo rate request.
+   */
+  shippoTemplate?: string | undefined;
 }
 
 export interface PackResult {
@@ -93,6 +108,14 @@ export interface PackResult {
   packingNotes: string | null;
   /** Set only when a library preset was selected. */
   packagingOptionId: string | null;
+  /**
+   * Migration 0049 / Phase N — Shippo carrier template that will be
+   * passed to `parcel.template` on the rate request. Set when the
+   * operator chose a carrier template directly OR chose a library
+   * preset whose shippo_template is non-null. NULL for pure ad-hoc /
+   * custom packaging (weight-based rates).
+   */
+  parcelTemplate: string | null;
 }
 
 export interface RateOption {
@@ -136,6 +159,10 @@ export class OrderPackService {
     // tare weight at recordPack. Injected via the @Global()
     // PackagingLibraryModule.
     private readonly packagingLibrary: PackagingLibraryService,
+    // Migration 0049 / Phase N — validates carrier-template inputs and
+    // (in Phase N4b) fills in the canonical dims when the operator
+    // picked a carrier template directly.
+    private readonly carrierRegistry: CarrierPackagingRegistryService,
   ) {}
 
   // =========================================================================
@@ -285,6 +312,37 @@ export class OrderPackService {
     let effectiveHeight = input.heightIn;
     let effectiveWeightOz = input.weightOz;
     let packagingOptionId: string | null = null;
+    // Phase N — Shippo carrier template. Resolved from one of three
+    // sources, in priority order:
+    //   1. Explicit `input.shippoTemplate` (Option A — Carrier tab).
+    //   2. Library preset's own `shippoTemplate` column (a library
+    //      preset that maps to a Shippo template, e.g. seeded USPS
+    //      flat-rate presets).
+    //   3. NULL — plain weight-based rates at fetchRates.
+    // Validated against the static registry so a client can't sneak
+    // in a bogus string that later 500s the Shippo call.
+    let parcelTemplate: string | null = null;
+    if (input.shippoTemplate) {
+      if (!this.carrierRegistry.isKnown(input.shippoTemplate)) {
+        throw new BadRequestException({
+          message: `Unknown Shippo carrier template: ${input.shippoTemplate}.`,
+          code: "carrier_template_unknown",
+        });
+      }
+      parcelTemplate = input.shippoTemplate;
+      // Auto-populate dims from the carrier registry when only a
+      // template was passed (Option A UX: operator enters weight only).
+      // Client-supplied dims are still permitted (and used as the
+      // wire values) but the template is the authoritative pricing
+      // signal downstream.
+      const entry = this.carrierRegistry.getByTemplate(input.shippoTemplate);
+      if (entry) {
+        effectiveLength = entry.lengthIn;
+        effectiveWidth = entry.widthIn;
+        effectiveHeight = entry.heightIn;
+        effectiveWeightOz = input.weightOz + entry.tareWeightOz;
+      }
+    }
     if (input.packagingOptionId) {
       const preset = await this.packagingLibrary.getById(input.packagingOptionId);
       if (!preset) {
@@ -304,6 +362,15 @@ export class OrderPackService {
       effectiveHeight = preset.heightIn;
       effectiveWeightOz = input.weightOz + preset.tareWeightOz;
       packagingOptionId = preset.id;
+      // Library preset carries its own shippoTemplate (e.g. the
+      // seeded USPS presets in migration 0049). Only apply it if the
+      // caller didn't already supply an explicit template — direct
+      // Option-A selection wins over the library's implicit choice.
+      const presetTemplate = (preset as unknown as { shippoTemplate?: string | null })
+        .shippoTemplate;
+      if (parcelTemplate === null && presetTemplate) {
+        parcelTemplate = presetTemplate;
+      }
     }
 
     // Pre-flight for the NotFoundException path — mirrors
@@ -361,9 +428,10 @@ export class OrderPackService {
       const notes = input.notes?.trim();
       const notesValue = notes && notes.length > 0 ? notes : null;
 
-      // packagingOptionId is passed as either a UUID cast or NULL —
-      // the ternary keeps Prisma's parameter binding clean and avoids
-      // needing conditional SQL.
+      // packagingOptionId / parcelTemplate are passed as either a
+      // bound value (with a type cast when needed) or literal NULL.
+      // The ternary keeps Prisma's parameter binding clean and avoids
+      // needing conditional SQL variants of the whole UPDATE.
       await tx.$executeRaw(Prisma.sql`
         UPDATE orders
            SET status = 'PACKING_COMPLETED'::"OrderStatus",
@@ -375,6 +443,7 @@ export class OrderPackService {
                packed_by_user_id = ${actorId}::uuid,
                packing_notes    = ${notesValue},
                packaging_option_id = ${packagingOptionId ? Prisma.sql`${packagingOptionId}::uuid` : Prisma.sql`NULL`},
+               parcel_template  = ${parcelTemplate ?? null},
                updated_at       = NOW()
          WHERE id = ${orderId}::uuid
       `);
@@ -390,6 +459,7 @@ export class OrderPackService {
         packedByUserId: actorId,
         packingNotes: notesValue,
         packagingOptionId,
+        parcelTemplate,
       };
     });
     } catch (err) {
@@ -432,15 +502,37 @@ export class OrderPackService {
         },
         err instanceof Error ? err.stack : undefined,
       );
+      // Extract any constraint / trigger identifier from the Prisma
+      // meta.message. Postgres surfaces the failing constraint or
+      // trigger-raised text like:
+      //   `new row for relation "orders" violates check constraint "orders_packed_dims_positive"`
+      // or, for our state-machine trigger:
+      //   `order_status_unknown: PENDING_PACKING -> PACKING_COMPLETED`
+      // Both patterns are useful diagnostics — surface them inline so
+      // ops can read them from the response body without pulling logs.
+      const pgMessage =
+        typeof err === "object" &&
+        err !== null &&
+        "meta" in err &&
+        typeof (err as { meta?: { message?: unknown } }).meta === "object"
+          ? String((err as { meta?: { message?: unknown } }).meta?.message ?? "")
+          : "";
+      const constraintMatch = pgMessage.match(/constraint "([^"]+)"/);
+      const triggerMatch = pgMessage.match(/order_status_[a-z_]+/);
+      const detail = constraintMatch?.[1] ?? triggerMatch?.[0] ?? "";
+
       // Embed the codes in the `message` string itself so they survive
       // the ProblemJSON global filter (which only echoes a fixed field
       // set). Ops can grep for "pack_write_failed" AND immediately see
       // whether it's a P2010 raw-SQL failure, a P2022 missing column, a
       // Postgres 42703 (undefined column), 42P01 (undefined table),
-      // 22P02 (invalid enum literal), etc. — without pulling logs.
+      // 22P02 (invalid enum literal or check violation), etc. — without
+      // pulling logs. When available, the constraint / trigger name is
+      // appended so the exact rule that fired is visible in the browser.
       const suffix = [
         prismaCode ? `prisma=${prismaCode}` : null,
         pgCode ? `pg=${pgCode}` : null,
+        detail ? `at=${detail}` : null,
       ]
         .filter(Boolean)
         .join(" ");
@@ -466,6 +558,7 @@ export class OrderPackService {
         packedHeightIn: result.packedHeightIn,
         packedWeightOz: result.packedWeightOz,
         packagingOptionId: result.packagingOptionId,
+        parcelTemplate: result.parcelTemplate,
       } as unknown as Prisma.InputJsonValue,
     });
 
@@ -515,6 +608,10 @@ export class OrderPackService {
       packedWidthIn: Prisma.Decimal | number | null;
       packedHeightIn: Prisma.Decimal | number | null;
       packedWeightOz: number | null;
+      // Migration 0049 / Phase N — Shippo carrier template captured
+      // at pack time. When set, it unlocks flat-rate / one-rate /
+      // simple-rate pricing on this fetch.
+      parcelTemplate: string | null;
     };
     if (
       raw.packedLengthIn === null ||
@@ -544,6 +641,7 @@ export class OrderPackService {
         widthIn: this.decimalToNumber(raw.packedWidthIn),
         heightIn: this.decimalToNumber(raw.packedHeightIn),
         weightOz: raw.packedWeightOz,
+        template: raw.parcelTemplate ?? undefined,
       },
       declaredValueCents: order.itemsDeclaredValueCents,
       // v2 defers insurance to a later phase; the pack step never

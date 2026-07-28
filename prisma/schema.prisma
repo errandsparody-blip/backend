@@ -1316,6 +1316,14 @@ model Order {
   packagingOptionId        String?         @map("packaging_option_id") @db.Uuid
   packagingOption          PackagingOption? @relation(fields: [packagingOptionId], references: [id], onDelete: SetNull)
 
+  // Migration 0049 — Shippo parcel-template id captured at pack time.
+  // Set when the operator picked a carrier packaging template (Option A
+  // in the spec) OR a library preset whose shippo_template was non-null.
+  // fetchRates passes this to shippo.getRates({ parcel.template }) so
+  // flat-rate / one-rate / simple-rate pricing lands in the returned
+  // rate list. NULL for custom / ad-hoc packaging — weight-based rates.
+  parcelTemplate           String?         @map("parcel_template") @db.VarChar(60)
+
   // ---- Cancellation
   cancelReason             OrderCancelReason? @map("cancel_reason")
   cancelNote               String?         @map("cancel_note")
@@ -1452,24 +1460,39 @@ enum ReturnReason {
 // preset is selected, its dims populate the pack-time dimensions and
 // its tare weight is added to the operator-entered goods weight.
 // =============================================================================
-model PackagingOption {
-  id             String   @id @default(uuid()) @db.Uuid
-  code           String   @unique @db.VarChar(32)
-  label          String   @db.VarChar(80)
+/// Migration 0049 — poly mailers vs boxes. Poly mailers use L+W only
+/// on the operator form (height is a floor for Shippo); boxes use L+W+H.
+enum PackagingType {
+  POLY_MAILER
+  BOX
+}
 
-  lengthIn       Decimal  @db.Decimal(6, 1) @map("length_in")
-  widthIn        Decimal  @db.Decimal(6, 1) @map("width_in")
-  heightIn       Decimal  @db.Decimal(6, 1) @map("height_in")
+model PackagingOption {
+  id             String        @id @default(uuid()) @db.Uuid
+  code           String        @unique @db.VarChar(32)
+  label          String        @db.VarChar(80)
+
+  packagingType  PackagingType @default(BOX) @map("packaging_type")
+
+  lengthIn       Decimal       @db.Decimal(6, 1) @map("length_in")
+  widthIn        Decimal       @db.Decimal(6, 1) @map("width_in")
+  heightIn       Decimal       @db.Decimal(6, 1) @map("height_in")
 
   /// Empty-box weight added to the operator-entered goods weight before
   /// the parcel is priced. Ounces.
-  tareWeightOz   Int      @default(0) @map("tare_weight_oz")
+  tareWeightOz   Int           @default(0) @map("tare_weight_oz")
 
-  isActive       Boolean  @default(true) @map("is_active")
-  sortOrder      Int      @default(100) @map("sort_order")
+  /// Migration 0049 — Shippo carrier template id (e.g. USPS_MediumFlatRateBox1).
+  /// When set, OrderPackService.fetchRates passes this as `parcel.template`
+  /// so Shippo returns flat-rate / one-rate / simple-rate pricing. NULL for
+  /// custom presets — those get plain weight-based rates.
+  shippoTemplate String?       @db.VarChar(60) @map("shippo_template")
 
-  createdAt      DateTime @default(now()) @map("created_at")
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  isActive       Boolean       @default(true) @map("is_active")
+  sortOrder      Int           @default(100) @map("sort_order")
+
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
 
   orders         Order[]
 

@@ -20,6 +20,7 @@ import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 
 import { PrismaService } from "../../common/prisma.service";
+import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
 import { PackagingLibraryService } from "../../common/services/packaging-library.service";
 import { AuditService } from "../audit/audit.service";
 import { ShippoService } from "../integrations/shippo/shippo.service";
@@ -56,6 +57,15 @@ describe("OrderPackService — pre-flight validation", () => {
       getById: jest.fn().mockResolvedValue(null),
       listActive: jest.fn().mockResolvedValue([]),
     };
+    // Phase N — carrier template registry. These tests don't pass a
+    // shippoTemplate on any input, so isKnown never fires; provide a
+    // conservative default (returns false) so a future test that
+    // forgets to override it fails safely rather than silently.
+    const carrierRegistry = {
+      list: jest.fn().mockReturnValue([]),
+      getByTemplate: jest.fn().mockReturnValue(undefined),
+      isKnown: jest.fn().mockReturnValue(false),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -65,6 +75,7 @@ describe("OrderPackService — pre-flight validation", () => {
         { provide: WalletService, useValue: wallet },
         { provide: ShippoService, useValue: shippo },
         { provide: PackagingLibraryService, useValue: packagingLibrary },
+        { provide: CarrierPackagingRegistryService, useValue: carrierRegistry },
       ],
     }).compile();
     svc = moduleRef.get(OrderPackService);

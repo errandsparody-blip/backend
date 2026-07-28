@@ -49,6 +49,15 @@ export interface RateRequestParcel {
   lengthIn: number;
   widthIn: number;
   heightIn: number;
+  /**
+   * Migration 0049 / Phase N — Shippo parcel-template id. When set,
+   * Shippo returns flat-rate / one-rate / simple-rate pricing for that
+   * container instead of weight-based pricing. Values come from
+   * CarrierPackagingRegistryService or from a library preset's
+   * shippo_template column. Undefined = plain weight-based parcel
+   * (existing behaviour).
+   */
+  template?: string | undefined;
 }
 
 export interface RateRequest {
@@ -366,19 +375,27 @@ export class ShippoService {
       zip: req.toAddress.postalCode,
       country: req.toAddress.country,
     };
+    // Migration 0049 / Phase N — carrier template. When set, Shippo
+    // returns flat-rate / one-rate / simple-rate pricing for that
+    // container. Shippo accepts either a `template` id OR raw dims;
+    // when both are sent, the template's canonical dims take priority
+    // and the passed dims are informational. We send both so the
+    // dashboard's transactions view shows the physical parcel size.
+    const parcel: Record<string, string> = {
+      length: lengthIn.toString(),
+      width: widthIn.toString(),
+      height: heightIn.toString(),
+      distance_unit: "in",
+      weight: weightOz.toString(),
+      mass_unit: "oz",
+    };
+    if (req.parcel.template) {
+      parcel.template = req.parcel.template;
+    }
     const body = {
       address_from: addressFrom,
       address_to: addressTo,
-      parcels: [
-        {
-          length: lengthIn.toString(),
-          width: widthIn.toString(),
-          height: heightIn.toString(),
-          distance_unit: "in",
-          weight: weightOz.toString(),
-          mass_unit: "oz",
-        },
-      ],
+      parcels: [parcel],
       async: false,
     };
 

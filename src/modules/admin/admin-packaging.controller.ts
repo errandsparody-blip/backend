@@ -39,6 +39,7 @@ import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
+import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
 import { PackagingLibraryService } from "../../common/services/packaging-library.service";
 import { AuditService } from "../audit/audit.service";
 
@@ -81,12 +82,17 @@ type UpdateInput = z.infer<typeof updateSchema>;
 export class AdminPackagingController {
   constructor(
     private readonly library: PackagingLibraryService,
+    // Migration 0049 / Phase N2 — static registry of Shippo's built-in
+    // carrier templates. Exposed via /carrier so the pack modal can
+    // render the Option-A "Carrier packaging" tab.
+    private readonly carrierRegistry: CarrierPackagingRegistryService,
     private readonly audit: AuditService,
   ) {}
 
-  // Reads — the /active variant is exposed to any admin (WAREHOUSE_OPERATOR
-  // and ADMIN included) so the pack modal can render the dropdown.
-  // Class-level @Roles is overridden at the method level.
+  // Reads — the /active + /carrier variants are exposed to any admin
+  // (WAREHOUSE_OPERATOR and ADMIN included) so the pack modal can
+  // render both the Library and Carrier tabs. Class-level @Roles is
+  // overridden at the method level.
 
   @Get()
   list() {
@@ -98,6 +104,21 @@ export class AdminPackagingController {
   @RequiresPage("admin.orders.read")
   listActive() {
     return this.library.listActive().then((items) => ({ items }));
+  }
+
+  /**
+   * Migration 0049 / Phase N2 — Shippo's built-in carrier templates
+   * (Option A in the spec). This is a STATIC list from
+   * carrier-packaging-registry.ts; it is not stored in the DB and can
+   * only be updated by a code deploy. Selecting one at pack time
+   * unlocks flat-rate / one-rate / simple-rate pricing at the Shippo
+   * rate request.
+   */
+  @Get("carrier")
+  @Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
+  @RequiresPage("admin.orders.read")
+  listCarrier() {
+    return { items: this.carrierRegistry.list() };
   }
 
   @Post()

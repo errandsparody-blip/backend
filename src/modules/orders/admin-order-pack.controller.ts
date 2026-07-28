@@ -87,6 +87,20 @@ const recordPackSchema = z.object({
    * weight to `weightOz`. Empty / undefined = ad-hoc dimensions.
    */
   packagingOptionId: z.string().uuid().optional(),
+  /**
+   * Migration 0049 / Phase N — optional Shippo carrier template
+   * (Option A in the spec). When provided, the service validates
+   * against the static registry, stores the template on the order
+   * row, and passes it to Shippo at rate-fetch time to unlock
+   * flat-rate / one-rate / simple-rate pricing.
+   *
+   * Format matches the DB CHECK: alnum + underscore, 2..60.
+   */
+  shippoTemplate: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9_]{2,60}$/, "shippoTemplate must match [A-Za-z0-9_]{2,60}.")
+    .optional(),
 });
 type RecordPackInput = z.infer<typeof recordPackSchema>;
 
@@ -143,6 +157,7 @@ export class AdminOrderPackController {
       weightOz: body.weightOz,
       notes: body.notes,
       packagingOptionId: body.packagingOptionId,
+      shippoTemplate: body.shippoTemplate,
     });
   }
 
