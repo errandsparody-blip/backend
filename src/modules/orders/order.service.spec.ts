@@ -24,6 +24,7 @@ import { Test, type TestingModule } from "@nestjs/testing";
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import { ShippoService } from "../integrations/shippo/shippo.service";
+import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
 import { ShippingPointService } from "../../common/services/shipping-point.service";
 import { OpsAlertService } from "../notifications/ops-alert.service";
 import { SmartyService } from "../integrations/smarty/smarty.service";
@@ -236,6 +237,14 @@ describe("OrderService — tenant isolation + address rejection", () => {
         .mockResolvedValue({ totalPoints: 0, resolutions: [], allAssigned: true }),
       resolveRange: jest.fn().mockResolvedValue({ dollarsMin: 0, dollarsMax: 0 }),
     };
+    // Phase O — toPublic now resolves parcel_template → friendly label
+    // via the carrier registry. These tests never touch a packed
+    // order, so a no-op mock is fine.
+    const carrierRegistry = {
+      list: jest.fn().mockReturnValue([]),
+      getByTemplate: jest.fn().mockReturnValue(undefined),
+      isKnown: jest.fn().mockReturnValue(false),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -251,6 +260,7 @@ describe("OrderService — tenant isolation + address rejection", () => {
         // methods exercised by these specs.
         { provide: OpsAlertService, useValue: opsAlerts },
         { provide: ShippingPointService, useValue: shippingPoints },
+        { provide: CarrierPackagingRegistryService, useValue: carrierRegistry },
       ],
     }).compile();
     svc = moduleRef.get(OrderService);

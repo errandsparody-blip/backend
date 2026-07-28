@@ -56,6 +56,7 @@ import type {
   OrderLineInput,
   QuoteOrderInput,
 } from "../../common/schemas/order.schema";
+import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
 import { ShippingPointService } from "../../common/services/shipping-point.service";
 import { AuditService } from "../audit/audit.service";
 import { opsNewOrderTemplate } from "../email/email-templates";
@@ -175,6 +176,20 @@ export interface PublicOrder {
    */
   estimatedShippingMinCents: number | null;
   estimatedShippingMaxCents: number | null;
+  /**
+   * Phase O — vendor-visible packaging summary. All null until the
+   * warehouse records pack; then reflects the actual outside-of-box
+   * dimensions and parcel weight sent to the carrier. `packagingLabel`
+   * resolves to either the library-preset label (e.g. "USPS Medium
+   * Flat Rate Box"), the carrier-template friendly name (e.g. "UPS
+   * Simple Rate — Small") or NULL for pure ad-hoc packaging.
+   */
+  packedLengthIn: number | null;
+  packedWidthIn: number | null;
+  packedHeightIn: number | null;
+  packedWeightOz: number | null;
+  packedAt: Date | null;
+  packagingLabel: string | null;
   lines: Array<{
     id: string;
     skuId: string;
@@ -212,6 +227,11 @@ export class OrderService {
     // the vendor-facing estimate range at submit time. Injected via
     // the @Global() ShippingPointModule (migration 0040).
     private readonly shippingPoints: ShippingPointService,
+    // Phase O — resolves an order's parcel_template (Shippo carrier
+    // template) to its friendly label so the vendor-visible packaging
+    // summary reads "USPS Medium Flat Rate Box" rather than
+    // "USPS_MediumFlatRateBox1".
+    private readonly carrierRegistry: CarrierPackagingRegistryService,
   ) {}
 
   // ===========================================================================
@@ -862,7 +882,7 @@ export class OrderService {
     // 9. Refetch with lines included — toPublic requires them.
     const withLines = await this.prisma.order.findUnique({
       where: { id: order.id },
-      include: { lines: true },
+      include: { lines: true, packagingOption: true } as Prisma.OrderInclude,
     });
     if (!withLines) {
       throw new NotFoundException(`Order ${order.id} disappeared after create.`);
@@ -942,7 +962,7 @@ export class OrderService {
 
     const orders = await this.prisma.order.findMany({
       where,
-      include: { lines: true },
+      include: { lines: true, packagingOption: true } as Prisma.OrderInclude,
       take: input.limit + 1,
       orderBy: { createdAt: "desc" },
       ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
@@ -959,7 +979,7 @@ export class OrderService {
   async get(vendorId: string, id: string): Promise<PublicOrder> {
     const order = await this.prisma.order.findFirst({
       where: { id, vendorId },
-      include: { lines: true },
+      include: { lines: true, packagingOption: true } as Prisma.OrderInclude,
     });
     if (!order) throw new NotFoundException();
     return this.toPublic(order);
@@ -1007,7 +1027,7 @@ export class OrderService {
 
       const before = await tx.order.findUniqueOrThrow({
         where: { id },
-        include: { lines: true },
+        include: { lines: true, packagingOption: true } as Prisma.OrderInclude,
       });
 
       // Release reservations on every line.
@@ -1062,7 +1082,7 @@ export class OrderService {
           cancelNote: input.note ?? null,
           cancelledAt: new Date(),
         },
-        include: { lines: true },
+        include: { lines: true, packagingOption: true } as Prisma.OrderInclude,
       });
 
       await tx.orderEvent.create({
@@ -1225,6 +1245,48 @@ export class OrderService {
       estimatedShippingMaxCents:
         (o as unknown as { estimatedShippingMaxCents?: number | null })
           .estimatedShippingMaxCents ?? null,
+      // Phase O — vendor-visible packaging summary. Reads through
+      // `as unknown` casts because the sandbox Prisma client hasn't
+      // been regenerated for the pack-step / packaging_option
+      // relation yet; in CI the delegate exists. Runtime Postgres
+      // returns null for orders that haven't been packed.
+      ...(() => {
+        const raw = o as unknown as {
+          packedLengthIn?: unknown;
+          packedWidthIn?: unknown;
+          packedHeightIn?: unknown;
+          packedWeightOz?: number | null;
+          packedAt?: Date | null;
+          parcelTemplate?: string | null;
+          packagingOption?: { label: string } | null;
+        };
+        const label =
+          raw.packagingOption?.label ??
+          (raw.parcelTemplate
+            ? this.carrierRegistry.getByTemplate(raw.parcelTemplate)?.label ??
+              null
+            : null);
+        // Decimal → number via a defensive helper (Prisma may return
+        // Decimal, string, or number depending on the code path).
+        const num = (v: unknown): number | null => {
+          if (v === null || v === undefined) return null;
+          if (typeof v === "number") return v;
+          if (typeof v === "string") return Number(v);
+          if (typeof v === "object" && "toString" in v) {
+            const n = Number((v as { toString(): string }).toString());
+            return Number.isFinite(n) ? n : null;
+          }
+          return null;
+        };
+        return {
+          packedLengthIn: num(raw.packedLengthIn),
+          packedWidthIn: num(raw.packedWidthIn),
+          packedHeightIn: num(raw.packedHeightIn),
+          packedWeightOz: raw.packedWeightOz ?? null,
+          packedAt: raw.packedAt ?? null,
+          packagingLabel: label,
+        };
+      })(),
       lines: o.lines.map((l) => ({
         id: l.id,
         skuId: l.skuId,
