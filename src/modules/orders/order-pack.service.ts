@@ -432,15 +432,24 @@ export class OrderPackService {
         },
         err instanceof Error ? err.stack : undefined,
       );
+      // Embed the codes in the `message` string itself so they survive
+      // the ProblemJSON global filter (which only echoes a fixed field
+      // set). Ops can grep for "pack_write_failed" AND immediately see
+      // whether it's a P2010 raw-SQL failure, a P2022 missing column, a
+      // Postgres 42703 (undefined column), 42P01 (undefined table),
+      // 22P02 (invalid enum literal), etc. — without pulling logs.
+      const suffix = [
+        prismaCode ? `prisma=${prismaCode}` : null,
+        pgCode ? `pg=${pgCode}` : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      const message = suffix
+        ? `Could not record pack — a database write failed [${suffix}]. This usually means database migrations have not been applied in this environment.`
+        : "Could not record pack — a database write failed. This usually means database migrations have not been applied in this environment.";
       throw new InternalServerErrorException({
-        message:
-          "Could not record pack — a database write failed. This usually means database migrations have not been applied in this environment.",
+        message,
         code: "pack_write_failed",
-        // Non-secret error codes are safe to surface: Prisma codes and
-        // Postgres error codes are documented publicly, and the codes
-        // help ops search the logs quickly.
-        prismaCode: prismaCode || undefined,
-        pgCode: pgCode || undefined,
       });
     }
 

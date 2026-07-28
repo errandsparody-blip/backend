@@ -62,6 +62,35 @@ const REQUIRED_COLUMNS: ReadonlyArray<{ table: string; column: string }> = [
   { table: "skus", column: "location_id" },
 ];
 
+/**
+ * Tables that must exist (migrations 0042 + 0043 + 0044 + 0045 + 0046).
+ * A missing table would fail the app at first use, not at boot.
+ */
+const REQUIRED_TABLES: ReadonlyArray<string> = [
+  "order_shipping_rate_options", // 0042
+  "packaging_options", // 0043
+  "product_barcodes", // 0044
+  "inventory_locations", // 0045
+  "order_import_jobs", // 0046
+];
+
+/**
+ * Enum values added by later migrations. Postgres won't error on
+ * `ALTER TYPE ... ADD VALUE IF NOT EXISTS` re-runs, but if a
+ * migration was skipped entirely the raw `'PACKING_COMPLETED'::"OrderStatus"`
+ * cast in the pack service throws with pg error 22P02 — a class of
+ * failure the column check completely misses.
+ */
+const REQUIRED_ENUM_VALUES: ReadonlyArray<{ enumName: string; value: string }> =
+  [
+    // Migration 0041 — v2 lifecycle statuses on OrderStatus.
+    { enumName: "OrderStatus", value: "PENDING_PACKING" },
+    { enumName: "OrderStatus", value: "PACKING_COMPLETED" },
+    { enumName: "OrderStatus", value: "AWAITING_SHIPPING_SELECTION" },
+    { enumName: "OrderStatus", value: "AWAITING_WALLET_FUNDING" },
+    { enumName: "OrderStatus", value: "SHIPPING_PAID" },
+  ];
+
 @Injectable()
 export class MigrationSanityService implements OnApplicationBootstrap {
   private readonly logger = new Logger(MigrationSanityService.name);
@@ -123,32 +152,112 @@ export class MigrationSanityService implements OnApplicationBootstrap {
     const present = new Set(
       rows.map((r) => `${r.table_name}.${r.column_name}`),
     );
-    const missing = REQUIRED_COLUMNS.filter(
+    const missingColumns = REQUIRED_COLUMNS.filter(
       (c) => !present.has(`${c.table}.${c.column}`),
     );
 
-    if (missing.length > 0) {
+    // Tables that must exist (migrations 0042–0046).
+    let tableRows: Array<{ table_name: string }>;
+    try {
+      tableRows = await this.prisma.$queryRawUnsafe<
+        Array<{ table_name: string }>
+      >(
+        `SELECT table_name
+           FROM information_schema.tables
+          WHERE table_schema = current_schema()
+            AND table_name = ANY($1::text[])`,
+        REQUIRED_TABLES,
+      );
+    } catch (err) {
+      this.logger.error(
+        {
+          msg: "MigrationSanityService — could not query information_schema.tables; refusing to start.",
+          err: err instanceof Error ? err.message : String(err),
+        },
+        err instanceof Error ? err.stack : undefined,
+      );
+      throw new Error(
+        "Migration sanity check failed: could not read information_schema.tables. See stderr for details.",
+      );
+    }
+    const presentTables = new Set(tableRows.map((r) => r.table_name));
+    const missingTables = REQUIRED_TABLES.filter((t) => !presentTables.has(t));
+
+    // Enum values (migration 0041). A missing enum value fails at first
+    // raw-SQL use with pg error 22P02 — which the column check misses.
+    let enumRows: Array<{ enum_name: string; enum_value: string }>;
+    try {
+      enumRows = await this.prisma.$queryRawUnsafe<
+        Array<{ enum_name: string; enum_value: string }>
+      >(
+        `SELECT t.typname AS enum_name, e.enumlabel AS enum_value
+           FROM pg_enum e
+           JOIN pg_type t ON e.enumtypid = t.oid
+          WHERE t.typname = ANY($1::text[])`,
+        Array.from(new Set(REQUIRED_ENUM_VALUES.map((e) => e.enumName))),
+      );
+    } catch (err) {
+      this.logger.error(
+        {
+          msg: "MigrationSanityService — could not query pg_enum; refusing to start.",
+          err: err instanceof Error ? err.message : String(err),
+        },
+        err instanceof Error ? err.stack : undefined,
+      );
+      throw new Error(
+        "Migration sanity check failed: could not read pg_enum. See stderr for details.",
+      );
+    }
+    const presentEnumValues = new Set(
+      enumRows.map((r) => `${r.enum_name}.${r.enum_value}`),
+    );
+    const missingEnumValues = REQUIRED_ENUM_VALUES.filter(
+      (e) => !presentEnumValues.has(`${e.enumName}.${e.value}`),
+    );
+
+    if (
+      missingColumns.length > 0 ||
+      missingTables.length > 0 ||
+      missingEnumValues.length > 0
+    ) {
       this.logger.error({
-        msg: "MigrationSanityService — required columns missing. Run `pnpm prisma migrate deploy` before starting the app.",
-        missing: missing.map((c) => `${c.table}.${c.column}`),
+        msg: "MigrationSanityService — schema is behind. Run `pnpm prisma migrate deploy` before starting the app.",
+        missingColumns: missingColumns.map((c) => `${c.table}.${c.column}`),
+        missingTables,
+        missingEnumValues: missingEnumValues.map(
+          (e) => `${e.enumName}.${e.value}`,
+        ),
         expectedMigrations: [
           "0040_shipping_points_foundation",
           "0041_fulfillment_v2_statuses",
           "0042_pack_and_rate_cache",
           "0043_packaging_library",
+          "0044_product_barcodes",
           "0045_inventory_locations",
+          "0046_order_import_jobs",
         ],
       });
+      const summary = [
+        missingColumns.length > 0
+          ? `${missingColumns.length} column(s) [${missingColumns.map((c) => `${c.table}.${c.column}`).join(", ")}]`
+          : null,
+        missingTables.length > 0 ? `${missingTables.length} table(s) [${missingTables.join(", ")}]` : null,
+        missingEnumValues.length > 0
+          ? `${missingEnumValues.length} enum value(s) [${missingEnumValues.map((e) => `${e.enumName}.${e.value}`).join(", ")}]`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("; ");
       throw new Error(
-        `Migration sanity check failed: ${missing.length} required column(s) missing (${missing
-          .map((c) => `${c.table}.${c.column}`)
-          .join(", ")}). Run 'pnpm prisma migrate deploy' and restart.`,
+        `Migration sanity check failed: ${summary}. Run 'pnpm prisma migrate deploy' and restart.`,
       );
     }
 
     this.logger.log({
-      msg: "MigrationSanityService — all required columns present.",
-      checked: REQUIRED_COLUMNS.length,
+      msg: "MigrationSanityService — schema OK.",
+      columns: REQUIRED_COLUMNS.length,
+      tables: REQUIRED_TABLES.length,
+      enumValues: REQUIRED_ENUM_VALUES.length,
     });
   }
 }
