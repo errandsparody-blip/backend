@@ -36,6 +36,7 @@ import {
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
 } from "@nestjs/common";
@@ -151,6 +152,31 @@ export class AdminOrderPackController {
     @Body(new ZodValidationPipe(recordPackSchema)) body: RecordPackInput,
   ) {
     return this.pack.recordPack(id, user.sub, {
+      lengthIn: body.lengthIn,
+      widthIn: body.widthIn,
+      heightIn: body.heightIn,
+      weightOz: body.weightOz,
+      notes: body.notes,
+      packagingOptionId: body.packagingOptionId,
+      shippoTemplate: body.shippoTemplate,
+    });
+  }
+
+  /**
+   * Phase P-D — post-pack edit endpoint. Same input shape as
+   * /record, but callable only while the label has NOT yet been
+   * bought. Reverts status to PACKING_COMPLETED and drops the cached
+   * rate options so the operator must re-fetch rates before picking
+   * a new one.
+   */
+  @Patch(":id/pack-details")
+  @HttpCode(HttpStatus.OK)
+  updatePackDetails(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(recordPackSchema)) body: RecordPackInput,
+  ) {
+    return this.pack.updatePackDetails(id, user.sub, {
       lengthIn: body.lengthIn,
       widthIn: body.widthIn,
       heightIn: body.heightIn,

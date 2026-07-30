@@ -134,9 +134,61 @@ export interface FetchRatesResult {
   options: RateOption[];
 }
 
+/**
+ * Phase P-C — internal discriminated union returned by the selectRate
+ * transaction body. Not exported: the public shape is
+ * `SelectRateOutcome` below, computed AFTER the label-purchase step.
+ */
+type DebitInnerResult =
+  | {
+      committed: "SHIPPING_PAID";
+      vendorId: string;
+      balanceAfterCents: number;
+      shippingCostCents: number;
+      shipmentProviderRef: string;
+      rateProviderRef: string;
+      carrier: string;
+      service: string;
+    }
+  | {
+      outcome: "AWAITING_WALLET_FUNDING";
+      walletBalanceCents: number;
+      requiredCents: number;
+      carrier: string;
+      service: string;
+      rateProviderRef: string;
+    };
+
 export type SelectRateOutcome =
-  | { outcome: "SHIPPING_PAID"; balanceAfterCents: number; shippingCostCents: number; carrier: string; service: string; rateProviderRef: string }
-  | { outcome: "AWAITING_WALLET_FUNDING"; walletBalanceCents: number; requiredCents: number; carrier: string; service: string; rateProviderRef: string };
+  | {
+      /**
+       * Phase P-C — happy path. Wallet debited AND label purchased in
+       * one selectRate call, per spec Step 7 ("Purchase label through
+       * Shippo … will be the last step to completing an order
+       * fulfillment request"). Order status advances to LABEL_PURCHASED.
+       */
+      outcome: "LABEL_PURCHASED";
+      balanceAfterCents: number;
+      shippingCostCents: number;
+      carrier: string;
+      service: string;
+      rateProviderRef: string;
+      trackingNumber: string;
+      labelUrl: string;
+    }
+  | {
+      /**
+       * Wallet was short. Order sits in AWAITING_WALLET_FUNDING until
+       * vendor tops up and operator retries. No wallet activity, no
+       * label purchase attempted.
+       */
+      outcome: "AWAITING_WALLET_FUNDING";
+      walletBalanceCents: number;
+      requiredCents: number;
+      carrier: string;
+      service: string;
+      rateProviderRef: string;
+    };
 
 // ---------------------------------------------------------------------------
 
@@ -566,6 +618,230 @@ export class OrderPackService {
   }
 
   // =========================================================================
+  // WRITE — updatePackDetails (Phase P-D)
+  //
+  // Post-pack edit path: warehouse operator noticed a dim was mis-
+  // measured or the wrong packaging was picked, wants to correct
+  // without cancelling and re-packing from zero. Allowed only BEFORE
+  // the label is bought — once we've handed the vendor's money to
+  // Shippo, the pack details are frozen.
+  //
+  // Same input shape and same resolution logic as recordPack (carrier
+  // template + library preset override client dims; tare added
+  // server-side). Difference:
+  //   * Guards on status ∈ {PACKING_COMPLETED,
+  //     AWAITING_SHIPPING_SELECTION, AWAITING_WALLET_FUNDING} —
+  //     everything BEFORE LABEL_PURCHASED.
+  //   * Does NOT advance status. Row stays where it was.
+  //   * DROPS cached rate options in order_shipping_rate_options
+  //     because the dims changed — old rates are stale.
+  //   * If status was AWAITING_SHIPPING_SELECTION or
+  //     AWAITING_WALLET_FUNDING, we revert to PACKING_COMPLETED so
+  //     the UI prompts the operator to re-fetch rates before picking
+  //     one. Same reason: the cached rates on the order are gone.
+  // =========================================================================
+
+  async updatePackDetails(
+    orderId: string,
+    actorId: string,
+    input: RecordPackInput,
+  ): Promise<PackResult> {
+    this.assertPositiveDims(input);
+
+    // Resolve carrier template + library preset the same way recordPack
+    // does. Duplication is intentional — extracting a shared helper
+    // would couple two subtly different SRP concerns (create vs edit).
+    let effectiveLength = input.lengthIn;
+    let effectiveWidth = input.widthIn;
+    let effectiveHeight = input.heightIn;
+    let effectiveWeightOz = input.weightOz;
+    let packagingOptionId: string | null = null;
+    let parcelTemplate: string | null = null;
+    if (input.shippoTemplate) {
+      if (!this.carrierRegistry.isKnown(input.shippoTemplate)) {
+        throw new BadRequestException({
+          message: `Unknown Shippo carrier template: ${input.shippoTemplate}.`,
+          code: "carrier_template_unknown",
+        });
+      }
+      parcelTemplate = input.shippoTemplate;
+      const entry = this.carrierRegistry.getByTemplate(input.shippoTemplate);
+      if (entry) {
+        effectiveLength = entry.lengthIn;
+        effectiveWidth = entry.widthIn;
+        effectiveHeight = entry.heightIn;
+        effectiveWeightOz = input.weightOz + entry.tareWeightOz;
+      }
+    }
+    if (input.packagingOptionId) {
+      const preset = await this.packagingLibrary.getById(input.packagingOptionId);
+      if (!preset) {
+        throw new BadRequestException({
+          message: "Selected packaging option no longer exists.",
+          code: "packaging_option_not_found",
+        });
+      }
+      if (!preset.isActive) {
+        throw new BadRequestException({
+          message: "Selected packaging option is inactive.",
+          code: "packaging_option_inactive",
+        });
+      }
+      effectiveLength = preset.lengthIn;
+      effectiveWidth = preset.widthIn;
+      effectiveHeight = preset.heightIn;
+      effectiveWeightOz = input.weightOz + preset.tareWeightOz;
+      packagingOptionId = preset.id;
+      const presetTemplate = (preset as unknown as {
+        shippoTemplate?: string | null;
+      }).shippoTemplate;
+      if (parcelTemplate === null && presetTemplate) {
+        parcelTemplate = presetTemplate;
+      }
+    }
+
+    const exists = await this.prisma.order.findFirst({
+      where: { id: orderId },
+      select: { id: true },
+    });
+    if (!exists) throw new NotFoundException();
+
+    const now = new Date();
+    const notes = input.notes?.trim();
+    const notesValue = notes && notes.length > 0 ? notes : null;
+
+    let result: PackResult;
+    try {
+      result = await this.prisma.$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw<
+          Array<{
+            id: string;
+            status: OrderStatus;
+            workflow_version: number;
+          }>
+        >(Prisma.sql`
+          SELECT id, status, workflow_version
+          FROM orders
+          WHERE id = ${orderId}::uuid
+          FOR UPDATE
+        `);
+        const locked = lockedRows[0];
+        if (!locked) throw new NotFoundException();
+
+        if (locked.workflow_version !== 2) {
+          throw new ConflictException({
+            message:
+              "Legacy orders don't use the v2 pack-details edit path.",
+            code: "order_wrong_workflow",
+          });
+        }
+
+        // Guard: no edits after the label has been bought — the
+        // vendor's money went to the carrier and the box is on its
+        // way. Anything past LABEL_PURCHASED (PICKING, PACKED,
+        // SHIPPED, etc.) is off-limits.
+        const editable: OrderStatus[] = [
+          "PACKING_COMPLETED" as OrderStatus,
+          "AWAITING_SHIPPING_SELECTION" as OrderStatus,
+          "AWAITING_WALLET_FUNDING" as OrderStatus,
+        ];
+        if (!editable.includes(locked.status)) {
+          throw new ConflictException({
+            message: `Pack details cannot be edited after status ${locked.status}. The label has already been purchased.`,
+            code: "pack_details_locked",
+          });
+        }
+
+        // Drop cached rate options — dims changed, rates are stale.
+        await tx.$executeRaw(Prisma.sql`
+          DELETE FROM order_shipping_rate_options
+          WHERE order_id = ${orderId}::uuid
+        `);
+
+        // Revert status back to PACKING_COMPLETED so the operator has
+        // to re-fetch rates before selecting one. No status change if
+        // already PACKING_COMPLETED.
+        const targetStatus: OrderStatus = "PACKING_COMPLETED" as OrderStatus;
+
+        await tx.$executeRaw(Prisma.sql`
+          UPDATE orders
+             SET status = ${targetStatus}::"OrderStatus",
+                 packed_length_in = ${effectiveLength},
+                 packed_width_in  = ${effectiveWidth},
+                 packed_height_in = ${effectiveHeight},
+                 packed_weight_oz = ${effectiveWeightOz},
+                 packed_at        = ${now},
+                 packed_by_user_id = ${actorId}::uuid,
+                 packing_notes    = ${notesValue},
+                 packaging_option_id = ${packagingOptionId ? Prisma.sql`${packagingOptionId}::uuid` : Prisma.sql`NULL`},
+                 parcel_template  = ${parcelTemplate ?? null},
+                 updated_at       = NOW()
+           WHERE id = ${orderId}::uuid
+        `);
+
+        return {
+          orderId,
+          status: targetStatus,
+          packedLengthIn: effectiveLength,
+          packedWidthIn: effectiveWidth,
+          packedHeightIn: effectiveHeight,
+          packedWeightOz: effectiveWeightOz,
+          packedAt: now.toISOString(),
+          packedByUserId: actorId,
+          packingNotes: notesValue,
+          packagingOptionId,
+          parcelTemplate,
+        };
+      });
+    } catch (err) {
+      if (
+        err instanceof BadRequestException ||
+        err instanceof ConflictException ||
+        err instanceof NotFoundException
+      ) {
+        throw err;
+      }
+      // Same defensive wrapping as recordPack. If a raw-SQL failure or
+      // unknown Prisma error slips out, translate it before it hits
+      // the client.
+      const prismaCode =
+        typeof err === "object" && err !== null && "code" in err
+          ? String((err as { code?: unknown }).code ?? "")
+          : "";
+      this.logger.error(
+        {
+          msg: "updatePackDetails: raw SQL failure",
+          orderId,
+          prismaCode,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        err instanceof Error ? err.stack : undefined,
+      );
+      throw new BadRequestException({
+        message: `Could not update pack details${prismaCode ? ` [prisma=${prismaCode}]` : ""}.`,
+        code: "pack_update_failed",
+      });
+    }
+
+    await this.audit.log({
+      actorId,
+      action: "order.pack_details_updated",
+      resourceType: "order",
+      resourceId: orderId,
+      afterState: {
+        packedLengthIn: result.packedLengthIn,
+        packedWidthIn: result.packedWidthIn,
+        packedHeightIn: result.packedHeightIn,
+        packedWeightOz: result.packedWeightOz,
+        packagingOptionId: result.packagingOptionId,
+        parcelTemplate: result.parcelTemplate,
+      } as unknown as Prisma.InputJsonValue,
+    });
+
+    return result;
+  }
+
+  // =========================================================================
   // WRITE — fetchRates
   // =========================================================================
 
@@ -757,7 +1033,18 @@ export class OrderPackService {
     // Whole path in a single transaction so the wallet debit and the
     // status update commit together. WalletService.debit accepts our
     // tx so its locks compose cleanly.
-    return this.prisma.$transaction(async (tx) => {
+    // Phase P-C — two-phase commit shape:
+    //   Phase 1 (transaction) → wallet debit + status = SHIPPING_PAID,
+    //     OR downgrade to AWAITING_WALLET_FUNDING if wallet was short.
+    //   Phase 2 (outside tx, only if Phase 1 committed SHIPPING_PAID) →
+    //     Shippo label purchase; on success, promote to LABEL_PURCHASED
+    //     and store tracking + label URL; on failure, compensate by
+    //     refunding the wallet and reverting status so the operator
+    //     can pick a different rate.
+    // Shippo call cannot live inside the transaction — holding a DB
+    // connection across a network round-trip is a well-known anti-
+    // pattern that starves the pool under load.
+    const inner: DebitInnerResult = await this.prisma.$transaction(async (tx) => {
       const lockedRows = await tx.$queryRaw<
         Array<{
           id: string;
@@ -834,6 +1121,11 @@ export class OrderPackService {
           tx as unknown as Parameters<typeof this.wallet.debit>[1],
         );
 
+        // Advance to SHIPPING_PAID inside the SAME transaction as the
+        // wallet debit. This intermediate status is committed even if
+        // the label-purchase step (outside the transaction) fails —
+        // the compensation path in the caller detects that and
+        // refunds + reverts to AWAITING_SHIPPING_SELECTION for retry.
         await tx.$executeRaw(Prisma.sql`
           UPDATE orders
              SET status = 'SHIPPING_PAID'::"OrderStatus",
@@ -863,13 +1155,20 @@ export class OrderPackService {
           } as unknown as Prisma.InputJsonValue,
         });
 
+        // Return the intermediate signal to the outer function, which
+        // will now buy the label. We can't call Shippo inside a
+        // transaction (holds a DB connection across a network I/O)
+        // so the label purchase is a separate step composed with a
+        // compensation path.
         return {
-          outcome: "SHIPPING_PAID" as const,
+          committed: "SHIPPING_PAID" as const,
+          vendorId: locked.vendor_id,
           balanceAfterCents: debit.balanceAfterCents,
           shippingCostCents,
+          shipmentProviderRef: chosen.shipment_provider_ref,
+          rateProviderRef: chosen.rate_provider_ref,
           carrier: chosen.carrier,
           service: chosen.service,
-          rateProviderRef: chosen.rate_provider_ref,
         };
       } catch (err: unknown) {
         // Only handle the insufficient-funds branch specially — any
@@ -916,6 +1215,144 @@ export class OrderPackService {
         };
       }
     });
+
+    // ---- Phase 2 — wallet-short branch returns immediately -------------
+    // Discriminate on the presence of the `outcome` key; TS narrows
+    // `inner` to the SHIPPING_PAID variant below.
+    if ("outcome" in inner) {
+      return inner;
+    }
+
+    // ---- Phase 2 — SHIPPING_PAID: buy the label from Shippo ------------
+    // Wallet was successfully debited and the DB row shows SHIPPING_PAID.
+    // Now purchase the label. On success, promote to LABEL_PURCHASED
+    // with tracking + label URL. On failure, compensate: refund the
+    // wallet and revert status to AWAITING_SHIPPING_SELECTION so the
+    // operator can retry (possibly with a different rate).
+    try {
+      const label = await this.shippo.purchaseLabel({
+        shipmentId: inner.shipmentProviderRef,
+        rateId: inner.rateProviderRef,
+      });
+
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw(Prisma.sql`
+          UPDATE orders
+             SET status = 'LABEL_PURCHASED'::"OrderStatus",
+                 label_purchased_at = NOW(),
+                 tracking_number = ${label.trackingNumber},
+                 label_url = ${label.labelUrl},
+                 updated_at = NOW()
+           WHERE id = ${orderId}::uuid
+        `);
+      });
+
+      await this.audit.log({
+        actorId,
+        action: "order.label_purchased",
+        resourceType: "order",
+        resourceId: orderId,
+        beforeState: { status: "SHIPPING_PAID" } as unknown as Prisma.InputJsonValue,
+        afterState: {
+          status: "LABEL_PURCHASED",
+          trackingNumber: label.trackingNumber,
+          labelUrl: label.labelUrl,
+          carrier: label.carrier,
+          service: label.service,
+        } as unknown as Prisma.InputJsonValue,
+      });
+
+      return {
+        outcome: "LABEL_PURCHASED" as const,
+        balanceAfterCents: inner.balanceAfterCents,
+        shippingCostCents: inner.shippingCostCents,
+        carrier: inner.carrier,
+        service: inner.service,
+        rateProviderRef: inner.rateProviderRef,
+        trackingNumber: label.trackingNumber,
+        labelUrl: label.labelUrl,
+      };
+    } catch (labelErr) {
+      // ---- Compensation ------------------------------------------------
+      // Shippo refused to sell the label after we already took the
+      // vendor's money. We must return that money and revert status
+      // so the operator can retry cleanly. Failing to compensate
+      // leaves the vendor short + the order stuck at SHIPPING_PAID
+      // with no label — the worst possible state for a wallet-based
+      // system.
+      this.logger.error(
+        {
+          msg: "selectRate: label purchase failed after wallet debit — compensating",
+          orderId,
+          rateProviderRef: inner.rateProviderRef,
+          err: labelErr instanceof Error ? labelErr.message : String(labelErr),
+        },
+        labelErr instanceof Error ? labelErr.stack : undefined,
+      );
+
+      try {
+        await this.wallet.credit({
+          vendorId: inner.vendorId,
+          amountCents: inner.shippingCostCents,
+          type: "REFUND",
+          description: `Refund · label purchase failed for ${inner.carrier} ${inner.service}`,
+          referenceType: "order",
+          referenceId: orderId,
+          actorId,
+        });
+        await this.prisma.$transaction(async (tx) => {
+          await tx.$executeRaw(Prisma.sql`
+            UPDATE orders
+               SET status = 'AWAITING_SHIPPING_SELECTION'::"OrderStatus",
+                   shipping_cost_cents = 0,
+                   shipping_fee_cents  = 0,
+                   carrier             = NULL,
+                   carrier_service     = NULL,
+                   rate_provider_ref   = NULL,
+                   shipment_provider_ref = NULL,
+                   total_charged_cents = total_charged_cents - ${inner.shippingCostCents},
+                   updated_at = NOW()
+             WHERE id = ${orderId}::uuid
+          `);
+        });
+        await this.audit.log({
+          actorId,
+          action: "order.label_purchase_failed",
+          resourceType: "order",
+          resourceId: orderId,
+          beforeState: { status: "SHIPPING_PAID" } as unknown as Prisma.InputJsonValue,
+          afterState: {
+            status: "AWAITING_SHIPPING_SELECTION",
+            refundedCents: inner.shippingCostCents,
+            reason: labelErr instanceof Error ? labelErr.message : String(labelErr),
+          } as unknown as Prisma.InputJsonValue,
+        });
+      } catch (compensationErr) {
+        // Compensation itself failed — this is a hard operational
+        // problem that a human needs to look at. Log at ERROR level;
+        // the outer rethrow surfaces the ORIGINAL Shippo failure to
+        // the operator so they know something went wrong even if
+        // ops has to sort out the money manually.
+        this.logger.error(
+          {
+            msg: "selectRate: COMPENSATION FAILED after label-purchase failure — MANUAL RECONCILIATION REQUIRED",
+            orderId,
+            vendorId: inner.vendorId,
+            debitedCents: inner.shippingCostCents,
+            compensationErr:
+              compensationErr instanceof Error
+                ? compensationErr.message
+                : String(compensationErr),
+          },
+          compensationErr instanceof Error ? compensationErr.stack : undefined,
+        );
+      }
+
+      throw new BadRequestException({
+        message: `Label purchase failed with ${inner.carrier} ${inner.service}. Wallet has been refunded; please pick a different rate and try again.`,
+        code: "label_purchase_failed",
+      });
+    }
   }
 
   // =========================================================================

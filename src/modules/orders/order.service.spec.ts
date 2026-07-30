@@ -322,4 +322,42 @@ describe("OrderService — tenant isolation + address rejection", () => {
     expect(prisma.orders).toHaveLength(0);
     expect(audit.log).not.toHaveBeenCalled();
   });
+
+  // Phase P-B — NEEDS_VERIFICATION was silently allowed pre-fix, letting
+  // typo'd addresses like "160 tuker lane" submit. The spec requires
+  // hard validation before submit; both non-ACCEPTED outcomes must 400
+  // with the suggested correction (when Shippo returns one) in the
+  // error payload so the vendor knows what to fix.
+  it("create: NEEDS_VERIFICATION address → BadRequest, no wallet debit", async () => {
+    smarty.verifyUS.mockResolvedValueOnce({
+      outcome: "NEEDS_VERIFICATION",
+      detail: "Street name unrecognised — did you mean 'tucker lane'?",
+      normalized: {
+        line1: "160 Tucker Ln",
+        city: "Gwynn Oak",
+        state: "MD",
+        postalCode: "21207",
+        country: "US",
+      },
+    });
+    const err = await svc
+      .create(VENDOR_A, ACTOR_A, {
+        recipient: validRecipient,
+        lines: [{ skuId: "UER-VA0001-T-STD", quantity: 1 }],
+        carrierService: "USPS Priority",
+        insuranceRequested: false,
+        fulfillmentMode: "PLATFORM_SHIP",
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    const body = (err as BadRequestException).getResponse() as {
+      code: string;
+      message: string;
+    };
+    expect(body.code).toBe("address_needs_verification");
+    // Suggested correction is surfaced inline so the vendor sees what to change.
+    expect(body.message).toContain("160 Tucker Ln");
+    expect(wallet.debit).not.toHaveBeenCalled();
+    expect(prisma.orders).toHaveLength(0);
+  });
 });

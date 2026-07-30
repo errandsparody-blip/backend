@@ -507,7 +507,24 @@ export class OrderService {
     actorId: string,
     input: CreateOrderInput,
   ): Promise<PublicOrder> {
-    // 1. Address validation — same rules as legacy.
+    // 1. Address validation — hard-block anything that isn't cleanly
+    //    ACCEPTED. Per spec (page 3, "Address must be validated before
+    //    submission") and the QA finding that "160 tuker lane" (typo)
+    //    passed through. Shippo's address validator returns:
+    //
+    //      * ACCEPTED             — deliverable, no correction offered
+    //      * NEEDS_VERIFICATION   — partially valid; suggested correction
+    //      * REJECTED             — undeliverable / not found
+    //
+    //    Previously we let NEEDS_VERIFICATION through silently. That
+    //    meant a typo like "tuker lane" would submit even though Shippo
+    //    suggested "tucker lane". Now both non-ACCEPTED outcomes 400
+    //    with the suggested correction (if any) surfaced in the error
+    //    detail so the vendor knows what to change.
+    //
+    //    Follow-up (not in this phase): the wizard's address step could
+    //    render the correction inline with an "Accept suggested" button
+    //    so the vendor never gets a submit error at all.
     const addressValidation = await this.smarty.verifyUS({
       line1: input.recipient.shipAddressLine1,
       line2: input.recipient.shipAddressLine2,
@@ -516,10 +533,20 @@ export class OrderService {
       postalCode: input.recipient.shipPostalCode,
       country: input.recipient.shipCountry,
     });
-    if (addressValidation.outcome === "REJECTED") {
+    if (addressValidation.outcome !== "ACCEPTED") {
+      const suggested = addressValidation.normalized
+        ? ` Suggested: ${addressValidation.normalized.line1}, ${addressValidation.normalized.city}, ${addressValidation.normalized.state} ${addressValidation.normalized.postalCode}.`
+        : "";
+      const detail = addressValidation.detail ?? "invalid";
       throw new BadRequestException({
-        message: `Address rejected: ${addressValidation.detail ?? "invalid"}`,
-        code: "address_rejected",
+        message:
+          addressValidation.outcome === "REJECTED"
+            ? `Address rejected: ${detail}.${suggested}`
+            : `Address needs verification (${detail}).${suggested} Please correct it before submitting.`,
+        code:
+          addressValidation.outcome === "REJECTED"
+            ? "address_rejected"
+            : "address_needs_verification",
       });
     }
 
