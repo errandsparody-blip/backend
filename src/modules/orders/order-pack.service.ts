@@ -632,13 +632,14 @@ export class OrderPackService {
   //   * Guards on status ∈ {PACKING_COMPLETED,
   //     AWAITING_SHIPPING_SELECTION, AWAITING_WALLET_FUNDING} —
   //     everything BEFORE LABEL_PURCHASED.
-  //   * Does NOT advance status. Row stays where it was.
-  //   * DROPS cached rate options in order_shipping_rate_options
-  //     because the dims changed — old rates are stale.
-  //   * If status was AWAITING_SHIPPING_SELECTION or
-  //     AWAITING_WALLET_FUNDING, we revert to PACKING_COMPLETED so
-  //     the UI prompts the operator to re-fetch rates before picking
-  //     one. Same reason: the cached rates on the order are gone.
+  //   * Does NOT touch status. The state-machine trigger from
+  //     migration 0048 rejects backwards transitions (e.g.
+  //     AWAITING_SHIPPING_SELECTION → PACKING_COMPLETED) as
+  //     check_violation, so we can't revert. Instead:
+  //   * DROPS cached rate options in order_shipping_rate_options.
+  //     The picker sees an empty rate list and prompts the operator
+  //     to re-fetch — functionally equivalent to a status revert
+  //     without tripping the trigger.
   // =========================================================================
 
   async updatePackDetails(
@@ -753,20 +754,24 @@ export class OrderPackService {
         }
 
         // Drop cached rate options — dims changed, rates are stale.
+        // The picker will see an empty rate list and prompt for a
+        // re-fetch, which is functionally equivalent to a status
+        // revert without tripping the state-machine trigger from
+        // migration 0048 (which rejects backwards transitions like
+        // AWAITING_SHIPPING_SELECTION → PACKING_COMPLETED as
+        // ERRCODE=check_violation / pg=23514).
         await tx.$executeRaw(Prisma.sql`
           DELETE FROM order_shipping_rate_options
           WHERE order_id = ${orderId}::uuid
         `);
 
-        // Revert status back to PACKING_COMPLETED so the operator has
-        // to re-fetch rates before selecting one. No status change if
-        // already PACKING_COMPLETED.
-        const targetStatus: OrderStatus = "PACKING_COMPLETED" as OrderStatus;
-
+        // Update pack columns in place; leave `status` alone. The
+        // combination "empty rate cache + updated pack columns" is
+        // what signals the operator to re-fetch rates before picking
+        // one. No status write means no trigger interaction.
         await tx.$executeRaw(Prisma.sql`
           UPDATE orders
-             SET status = ${targetStatus}::"OrderStatus",
-                 packed_length_in = ${effectiveLength},
+             SET packed_length_in = ${effectiveLength},
                  packed_width_in  = ${effectiveWidth},
                  packed_height_in = ${effectiveHeight},
                  packed_weight_oz = ${effectiveWeightOz},
@@ -781,7 +786,9 @@ export class OrderPackService {
 
         return {
           orderId,
-          status: targetStatus,
+          // Status was NOT changed. Echo back whatever the row was
+          // sitting in so the caller doesn't need to re-read the row.
+          status: locked.status,
           packedLengthIn: effectiveLength,
           packedWidthIn: effectiveWidth,
           packedHeightIn: effectiveHeight,
