@@ -174,6 +174,35 @@ const ConfigSchema = z.object({
         .map((v) => v.trim())
         .filter((v) => v.length > 0 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)),
     ),
+  // Comma-separated list of email addresses that must NEVER be sent to.
+  // The EmailService checks this set before every send and short-circuits
+  // matches with `error: "recipient_suppressed"` — no Resend API call is
+  // made, no audit "email.delivered" row is written.
+  //
+  // Purpose: mirror Resend's remote suppression list at the application
+  // layer so a known-bouncing recipient (e.g. a stale QA alias) cannot
+  // burn API quota, pollute the Resend dashboard with "Suppressed"
+  // events, or produce misleading audit rows. Also useful for locally
+  // blocking a compromised or hostile address without a Resend dashboard
+  // round-trip.
+  //
+  // Matching is case-insensitive (Resend normalizes to lowercase; RFC
+  // 5321 §2.4 lets the local part be case-sensitive but every mainstream
+  // MTA treats it as case-insensitive in practice, and treating them
+  // otherwise would let a trivial `Alice@…` bypass a `alice@…` entry).
+  //
+  // Entries that don't parse as an email address are silently dropped
+  // rather than failing boot — a fat-fingered comma in the env file
+  // should not take the API down.
+  EMAIL_SUPPRESSED_ADDRESSES: z
+    .string()
+    .optional()
+    .transform((s) =>
+      (s ?? "")
+        .split(",")
+        .map((v) => v.trim().toLowerCase())
+        .filter((v) => v.length > 0 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)),
+    ),
 
   // Cloudflare R2 — Personal Shopper attachment uploads (P6).
   // R2 is S3-compatible; we presign PUTs with AWS SigV4 against the

@@ -1051,7 +1051,16 @@ export class OrderPackService {
     // Shippo call cannot live inside the transaction — holding a DB
     // connection across a network round-trip is a well-known anti-
     // pattern that starves the pool under load.
-    const inner: DebitInnerResult = await this.prisma.$transaction(async (tx) => {
+    //
+    // Defensive wrap: any raw-SQL / unknown Prisma error inside the tx
+    // (missing column, schema drift, trigger raise) previously escaped
+    // as a bare 500. Wrap in the same error-mapper pattern as
+    // recordPack (Phase K1) so ops sees prismaCode / pgCode / trigger
+    // name inline in the response body — no correlationId round-trip
+    // needed to diagnose environment mismatches.
+    let inner: DebitInnerResult;
+    try {
+      inner = await this.prisma.$transaction(async (tx) => {
       const lockedRows = await tx.$queryRaw<
         Array<{
           id: string;
@@ -1133,6 +1142,15 @@ export class OrderPackService {
         // the label-purchase step (outside the transaction) fails —
         // the compensation path in the caller detects that and
         // refunds + reverts to AWAITING_SHIPPING_SELECTION for retry.
+        // NOTE: `shipment_provider_ref` intentionally NOT written to the
+        // orders row — that column exists only on
+        // `order_shipping_rate_options` (migration 0042). Writing it
+        // here previously produced Postgres 42703 (undefined_column)
+        // which Prisma wraps as P2010 and Nest surfaces as a bare 500.
+        // The value is carried in-memory via DebitInnerResult so Phase 2
+        // (label purchase) can still reference it without a re-read.
+        // If persistent audit becomes needed, add the column via a
+        // future migration and re-introduce the write in the same PR.
         await tx.$executeRaw(Prisma.sql`
           UPDATE orders
              SET status = 'SHIPPING_PAID'::"OrderStatus",
@@ -1141,7 +1159,6 @@ export class OrderPackService {
                  carrier             = ${chosen.carrier},
                  carrier_service     = ${chosen.service},
                  rate_provider_ref   = ${chosen.rate_provider_ref},
-                 shipment_provider_ref = ${chosen.shipment_provider_ref},
                  total_charged_cents = total_charged_cents + ${shippingCostCents},
                  updated_at = NOW()
            WHERE id = ${orderId}::uuid
@@ -1222,6 +1239,9 @@ export class OrderPackService {
         };
       }
     });
+    } catch (err) {
+      this.throwWrappedRawSqlError(err, "selectRate.phase1", "select_rate_write_failed", orderId);
+    }
 
     // ---- Phase 2 — wallet-short branch returns immediately -------------
     // Discriminate on the presence of the `outcome` key; TS narrows
@@ -1307,6 +1327,10 @@ export class OrderPackService {
           referenceId: orderId,
           actorId,
         });
+        // Same column note as the Phase 1 UPDATE above: no
+        // `shipment_provider_ref` column on `orders`. The trigger
+        // permission for SHIPPING_PAID → AWAITING_SHIPPING_SELECTION
+        // is granted by migration 0050 (compensation whitelist).
         await this.prisma.$transaction(async (tx) => {
           await tx.$executeRaw(Prisma.sql`
             UPDATE orders
@@ -1316,7 +1340,6 @@ export class OrderPackService {
                    carrier             = NULL,
                    carrier_service     = NULL,
                    rate_provider_ref   = NULL,
-                   shipment_provider_ref = NULL,
                    total_charged_cents = total_charged_cents - ${inner.shippingCostCents},
                    updated_at = NOW()
              WHERE id = ${orderId}::uuid
@@ -1391,6 +1414,88 @@ export class OrderPackService {
         code: "invalid_input",
       });
     }
+  }
+
+  /**
+   * Shared raw-SQL error mapper for the write paths in this service.
+   *
+   * Pass-through for the Nest HttpException subclasses we deliberately
+   * throw from inside transaction bodies (BadRequest / Conflict /
+   * NotFound). Everything else is presumed to be a Prisma-wrapped
+   * Postgres failure — extract the diagnostic fields (Prisma code, pg
+   * SQLSTATE, constraint / trigger name) and re-throw as a coded
+   * InternalServerErrorException whose `message` embeds those fields
+   * inline. Ops can then read the exact failing rule from the browser
+   * without pulling correlationId logs.
+   *
+   * Returns `never` so the caller's control flow narrows correctly
+   * (e.g. TypeScript accepts that a variable assigned inside `try` is
+   * definitely assigned after the try/catch as long as the catch
+   * always throws).
+   */
+  private throwWrappedRawSqlError(
+    err: unknown,
+    operation: string,
+    code: string,
+    orderId: string,
+  ): never {
+    if (
+      err instanceof BadRequestException ||
+      err instanceof ConflictException ||
+      err instanceof NotFoundException
+    ) {
+      throw err;
+    }
+    const prismaCode =
+      typeof err === "object" && err !== null && "code" in err
+        ? String((err as { code?: unknown }).code ?? "")
+        : "";
+    const pgCode =
+      typeof err === "object" &&
+      err !== null &&
+      "meta" in err &&
+      typeof (err as { meta?: { code?: unknown } }).meta === "object"
+        ? String((err as { meta?: { code?: unknown } }).meta?.code ?? "")
+        : "";
+    const pgMessage =
+      typeof err === "object" &&
+      err !== null &&
+      "meta" in err &&
+      typeof (err as { meta?: { message?: unknown } }).meta === "object"
+        ? String((err as { meta?: { message?: unknown } }).meta?.message ?? "")
+        : "";
+    const constraintMatch = pgMessage.match(/constraint "([^"]+)"/);
+    const triggerMatch = pgMessage.match(/order_status_[a-z_]+/);
+    // Column-name extraction — pg 42703 "column ... does not exist"
+    // is the exact class of bug we most want to pinpoint. Capture the
+    // identifier between the "column" keyword and "does not exist".
+    const columnMatch = pgMessage.match(/column "?([A-Za-z_][A-Za-z0-9_]*)"? .*does not exist/);
+    const detail =
+      constraintMatch?.[1] ??
+      triggerMatch?.[0] ??
+      (columnMatch ? `column=${columnMatch[1]}` : "");
+    this.logger.error(
+      {
+        msg: `${operation}: raw SQL failure`,
+        orderId,
+        prismaCode,
+        pgCode,
+        detail,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      err instanceof Error ? err.stack : undefined,
+    );
+    const suffix = [
+      prismaCode ? `prisma=${prismaCode}` : null,
+      pgCode ? `pg=${pgCode}` : null,
+      detail ? `at=${detail}` : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const message = suffix
+      ? `Operation ${operation} failed — a database write was rejected [${suffix}]. This usually means database migrations have not been applied in this environment, or an ops guardrail (trigger, constraint) refused the transition.`
+      : `Operation ${operation} failed — a database write was rejected.`;
+    throw new InternalServerErrorException({ message, code });
   }
 
   /**

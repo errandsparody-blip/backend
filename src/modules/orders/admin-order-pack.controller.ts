@@ -165,9 +165,17 @@ export class AdminOrderPackController {
   /**
    * Phase P-D — post-pack edit endpoint. Same input shape as
    * /record, but callable only while the label has NOT yet been
-   * bought. Reverts status to PACKING_COMPLETED and drops the cached
-   * rate options so the operator must re-fetch rates before picking
-   * a new one.
+   * bought.
+   *
+   * Behavior (post P-D fix): rewrites the pack columns in place and
+   * drops the cached rate options so the operator must re-fetch rates
+   * before picking a new one. Does NOT touch `status` — the
+   * enforce_order_status_transition trigger from migration 0048
+   * rejects backwards transitions (e.g. AWAITING_SHIPPING_SELECTION
+   * → PACKING_COMPLETED) with ERRCODE=check_violation, which Prisma
+   * surfaces as P2010. Clearing the rate cache is functionally
+   * equivalent to the revert (picker sees no rates → operator
+   * re-fetches) without tripping the state-machine invariant.
    */
   @Patch(":id/pack-details")
   @HttpCode(HttpStatus.OK)

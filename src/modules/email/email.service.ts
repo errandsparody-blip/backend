@@ -61,13 +61,54 @@ interface ResendResponse {
 export class EmailService {
   private readonly log = new Logger(EmailService.name);
   private readonly cfg = loadConfig();
+  /**
+   * Case-insensitive local suppression set. Built once at construction
+   * so we don't rebuild it per send. Config already lower-cases every
+   * entry, so a lowered lookup is exact.
+   *
+   * A Set is O(1) — sends check this on every message and the set can
+   * grow to dozens of entries over time (each hard-bounced QA alias
+   * gets added), so an .includes() scan would compound needlessly.
+   */
+  private readonly suppressed: ReadonlySet<string>;
 
-  constructor(private readonly audit: AuditService) {}
+  constructor(private readonly audit: AuditService) {
+    this.suppressed = new Set(this.cfg.EMAIL_SUPPRESSED_ADDRESSES);
+  }
 
   async send(msg: EmailMessage): Promise<{ ok: boolean; providerId?: string; error?: string }> {
     if (!this.isValidRecipient(msg.to)) {
       this.log.warn({ type: msg.type, to: this.redact(msg.to) }, "Email skipped — invalid recipient");
       return { ok: false, error: "invalid_recipient" };
+    }
+
+    // Local suppression check — runs BEFORE any provider dispatch so a
+    // suppressed recipient never touches Resend's API, never generates
+    // a "Suppressed" event in the dashboard, and never produces an
+    // "email.delivered" audit row that would misrepresent reality.
+    //
+    // Emit an audit row so ops can prove after-the-fact that a specific
+    // outbound was intentionally skipped (rather than lost) — this is
+    // the compensating trail for the absence of a delivery record.
+    if (this.suppressed.has(msg.to.toLowerCase())) {
+      this.log.warn(
+        { type: msg.type, to: this.redact(msg.to) },
+        "Email skipped — recipient on local suppression list",
+      );
+      await this.audit
+        .log({
+          action: "email.skipped_suppressed",
+          resourceType: "email",
+          resourceId: msg.idempotencyKey ?? null,
+          afterState: {
+            type: msg.type,
+            toHash: this.redact(msg.to),
+            vendorId: msg.vendorId ?? null,
+            userId: msg.userId ?? null,
+          },
+        })
+        .catch(() => undefined);
+      return { ok: false, error: "recipient_suppressed" };
     }
 
     if (this.cfg.EMAIL_PROVIDER === "console") {
