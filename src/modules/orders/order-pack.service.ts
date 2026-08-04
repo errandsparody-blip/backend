@@ -59,7 +59,11 @@ import { PrismaService } from "../../common/prisma.service";
 import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
 import { PackagingLibraryService } from "../../common/services/packaging-library.service";
 import { AuditService } from "../audit/audit.service";
-import { ShippoService, type ShippingRate } from "../integrations/shippo/shippo.service";
+import {
+  ShippoService,
+  type LabelResponse,
+  type ShippingRate,
+} from "../integrations/shippo/shippo.service";
 import { WalletService } from "../wallet/wallet.service";
 
 // ---------------------------------------------------------------------------
@@ -1250,72 +1254,56 @@ export class OrderPackService {
       return inner;
     }
 
-    // ---- Phase 2 — SHIPPING_PAID: buy the label from Shippo ------------
+    // ---- Phase 2a — SHIPPING_PAID: buy the label from Shippo -----------
     // Wallet was successfully debited and the DB row shows SHIPPING_PAID.
-    // Now purchase the label. On success, promote to LABEL_PURCHASED
-    // with tracking + label URL. On failure, compensate: refund the
-    // wallet and revert status to AWAITING_SHIPPING_SELECTION so the
-    // operator can retry (possibly with a different rate).
+    // We now buy the label from Shippo, then persist LABEL_PURCHASED.
+    //
+    // TWO DISTINCT failure classes with OPPOSITE compensation semantics:
+    //
+    //   A. Shippo REFUSED the purchase (label was NOT bought). Compensate:
+    //      credit the wallet back, revert status to
+    //      AWAITING_SHIPPING_SELECTION so the operator can pick another
+    //      rate. Any residual compensation failure is surfaced honestly
+    //      in the error message rather than silently swallowed.
+    //
+    //   B. Shippo BOUGHT the label, but our DB write to record it
+    //      failed. The vendor's money is already with the carrier and
+    //      the label exists. Compensation would be WRONG here — refund
+    //      + revert would create a "we bought a label we're not
+    //      tracking" state on top of a legitimate purchase. We log
+    //      HARD, throw a distinct error code, and hand off to a human
+    //      for manual reconciliation (the audit trail + Shippo dashboard
+    //      have the tracking number, we just failed to record it).
+
+    let label: LabelResponse;
     try {
-      const label = await this.shippo.purchaseLabel({
+      label = await this.shippo.purchaseLabel({
         shipmentId: inner.shipmentProviderRef,
         rateId: inner.rateProviderRef,
       });
-
-      await this.prisma.$transaction(async (tx) => {
-        await tx.$executeRaw(Prisma.sql`
-          UPDATE orders
-             SET status = 'LABEL_PURCHASED'::"OrderStatus",
-                 label_purchased_at = NOW(),
-                 tracking_number = ${label.trackingNumber},
-                 label_url = ${label.labelUrl},
-                 updated_at = NOW()
-           WHERE id = ${orderId}::uuid
-        `);
-      });
-
-      await this.audit.log({
-        actorId,
-        action: "order.label_purchased",
-        resourceType: "order",
-        resourceId: orderId,
-        beforeState: { status: "SHIPPING_PAID" } as unknown as Prisma.InputJsonValue,
-        afterState: {
-          status: "LABEL_PURCHASED",
-          trackingNumber: label.trackingNumber,
-          labelUrl: label.labelUrl,
-          carrier: label.carrier,
-          service: label.service,
-        } as unknown as Prisma.InputJsonValue,
-      });
-
-      return {
-        outcome: "LABEL_PURCHASED" as const,
-        balanceAfterCents: inner.balanceAfterCents,
-        shippingCostCents: inner.shippingCostCents,
-        carrier: inner.carrier,
-        service: inner.service,
-        rateProviderRef: inner.rateProviderRef,
-        trackingNumber: label.trackingNumber,
-        labelUrl: label.labelUrl,
-      };
     } catch (labelErr) {
-      // ---- Compensation ------------------------------------------------
-      // Shippo refused to sell the label after we already took the
-      // vendor's money. We must return that money and revert status
-      // so the operator can retry cleanly. Failing to compensate
-      // leaves the vendor short + the order stuck at SHIPPING_PAID
-      // with no label — the worst possible state for a wallet-based
-      // system.
+      // ---- Class A — Shippo refused. Compensate. -----------------------
+      const shippoDetail = this.extractErrorDetail(labelErr);
       this.logger.error(
         {
-          msg: "selectRate: label purchase failed after wallet debit — compensating",
+          msg: "selectRate: label purchase refused by Shippo — compensating",
           orderId,
           rateProviderRef: inner.rateProviderRef,
-          err: labelErr instanceof Error ? labelErr.message : String(labelErr),
+          shippoDetail,
         },
         labelErr instanceof Error ? labelErr.stack : undefined,
       );
+
+      // Per-leg tracking. Refund and status-revert are independent
+      // operations and either can fail (e.g. status revert needs
+      // migration 0050 to be applied). We must NOT lie about which
+      // legs succeeded — the operator needs to know precisely what
+      // state the order is in so they don't try to pick again on top
+      // of a partial refund.
+      let refundOk = false;
+      let statusRevertOk = false;
+      let refundErr: string | undefined;
+      let statusErr: string | undefined;
 
       try {
         await this.wallet.credit({
@@ -1327,10 +1315,28 @@ export class OrderPackService {
           referenceId: orderId,
           actorId,
         });
-        // Same column note as the Phase 1 UPDATE above: no
-        // `shipment_provider_ref` column on `orders`. The trigger
-        // permission for SHIPPING_PAID → AWAITING_SHIPPING_SELECTION
-        // is granted by migration 0050 (compensation whitelist).
+        refundOk = true;
+      } catch (err) {
+        refundErr = this.extractErrorDetail(err);
+        this.logger.error(
+          {
+            msg: "selectRate: WALLET REFUND FAILED during compensation — MANUAL RECONCILIATION REQUIRED",
+            orderId,
+            vendorId: inner.vendorId,
+            debitedCents: inner.shippingCostCents,
+            refundErr,
+          },
+          err instanceof Error ? err.stack : undefined,
+        );
+      }
+
+      // Status revert — permitted by migration 0050
+      // (SHIPPING_PAID → AWAITING_SHIPPING_SELECTION whitelist).
+      // Absent that migration, the trigger raises 'check_violation'
+      // and this leg fails; we report that honestly rather than
+      // silently claiming success. Column note: no
+      // `shipment_provider_ref` on `orders` (see Phase 1 UPDATE).
+      try {
         await this.prisma.$transaction(async (tx) => {
           await tx.$executeRaw(Prisma.sql`
             UPDATE orders
@@ -1345,44 +1351,139 @@ export class OrderPackService {
              WHERE id = ${orderId}::uuid
           `);
         });
-        await this.audit.log({
+        statusRevertOk = true;
+      } catch (err) {
+        statusErr = this.extractErrorDetail(err);
+        this.logger.error(
+          {
+            msg: "selectRate: STATUS REVERT FAILED during compensation — order stuck in SHIPPING_PAID",
+            orderId,
+            statusErr,
+          },
+          err instanceof Error ? err.stack : undefined,
+        );
+      }
+
+      // Audit whatever state we ended in — best-effort so audit isn't
+      // yet another failure mode that hides the truth.
+      await this.audit
+        .log({
           actorId,
           action: "order.label_purchase_failed",
           resourceType: "order",
           resourceId: orderId,
           beforeState: { status: "SHIPPING_PAID" } as unknown as Prisma.InputJsonValue,
           afterState: {
-            status: "AWAITING_SHIPPING_SELECTION",
-            refundedCents: inner.shippingCostCents,
-            reason: labelErr instanceof Error ? labelErr.message : String(labelErr),
+            status: statusRevertOk
+              ? "AWAITING_SHIPPING_SELECTION"
+              : "SHIPPING_PAID",
+            refundOk,
+            statusRevertOk,
+            refundedCents: refundOk ? inner.shippingCostCents : 0,
+            shippoDetail,
+            ...(refundErr ? { refundErr } : {}),
+            ...(statusErr ? { statusErr } : {}),
           } as unknown as Prisma.InputJsonValue,
-        });
-      } catch (compensationErr) {
-        // Compensation itself failed — this is a hard operational
-        // problem that a human needs to look at. Log at ERROR level;
-        // the outer rethrow surfaces the ORIGINAL Shippo failure to
-        // the operator so they know something went wrong even if
-        // ops has to sort out the money manually.
-        this.logger.error(
-          {
-            msg: "selectRate: COMPENSATION FAILED after label-purchase failure — MANUAL RECONCILIATION REQUIRED",
-            orderId,
-            vendorId: inner.vendorId,
-            debitedCents: inner.shippingCostCents,
-            compensationErr:
-              compensationErr instanceof Error
-                ? compensationErr.message
-                : String(compensationErr),
-          },
-          compensationErr instanceof Error ? compensationErr.stack : undefined,
-        );
-      }
+        })
+        .catch(() => undefined);
+
+      // Compose an honest message. The Shippo reason ALWAYS leads so
+      // the operator understands the underlying refusal. Then a
+      // compensation-status trailer explains what state the order is
+      // in and what the operator should do next.
+      const head = `Label purchase refused for ${inner.carrier} ${inner.service}: ${shippoDetail}`;
+      const trailer =
+        refundOk && statusRevertOk
+          ? "Wallet has been refunded and the order is back to Awaiting shipping selection — pick a different rate and try again."
+          : refundOk && !statusRevertOk
+            ? "Wallet has been refunded, but the order status could not be reverted (state-machine rejected the transition — verify migration 0050 has been applied). Contact support to unstick the order before picking again."
+            : !refundOk && statusRevertOk
+              ? "Order status was reverted, but the wallet refund FAILED. DO NOT re-attempt — contact support IMMEDIATELY to reconcile the vendor's balance."
+              : "Both wallet refund and status revert FAILED. Order is stuck in SHIPPING_PAID with the vendor still charged. Contact support IMMEDIATELY.";
 
       throw new BadRequestException({
-        message: `Label purchase failed with ${inner.carrier} ${inner.service}. Wallet has been refunded; please pick a different rate and try again.`,
+        message: `${head}. ${trailer}`,
         code: "label_purchase_failed",
       });
     }
+
+    // ---- Phase 2b — Label was purchased. Persist LABEL_PURCHASED. ------
+    // From here on, the label EXISTS at the carrier. A failure of this
+    // block means "we bought a label but couldn't record it" — a
+    // reconciliation problem, NOT a compensation trigger.
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw(Prisma.sql`
+          UPDATE orders
+             SET status = 'LABEL_PURCHASED'::"OrderStatus",
+                 label_purchased_at = NOW(),
+                 tracking_number = ${label.trackingNumber},
+                 label_url = ${label.labelUrl},
+                 updated_at = NOW()
+           WHERE id = ${orderId}::uuid
+        `);
+      });
+    } catch (postWriteErr) {
+      const detail = this.extractErrorDetail(postWriteErr);
+      this.logger.error(
+        {
+          msg: "selectRate: CRITICAL — label was purchased but LABEL_PURCHASED write failed. Do NOT compensate; manual reconciliation required.",
+          orderId,
+          vendorId: inner.vendorId,
+          trackingNumber: label.trackingNumber,
+          labelUrl: label.labelUrl,
+          detail,
+        },
+        postWriteErr instanceof Error ? postWriteErr.stack : undefined,
+      );
+      // Best-effort audit so the tracking number is captured
+      // permanently even though the order row didn't update.
+      await this.audit
+        .log({
+          actorId,
+          action: "order.label_bought_state_stale",
+          resourceType: "order",
+          resourceId: orderId,
+          afterState: {
+            trackingNumber: label.trackingNumber,
+            labelUrl: label.labelUrl,
+            carrier: label.carrier,
+            service: label.service,
+            writeErr: detail,
+          } as unknown as Prisma.InputJsonValue,
+        })
+        .catch(() => undefined);
+      throw new InternalServerErrorException({
+        code: "label_bought_state_stale",
+        message: `Label was purchased successfully (tracking ${label.trackingNumber}) but the order status update failed [${detail}]. The vendor has been charged. Contact support with this correlation id so the order can be manually advanced.`,
+      });
+    }
+
+    await this.audit.log({
+      actorId,
+      action: "order.label_purchased",
+      resourceType: "order",
+      resourceId: orderId,
+      beforeState: { status: "SHIPPING_PAID" } as unknown as Prisma.InputJsonValue,
+      afterState: {
+        status: "LABEL_PURCHASED",
+        trackingNumber: label.trackingNumber,
+        labelUrl: label.labelUrl,
+        carrier: label.carrier,
+        service: label.service,
+      } as unknown as Prisma.InputJsonValue,
+    });
+
+    return {
+      outcome: "LABEL_PURCHASED" as const,
+      balanceAfterCents: inner.balanceAfterCents,
+      shippingCostCents: inner.shippingCostCents,
+      carrier: inner.carrier,
+      service: inner.service,
+      rateProviderRef: inner.rateProviderRef,
+      trackingNumber: label.trackingNumber,
+      labelUrl: label.labelUrl,
+    };
   }
 
   // =========================================================================
@@ -1414,6 +1515,43 @@ export class OrderPackService {
         code: "invalid_input",
       });
     }
+  }
+
+  /**
+   * Best-effort human-readable extract from an unknown thrown value.
+   *
+   * Nest HttpException subclasses expose a structured response object
+   * that usually carries the useful `message` field — reading it via
+   * `getResponse()` avoids the "[object Object]" that a naïve
+   * `String(err)` produces. Plain Errors fall through to `.message`.
+   * Anything else is stringified.
+   *
+   * Length-capped to keep an accidental multi-KB blob (Shippo
+   * occasionally returns a whole validation payload) from bloating
+   * the response body or the audit-log row.
+   */
+  private extractErrorDetail(err: unknown): string {
+    const MAX = 400;
+    let text: string;
+    if (
+      err !== null &&
+      typeof err === "object" &&
+      "getResponse" in err &&
+      typeof (err as { getResponse: () => unknown }).getResponse === "function"
+    ) {
+      const r = (err as { getResponse: () => unknown }).getResponse();
+      if (typeof r === "string") text = r;
+      else if (r !== null && typeof r === "object" && "message" in r) {
+        const m = (r as { message?: unknown }).message;
+        text = typeof m === "string" ? m : JSON.stringify(m);
+      } else text = JSON.stringify(r);
+    } else if (err instanceof Error) {
+      text = err.message;
+    } else {
+      text = String(err);
+    }
+    if (text.length > MAX) text = `${text.slice(0, MAX)}…`;
+    return text;
   }
 
   /**

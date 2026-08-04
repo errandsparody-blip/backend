@@ -22,6 +22,7 @@ import type { Order, OrderStatus, PrismaClient } from "@prisma/client";
 
 import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
+import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
 import { AuditService } from "../audit/audit.service";
 import { orderShippedTemplate } from "../email/email-templates";
 import { ShippoService } from "../integrations/shippo/shippo.service";
@@ -71,6 +72,12 @@ export class AdminOrderService {
     private readonly shippo: ShippoService,
     private readonly notifications: NotificationService,
     private readonly wallet: WalletService,
+    // Phase T1 — resolves a Shippo carrier template's friendly label
+    // for the admin order-detail projection (mirrors the vendor-side
+    // projection in OrderService.getById). Without it the admin sees
+    // "Custom (no preset)" for every packed order regardless of what
+    // the warehouse actually selected.
+    private readonly carrierRegistry: CarrierPackagingRegistryService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -264,16 +271,59 @@ export class AdminOrderService {
   }
 
   async get(id: string) {
+    // Cast through `unknown` — the Prisma client in the sandbox may
+    // not have `packagingOption` on the include yet (delegate not
+    // regenerated for migration 0043 in every env). In CI the include
+    // resolves; runtime Postgres returns the relation just fine.
+    const includeArg = {
+      lines: true,
+      events: { orderBy: { occurredAt: "asc" } },
+      vendor: { select: { id: true, businessName: true } },
+      packagingOption: true,
+    } as unknown as Parameters<typeof this.prisma.order.findUnique>[0]["include"];
+
     const order = await this.prisma.order.findUnique({
       where: { id },
-      include: {
-        lines: true,
-        events: { orderBy: { occurredAt: "asc" } },
-        vendor: { select: { id: true, businessName: true } },
-      },
+      include: includeArg,
     });
     if (!order) throw new NotFoundException();
-    return order;
+
+    // Phase T1 — Enrich the raw Prisma row with two computed fields
+    // the admin detail page requires but Prisma doesn't expose
+    // directly:
+    //
+    //   1. `packagingLabel` — friendly name of the box the operator
+    //      picked. Reads through, in order: the library preset's
+    //      label (if a preset was chosen), the Shippo carrier
+    //      template's registered label (Option A carrier picks), or
+    //      null for pure ad-hoc/custom packaging. Mirrors the
+    //      vendor-facing projection in OrderService.getById so the
+    //      admin and vendor see the same string.
+    //
+    //   2. `workflowVersion` — surfaced as a top-level number so the
+    //      admin frontend can branch the next-step panel on it (v2
+    //      orders finish differently than the legacy v1 ladder). The
+    //      Prisma cast is defensive against a sandbox client that
+    //      predates migration 0041's column add; runtime Postgres
+    //      always returns it (DB default = 1).
+    const raw = order as unknown as {
+      workflowVersion?: number;
+      parcelTemplate?: string | null;
+      packagingOption?: { label?: string | null } | null;
+    };
+    const packagingLabel =
+      raw.packagingOption?.label ??
+      (raw.parcelTemplate
+        ? this.carrierRegistry.getByTemplate(raw.parcelTemplate)?.label ??
+          null
+        : null);
+    const workflowVersion = raw.workflowVersion ?? 1;
+
+    return {
+      ...order,
+      packagingLabel,
+      workflowVersion,
+    };
   }
 
   // ---------------------------------------------------------------------------
