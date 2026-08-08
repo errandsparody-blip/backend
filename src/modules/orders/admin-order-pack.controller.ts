@@ -195,6 +195,24 @@ export class AdminOrderPackController {
     });
   }
 
+  /**
+   * Phase P-E — "Send back to pack queue". Regresses a packed-but-not-
+   * yet-shipped order to PENDING_PACKING so the operator can re-pack it
+   * with the full toolset on /admin/pack (packaging presets, carrier
+   * templates, barcode scan) instead of the old restrictive inline
+   * dims/weight editor. Callable only before the label is bought; the
+   * service enforces the guard and the migration-0051 whitelist lets
+   * the backwards status edge through the state-machine trigger.
+   */
+  @Post(":id/send-to-pack-queue")
+  @HttpCode(HttpStatus.OK)
+  sendToPackQueue(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.pack.sendToPackQueue(id, user.sub);
+  }
+
   @Post(":id/fetch-rates")
   @HttpCode(HttpStatus.OK)
   fetchRates(

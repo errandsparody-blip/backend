@@ -55,10 +55,12 @@ import {
 import { Prisma, type OrderStatus } from "@prisma/client";
 
 import { loadConfig } from "../../common/config";
+import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
 import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
 import { PackagingLibraryService } from "../../common/services/packaging-library.service";
 import { AuditService } from "../audit/audit.service";
+import { NotificationService } from "../notifications/notification.service";
 import {
   ShippoService,
   type LabelResponse,
@@ -219,6 +221,11 @@ export class OrderPackService {
     // (in Phase N4b) fills in the canonical dims when the operator
     // picked a carrier template directly.
     private readonly carrierRegistry: CarrierPackagingRegistryService,
+    // VENDOR_CARRIER hand-off — notifies the vendor when their own-carrier
+    // order is packed + handed off (parity with the legacy
+    // AdminOrderService.markHandedOff notification). NotificationModule
+    // is already imported by OrderModule.
+    private readonly notifications: NotificationService,
   ) {}
 
   // =========================================================================
@@ -295,7 +302,20 @@ export class OrderPackService {
         _count: { select: { lines: true } },
       },
     });
-    return rows.map((o) => ({
+    // Defensive exclusion: VENDOR_CARRIER ("use my own carrier") orders
+    // have no platform label to buy, so they must never appear in the
+    // rate picker. recordPack already diverts them straight to
+    // HANDED_OFF, so in normal operation none reach these statuses — but
+    // filter here too so any order left in PACKING_COMPLETED from before
+    // this fix can't strand an operator on the label-purchase screen.
+    // (fulfillmentMode is read via cast for the stale-Prisma-client
+    // pattern used elsewhere in this codebase.)
+    const visible = rows.filter(
+      (o) =>
+        (o as unknown as { fulfillmentMode?: string | null }).fulfillmentMode !==
+        "VENDOR_CARRIER",
+    );
+    return visible.map((o) => ({
       id: o.id,
       orderNumber: o.orderNumber,
       status: o.status,
@@ -447,9 +467,10 @@ export class OrderPackService {
           status: OrderStatus;
           workflow_version: number;
           packed_at: Date | null;
+          fulfillment_mode: string | null;
         }>
       >(Prisma.sql`
-        SELECT id, status, workflow_version, packed_at
+        SELECT id, status, workflow_version, packed_at, fulfillment_mode
         FROM orders
         WHERE id = ${orderId}::uuid
         FOR UPDATE
@@ -483,6 +504,89 @@ export class OrderPackService {
       const now = new Date();
       const notes = input.notes?.trim();
       const notesValue = notes && notes.length > 0 ? notes : null;
+
+      // VENDOR_CARRIER ("use my own carrier") — the vendor brought their
+      // own label; there is NO platform label to buy. Instead of
+      // sending the order into the rate picker (PACKING_COMPLETED), we
+      // record the pack dimensions AND complete the order in one step:
+      // status jumps straight to HANDED_OFF, mirroring the legacy
+      // AdminOrderService.markHandedOff bookkeeping (decrement reserved,
+      // mark lines shipped, write SHIP movements, stamp handed_off_at).
+      // The PENDING_PACKING → HANDED_OFF edge is a forward transition
+      // (ranks 1.5 → 7.5) so the state-machine trigger allows it.
+      if (locked.fulfillment_mode === "VENDOR_CARRIER") {
+        await tx.$executeRaw(Prisma.sql`
+          UPDATE orders
+             SET status = 'HANDED_OFF'::"OrderStatus",
+                 packed_length_in = ${effectiveLength},
+                 packed_width_in  = ${effectiveWidth},
+                 packed_height_in = ${effectiveHeight},
+                 packed_weight_oz = ${effectiveWeightOz},
+                 packed_at        = ${now},
+                 packed_by_user_id = ${actorId}::uuid,
+                 packing_notes    = ${notesValue},
+                 packaging_option_id = ${packagingOptionId ? Prisma.sql`${packagingOptionId}::uuid` : Prisma.sql`NULL`},
+                 parcel_template  = ${parcelTemplate ?? null},
+                 handed_off_at    = ${now},
+                 updated_at       = NOW()
+           WHERE id = ${orderId}::uuid
+        `);
+
+        // Inventory bookkeeping: the parcel has physically left the
+        // warehouse on the vendor's carrier. Decrement reserved and
+        // mark each line shipped, one SHIP movement per line — exactly
+        // as markHandedOff does. The wallet was already debited (the
+        // fulfillment fee) at submit; nothing further to charge.
+        const orderLines = await tx.orderLine.findMany({
+          where: { orderId },
+        });
+        for (const line of orderLines) {
+          await tx.sku.update({
+            where: { id: line.skuId },
+            data: { quantityReserved: { decrement: line.quantity } },
+          });
+          await tx.inventoryMovement.create({
+            data: {
+              vendorId: line.vendorId,
+              skuId: line.skuId,
+              type: "SHIP",
+              deltaAvailable: 0,
+              deltaReserved: -line.quantity,
+              referenceType: "order",
+              referenceId: orderId,
+              actorId,
+            },
+          });
+          await tx.orderLine.update({
+            where: { id: line.id },
+            data: { allocationStatus: "SHIPPED" },
+          });
+        }
+
+        await tx.orderEvent.create({
+          data: {
+            orderId,
+            type: "order.handed_off",
+            description: "Packed and handed to vendor's own carrier.",
+            source: "ADMIN",
+            actorId,
+          },
+        });
+
+        return {
+          orderId,
+          status: "HANDED_OFF" as OrderStatus,
+          packedLengthIn: effectiveLength,
+          packedWidthIn: effectiveWidth,
+          packedHeightIn: effectiveHeight,
+          packedWeightOz: effectiveWeightOz,
+          packedAt: now.toISOString(),
+          packedByUserId: actorId,
+          packingNotes: notesValue,
+          packagingOptionId,
+          parcelTemplate,
+        };
+      }
 
       // packagingOptionId / parcelTemplate are passed as either a
       // bound value (with a type cast when needed) or literal NULL.
@@ -601,14 +705,16 @@ export class OrderPackService {
       });
     }
 
+    const handedOff = result.status === ("HANDED_OFF" as OrderStatus);
+
     await this.audit.log({
       actorId,
-      action: "order.packed",
+      action: handedOff ? "order.packed_and_handed_off" : "order.packed",
       resourceType: "order",
       resourceId: orderId,
       beforeState: { status: "PENDING_PACKING" } as unknown as Prisma.InputJsonValue,
       afterState: {
-        status: "PACKING_COMPLETED",
+        status: result.status,
         packedLengthIn: result.packedLengthIn,
         packedWidthIn: result.packedWidthIn,
         packedHeightIn: result.packedHeightIn,
@@ -617,6 +723,54 @@ export class OrderPackService {
         parcelTemplate: result.parcelTemplate,
       } as unknown as Prisma.InputJsonValue,
     });
+
+    // VENDOR_CARRIER orders are complete at pack time — notify the vendor
+    // their order was handed to their carrier (parity with the legacy
+    // markHandedOff notification). Best-effort; a failure here must not
+    // undo the committed hand-off.
+    if (handedOff) {
+      try {
+        const order = await this.prisma.order.findUnique({
+          where: { id: orderId },
+          select: {
+            vendorId: true,
+            orderNumber: true,
+            carrier: true,
+            trackingNumber: true,
+          },
+        });
+        if (order) {
+          const vc = order as unknown as {
+            vendorCarrierName?: string | null;
+            vendorTrackingNumber?: string | null;
+          };
+          const carrierName =
+            vc.vendorCarrierName ?? order.carrier ?? "your carrier";
+          const tracking =
+            vc.vendorTrackingNumber ?? order.trackingNumber ?? null;
+          const ref = formatOrderRef(order.orderNumber);
+          await this.notifications.emit({
+            vendorId: order.vendorId,
+            type: "order.shipped",
+            severity: "INFO",
+            title: `Order ${ref} handed off`,
+            body: tracking
+              ? `Packed and handed to ${carrierName}. Tracking: ${tracking}.`
+              : `Packed and handed to ${carrierName}.`,
+            href: `/orders/${orderId}`,
+          });
+        }
+      } catch (err) {
+        this.logger.error(
+          {
+            msg: "recordPack: vendor-carrier hand-off notification failed",
+            orderId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          err instanceof Error ? err.stack : undefined,
+        );
+      }
+    }
 
     return result;
   }
@@ -853,6 +1007,142 @@ export class OrderPackService {
   }
 
   // =========================================================================
+  // WRITE — sendToPackQueue (regress to PENDING_PACKING)
+  // =========================================================================
+  //
+  // Sends a packed-but-not-yet-shipped order back to the full pack flow
+  // (/admin/pack) so the operator can re-pack with the complete toolset
+  // — packaging presets, carrier templates, barcode scan — rather than
+  // the restrictive dims/weight-only inline editor the rate picker used
+  // to offer.
+  //
+  // This is a BACKWARDS status transition, legalised by the whitelist in
+  // migration 0051:
+  //
+  //   PACKING_COMPLETED            → PENDING_PACKING
+  //   AWAITING_SHIPPING_SELECTION  → PENDING_PACKING
+  //   AWAITING_WALLET_FUNDING      → PENDING_PACKING
+  //
+  // Guards (mirroring updatePackDetails):
+  //   * workflow_version = 2 (legacy orders never enter this service).
+  //   * status ∈ the three editable pre-label statuses. Anything at or
+  //     past SHIPPING_PAID is refused — the wallet is already committed
+  //     to the carrier by then, so the pack details are frozen.
+  //   * Cached rate options are dropped: they were priced against the
+  //     old dimensions and are meaningless once the order re-enters the
+  //     pack loop. recordPack() will move it forward to
+  //     PACKING_COMPLETED again with fresh dims, and the operator
+  //     re-fetches rates from there.
+  // =========================================================================
+
+  async sendToPackQueue(
+    orderId: string,
+    actorId: string,
+  ): Promise<{ orderId: string; status: OrderStatus }> {
+    const exists = await this.prisma.order.findFirst({
+      where: { id: orderId },
+      select: { id: true },
+    });
+    if (!exists) throw new NotFoundException();
+
+    let fromStatus: OrderStatus;
+    try {
+      fromStatus = await this.prisma.$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw<
+          Array<{ id: string; status: OrderStatus; workflow_version: number }>
+        >(Prisma.sql`
+          SELECT id, status, workflow_version
+          FROM orders
+          WHERE id = ${orderId}::uuid
+          FOR UPDATE
+        `);
+        const locked = lockedRows[0];
+        if (!locked) throw new NotFoundException();
+
+        if (locked.workflow_version !== 2) {
+          throw new ConflictException({
+            message: "Legacy orders don't use the v2 pack flow.",
+            code: "order_wrong_workflow",
+          });
+        }
+
+        // Idempotency: already sitting in the pack queue — nothing to do.
+        if (locked.status === ("PENDING_PACKING" as OrderStatus)) {
+          return locked.status;
+        }
+
+        const regressible: OrderStatus[] = [
+          "PACKING_COMPLETED" as OrderStatus,
+          "AWAITING_SHIPPING_SELECTION" as OrderStatus,
+          "AWAITING_WALLET_FUNDING" as OrderStatus,
+        ];
+        if (!regressible.includes(locked.status)) {
+          throw new ConflictException({
+            message: `Order in status ${locked.status} cannot be sent back to the pack queue. The label has already been purchased.`,
+            code: "pack_queue_regress_locked",
+          });
+        }
+
+        // Drop cached rate options — they were priced against the old
+        // dims and no longer apply once the order re-enters the pack
+        // loop.
+        await tx.$executeRaw(Prisma.sql`
+          DELETE FROM order_shipping_rate_options
+          WHERE order_id = ${orderId}::uuid
+        `);
+
+        // Regress to PENDING_PACKING. The migration-0051 whitelist lets
+        // this specific backwards edge through the state-machine trigger.
+        await tx.$executeRaw(Prisma.sql`
+          UPDATE orders
+             SET status = 'PENDING_PACKING'::"OrderStatus",
+                 updated_at = NOW()
+           WHERE id = ${orderId}::uuid
+        `);
+
+        return locked.status;
+      });
+    } catch (err) {
+      if (
+        err instanceof ConflictException ||
+        err instanceof NotFoundException
+      ) {
+        throw err;
+      }
+      const prismaCode =
+        typeof err === "object" && err !== null && "code" in err
+          ? String((err as { code?: unknown }).code ?? "")
+          : "";
+      this.logger.error(
+        {
+          msg: "sendToPackQueue: raw SQL failure",
+          orderId,
+          prismaCode,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        err instanceof Error ? err.stack : undefined,
+      );
+      throw new BadRequestException({
+        message: `Could not send order back to the pack queue${prismaCode ? ` [prisma=${prismaCode}]` : ""}.`,
+        code: "pack_queue_regress_failed",
+      });
+    }
+
+    await this.audit.log({
+      actorId,
+      action: "order.sent_to_pack_queue",
+      resourceType: "order",
+      resourceId: orderId,
+      beforeState: { status: fromStatus } as unknown as Prisma.InputJsonValue,
+      afterState: {
+        status: "PENDING_PACKING",
+      } as unknown as Prisma.InputJsonValue,
+    });
+
+    return { orderId, status: "PENDING_PACKING" as OrderStatus };
+  }
+
+  // =========================================================================
   // WRITE — fetchRates
   // =========================================================================
 
@@ -872,6 +1162,21 @@ export class OrderPackService {
       throw new ConflictException({
         message: "Legacy orders do not use pack-time rate fetching.",
         code: "order_wrong_workflow",
+      });
+    }
+
+    // Defensive: VENDOR_CARRIER orders never buy a platform label, so
+    // there are no rates to fetch. recordPack already completes them at
+    // HANDED_OFF; this guard blocks a direct API call from routing one
+    // into the label-purchase path.
+    if (
+      (order as unknown as { fulfillmentMode?: string | null }).fulfillmentMode ===
+      "VENDOR_CARRIER"
+    ) {
+      throw new ConflictException({
+        message:
+          "This order uses the vendor's own carrier — there is no platform label to rate or buy.",
+        code: "order_vendor_carrier_no_label",
       });
     }
 
@@ -1071,9 +1376,10 @@ export class OrderPackService {
           status: OrderStatus;
           workflow_version: number;
           vendor_id: string;
+          fulfillment_mode: string | null;
         }>
       >(Prisma.sql`
-        SELECT id, status, workflow_version, vendor_id
+        SELECT id, status, workflow_version, vendor_id, fulfillment_mode
         FROM orders
         WHERE id = ${orderId}::uuid
         FOR UPDATE
@@ -1085,6 +1391,16 @@ export class OrderPackService {
         throw new ConflictException({
           message: "Legacy orders do not use pack-time rate selection.",
           code: "order_wrong_workflow",
+        });
+      }
+
+      // Defensive: VENDOR_CARRIER orders have no platform label to buy
+      // and must never reach a wallet debit for shipping.
+      if (locked.fulfillment_mode === "VENDOR_CARRIER") {
+        throw new ConflictException({
+          message:
+            "This order uses the vendor's own carrier — there is no platform label to buy.",
+          code: "order_vendor_carrier_no_label",
         });
       }
 

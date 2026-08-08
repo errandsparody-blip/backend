@@ -28,6 +28,7 @@
     "prisma:seed": "ts-node prisma/seed.ts",
     "dev:delete-user": "ts-node scripts/dev-delete-user.ts",
     "dev:wipe-vendor-data": "ts-node scripts/prod-wipe-vendor-data.ts",
+    "ops:backfill-vendor-carrier-handoff": "ts-node scripts/backfill-vendor-carrier-handoff.ts",
     "r2:cors": "ts-node scripts/r2-apply-cors.ts"
   },
   "prisma": {

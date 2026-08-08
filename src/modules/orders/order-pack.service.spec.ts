@@ -16,7 +16,11 @@
  *     404 (NotFoundException), never leaks existence to the caller.
  */
 
-import { BadRequestException, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from "@nestjs/common";
 import { Test, type TestingModule } from "@nestjs/testing";
 
 import { PrismaService } from "../../common/prisma.service";
@@ -24,6 +28,7 @@ import { CarrierPackagingRegistryService } from "../../common/services/carrier-p
 import { PackagingLibraryService } from "../../common/services/packaging-library.service";
 import { AuditService } from "../audit/audit.service";
 import { ShippoService } from "../integrations/shippo/shippo.service";
+import { NotificationService } from "../notifications/notification.service";
 import { WalletService } from "../wallet/wallet.service";
 
 import { OrderPackService } from "./order-pack.service";
@@ -66,6 +71,10 @@ describe("OrderPackService — pre-flight validation", () => {
       getByTemplate: jest.fn().mockReturnValue(undefined),
       isKnown: jest.fn().mockReturnValue(false),
     };
+    // VENDOR_CARRIER hand-off notification dep. These pre-flight tests
+    // never reach the notification path (they 404 or reject before any
+    // hand-off), so a no-op mock suffices.
+    const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -76,6 +85,7 @@ describe("OrderPackService — pre-flight validation", () => {
         { provide: ShippoService, useValue: shippo },
         { provide: PackagingLibraryService, useValue: packagingLibrary },
         { provide: CarrierPackagingRegistryService, useValue: carrierRegistry },
+        { provide: NotificationService, useValue: notifications },
       ],
     }).compile();
     svc = moduleRef.get(OrderPackService);
@@ -152,5 +162,30 @@ describe("OrderPackService — pre-flight validation", () => {
     await expect(
       svc.selectRate(ORDER_ID, ACTOR_ID, RATE_REF),
     ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it("fetchRates: refuses a VENDOR_CARRIER order (no platform label to rate)", async () => {
+    // Vendor-carrier orders bring their own label — they must never be
+    // routed into the platform rate/label path. The guard fires on the
+    // pre-flight read, before any transaction.
+    prisma.order.findFirst.mockResolvedValueOnce({
+      id: ORDER_ID,
+      status: "PACKING_COMPLETED",
+      workflowVersion: 2,
+      fulfillmentMode: "VENDOR_CARRIER",
+    } as never);
+    await expect(svc.fetchRates(ORDER_ID, ACTOR_ID)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+  });
+
+  it("sendToPackQueue: unknown order returns 404 (never confirms existence)", async () => {
+    // Pre-flight findFirst returns null (our fake) so the service must
+    // 404 before entering the transaction — same existence-hiding
+    // contract as recordPack.
+    await expect(
+      svc.sendToPackQueue(ORDER_ID, ACTOR_ID),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(prisma.order.findFirst).toHaveBeenCalledTimes(1);
   });
 });
