@@ -1435,8 +1435,10 @@ enum ReturnStatus {
   IN_TRANSIT
   RECEIVED
   INSPECTED
+  INSTRUCTED
   RESTOCKED
   DISPOSED
+  DONATED
   REJECTED
   CANCELLED
 }
@@ -1581,16 +1583,34 @@ model Return {
   status            ReturnStatus  @default(REQUESTED)
   reason            ReturnReason
 
-  // Inbound tracking back to warehouse.
+  // Inbound tracking back to warehouse. Vendor-supplied at creation
+  // (Returns v2 / migration 0052) — the customer pays return shipping,
+  // so USA Errands no longer buys an inbound label. inboundLabelUrl is
+  // retained for historical rows but no longer written.
   inboundTracking   String?       @map("inbound_tracking")
   inboundCarrier    String?       @map("inbound_carrier")
   inboundLabelUrl   String?       @map("inbound_label_url")
 
-  // Refund decision (cents). Computed at INSPECTED/RESTOCKED.
+  // Migration 0052 — vendor's expected inbound delivery date.
+  expectedDeliveryDate DateTime?  @map("expected_delivery_date") @db.Date
+
+  // Returns v2 money (migration 0052): USA Errands CHARGES the vendor a
+  // flat processing fee per return (the work of receiving + checking),
+  // plus any handling/shipping cost. There is NO product refund.
+  processingFeeCents Int          @default(0) @map("processing_fee_cents")
+  handlingCostCents  Int          @default(0) @map("handling_cost_cents")
+
+  // Legacy refund columns (pre-v2). No longer written; kept for the
+  // audit history of returns resolved under the old refund model.
   refundAmountCents Int           @default(0) @map("refund_amount_cents")
   restockFeeCents   Int           @default(0) @map("restock_fee_cents")
 
+  // Condition summary shared with the vendor at inspection.
   inspectorNotes    String?       @map("inspector_notes")
+
+  // Migration 0052 — photos USA Errands takes of the received items and
+  // shares with the vendor before asking for handling instructions.
+  receivedPhotoUrls String[]      @default([]) @map("received_photo_urls")
 
   // Migration 0018 — vendor-supplied evidence at RMA creation. Photos
   // of damage, screenshots of customer messages, etc. Stored as R2
@@ -1628,9 +1648,15 @@ model ReturnLine {
 
   requestedQty        Int      @map("requested_qty")
   receivedQty         Int      @default(0) @map("received_qty")
+  // Disposition split — set by the VENDOR's instructions (Returns v2)
+  // and applied by the admin at finalize. restocked returns to
+  // inventory; disposed/donated do not. damagedQty is retained from the
+  // pre-v2 model (no longer written; condition is captured in photos +
+  // inspector notes).
   restockedQty        Int      @default(0) @map("restocked_qty")
   damagedQty          Int      @default(0) @map("damaged_qty")
   disposedQty         Int      @default(0) @map("disposed_qty")
+  donatedQty          Int      @default(0) @map("donated_qty")
 
   notes               String?
 

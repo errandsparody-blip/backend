@@ -68,6 +68,28 @@ describe("parseUsAddress", () => {
     expect(r.postalCode).toBe("");
   });
 
+  it("parses a multi-line paste with the state on its own line (reported case)", () => {
+    const pasted = "2201 Tucker lane \nApt B8\nGwynn oak \nMaryland \n21207";
+    expect(parseUsAddress(pasted)).toEqual({
+      line1: "2201 Tucker lane",
+      line2: "Apt B8",
+      city: "Gwynn oak",
+      state: "MD",
+      postalCode: "21207",
+      country: "US",
+      phone: null,
+    });
+  });
+
+  it("parses a multi-line paste with 'City, ST ZIP' on the last line", () => {
+    const r = parseUsAddress("2201 Tucker Lane\nApt B8\nGwynn Oak, MD 21207");
+    expect(r.line1).toBe("2201 Tucker Lane");
+    expect(r.line2).toBe("Apt B8");
+    expect(r.city).toBe("Gwynn Oak");
+    expect(r.state).toBe("MD");
+    expect(r.postalCode).toBe("21207");
+  });
+
   it("returns all-blank for empty input", () => {
     expect(parseUsAddress("   ")).toEqual({
       line1: "",

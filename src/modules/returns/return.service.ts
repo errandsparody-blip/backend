@@ -33,13 +33,14 @@ import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
 import type {
   CreateReturnInput,
+  FinalizeReturnInput,
   InspectReturnInput,
+  InstructReturnInput,
   ListReturnsInput,
   ReceiveReturnInput,
 } from "../../common/schemas/return.schema";
 import { AuditService } from "../audit/audit.service";
-import { returnAuthorizedTemplate, returnRefundedTemplate } from "../email/email-templates";
-import { ShippoService } from "../integrations/shippo/shippo.service";
+import { returnAuthorizedTemplate } from "../email/email-templates";
 import { NotificationService } from "../notifications/notification.service";
 import { WalletService } from "../wallet/wallet.service";
 
@@ -51,7 +52,6 @@ export class ReturnService {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly wallet: WalletService,
-    private readonly shippo: ShippoService,
     private readonly notifications: NotificationService,
   ) {}
 
@@ -66,31 +66,38 @@ export class ReturnService {
       include: { lines: true },
     });
     if (!order) throw new NotFoundException("Order not found.");
-    if (!["DELIVERED", "EXCEPTION"].includes(order.status)) {
+
+    // Eligibility is mode-aware.
+    //   * PLATFORM_SHIP: USA Errands bought the Shippo label, so we get a
+    //     real delivery signal — require DELIVERED (or EXCEPTION for a
+    //     delivery problem). A customer can't return a package that
+    //     hasn't arrived.
+    //   * VENDOR_CARRIER ("own label"): there is NO Shippo tracking for
+    //     these, so we never observe delivery. HANDED_OFF (packed +
+    //     shipped on the vendor's carrier) is the earliest sane point to
+    //     allow a return; the vendor/customer judges actual receipt.
+    const vc = order as unknown as {
+      fulfillmentMode?: string | null;
+      handedOffAt?: Date | null;
+    };
+    const isVendorCarrier = vc.fulfillmentMode === "VENDOR_CARRIER";
+    const returnableStatuses = isVendorCarrier
+      ? ["HANDED_OFF", "DELIVERED", "EXCEPTION"]
+      : ["DELIVERED", "EXCEPTION"];
+    if (!returnableStatuses.includes(order.status)) {
       throw new ConflictException({
-        message: `Returns can only be created for delivered orders. Current status: ${order.status}.`,
+        message: isVendorCarrier
+          ? `Returns can be opened once an order has been handed to your carrier. Current status: ${order.status}.`
+          : `Returns can only be created for delivered orders. Current status: ${order.status}.`,
         code: "return_order_not_returnable",
       });
     }
 
-    // Migration 0018 — enforce the configurable return window. Vendors
-    // can't open an RMA against an order delivered more than N days
-    // ago. Mirrors the public-facing 30-day FBA-style policy. The
-    // window is stored as a configuration row so admins can tune it
-    // without a deploy.
-    const windowDays = await this.loadReturnWindowDays();
-    if (order.deliveredAt) {
-      const ageMs = Date.now() - order.deliveredAt.getTime();
-      const ageDays = ageMs / (1000 * 60 * 60 * 24);
-      if (ageDays > windowDays) {
-        throw new ConflictException({
-          message: `This order was delivered ${Math.floor(ageDays)} days ago. Returns must be opened within ${windowDays} days of delivery.`,
-          code: "return_outside_window",
-          windowDays,
-          deliveredAt: order.deliveredAt.toISOString(),
-        });
-      }
-    }
+    // NOTE (Returns v2): there is intentionally NO platform-enforced
+    // return time window. The age limit is the vendor's own policy, not
+    // USA Errands' — a return may be opened whenever, regardless of how
+    // old the order is. (The returns_window_days config row is retained
+    // but no longer consulted.)
 
     // Validate every requested line: must belong to the order, requestedQty ≤ ordered qty.
     const linesById = new Map(order.lines.map((l) => [l.id, l]));
@@ -112,23 +119,30 @@ export class ReturnService {
 
     const rmaCode = this.generateRmaCode();
 
-    // Create return + lines + inbound label in a single transaction.
-    // The `attachmentUrls` field exists in the DB (migration 0018) but
-    // not in the stale generated Prisma client checked into the repo.
-    // Cast through `unknown` to bypass — Railway's `prisma generate`
-    // step on the next deploy aligns the two.
+    // Create the return + lines in a single transaction. Status starts
+    // at REQUESTED ("a return is on its way"). The customer ships the
+    // return themselves, so we record the vendor-supplied inbound
+    // tracking + expected delivery date and do NOT buy a label.
+    //
+    // New columns (inbound tracking / expected date / attachments) live
+    // in the DB but the checked-in Prisma client may lag the migration,
+    // so the create payload is cast through `unknown` — Railway's
+    // `prisma generate` on deploy aligns the two.
     const created = await this.prisma.$transaction(async (tx) => {
       const ret = await tx.return.create({
         data: {
           vendorId,
           orderId: order.id,
           rmaCode,
-          status: "AUTHORIZED",
+          status: "REQUESTED",
           reason: input.reason,
           createdBy: actorId,
-          authorizedAt: new Date(),
-          // Migration 0018 — vendor-supplied photo evidence.
-          ...({ attachmentUrls: input.attachmentUrls ?? [] } as Record<string, unknown>),
+          ...({
+            inboundCarrier: input.inboundCarrier ?? null,
+            inboundTracking: input.inboundTracking,
+            expectedDeliveryDate: input.expectedDeliveryDate,
+            attachmentUrls: input.attachmentUrls ?? [],
+          } as Record<string, unknown>),
           lines: {
             create: input.lines.map((l) => ({
               orderLineId: l.orderLineId,
@@ -147,61 +161,42 @@ export class ReturnService {
       action: "return.created",
       resourceType: "return",
       resourceId: created.id,
-      afterState: { rmaCode, orderId: order.id, lineCount: input.lines.length, reason: input.reason },
+      afterState: {
+        rmaCode,
+        orderId: order.id,
+        lineCount: input.lines.length,
+        reason: input.reason,
+        inboundTracking: input.inboundTracking,
+      },
     });
 
-    // Inbound label is best-effort — if the carrier API fails, the RMA still
-    // exists in AUTHORIZED state and an admin can attach the label later.
-    try {
-      const label = await this.shippo.purchaseLabel({
-        shipmentId: order.rateProviderRef ?? `inbound_${created.id}`,
-        rateId: order.ratePurchasedRef ?? `inbound_rate_${created.id}`,
-      });
-      await this.prisma.return.update({
-        where: { id: created.id },
-        data: {
-          inboundCarrier: label.carrier,
-          inboundTracking: label.trackingNumber,
-          inboundLabelUrl: label.labelUrl,
-        },
-      });
-    } catch {
-      // Swallow — admin will retry from the admin UI.
-    }
-
-    const finalRet = await this.prisma.return.findUniqueOrThrow({
-      where: { id: created.id },
-      include: { lines: true },
-    });
-
-    // Notify vendor + send the RMA-authorized email. After-tx, best-effort.
-    // Pass the Shippo-hosted label URL too so the email's CTA goes
-    // straight to the printable PDF — saves the vendor a portal hop
-    // before forwarding it to their customer.
+    // Notify the vendor + email that the return was registered and is on
+    // its way to us. After-tx, best-effort.
     const tpl = returnAuthorizedTemplate({
-      rmaCode: finalRet.rmaCode,
+      rmaCode: created.rmaCode,
       orderRef: formatOrderRef(order.orderNumber),
-      trackingNumber: finalRet.inboundTracking,
-      inboundLabelUrl: finalRet.inboundLabelUrl,
+      trackingNumber: input.inboundTracking,
+      inboundLabelUrl: null,
     });
     await this.notifications.emit({
       vendorId,
-      type: "return.authorized",
+      type: "return.requested",
       severity: "INFO",
-      title: `Return ${finalRet.rmaCode} authorised`,
-      body: finalRet.inboundTracking
-        ? `Inbound tracking: ${finalRet.inboundTracking}. We'll inspect on arrival.`
-        : "We'll attach an inbound label shortly. The customer will be notified.",
+      title: `Return ${created.rmaCode} registered`,
+      body: `We'll expect it via ${input.inboundCarrier ?? "your carrier"} (tracking ${input.inboundTracking}) and inspect it on arrival.`,
       href: "/returns",
       email: { subject: tpl.subject, html: tpl.html, text: tpl.text },
     });
 
-    return finalRet;
+    return created;
   }
 
   async list(vendorId: string, input: ListReturnsInput) {
     const where: Prisma.ReturnWhereInput = { vendorId };
-    if (input.status) where.status = input.status;
+    // Cast for the stale Prisma client: the enum union in the Zod schema
+    // includes INSTRUCTED/DONATED before the generated client is
+    // regenerated on deploy.
+    if (input.status) where.status = input.status as unknown as ReturnStatus;
 
     const items = await this.prisma.return.findMany({
       where,
@@ -259,7 +254,7 @@ export class ReturnService {
   async adminReceive(actorId: string, id: string, input: ReceiveReturnInput) {
     return this.prisma.$transaction(async (tx) => {
       const ret = await this.lockReturn(tx, id);
-      if (!["AUTHORIZED", "IN_TRANSIT"].includes(ret.status)) {
+      if (!["REQUESTED", "AUTHORIZED", "IN_TRANSIT"].includes(ret.status)) {
         throw new ConflictException({
           message: `Cannot receive a return in ${ret.status}.`,
           code: "return_not_receivable",
@@ -301,107 +296,299 @@ export class ReturnService {
     });
   }
 
+  /**
+   * Admin inspection (Returns v2). Records the CONDITION of the received
+   * items and the PHOTOS USA Errands took, then moves the return to
+   * INSPECTED and asks the vendor for handling instructions. It does NOT
+   * decide disposition and moves no money — the vendor instructs next
+   * (submitInstructions) and the fee is charged at finalize.
+   */
   async adminInspect(actorId: string, id: string, input: InspectReturnInput) {
     const result = await this.prisma.$transaction(async (tx) => {
       const ret = await this.lockReturn(tx, id);
       if (ret.status !== "RECEIVED") {
         throw new ConflictException({
-          message: `Cannot inspect a return in ${ret.status}.`,
+          message: `Cannot inspect a return in ${ret.status}. Expected RECEIVED.`,
           code: "return_not_inspectable",
         });
       }
 
-      // Validate the disposition split per line.
+      // Persist photos + condition and advance to INSPECTED. New columns
+      // (received_photo_urls) are written via a cast payload for the
+      // stale-client pattern; INSPECTED is an existing enum value.
+      const updated = await tx.return.update({
+        where: { id },
+        data: {
+          status: "INSPECTED",
+          inspectorNotes: input.conditionNotes,
+          inspectedAt: new Date(),
+          ...({ receivedPhotoUrls: input.receivedPhotoUrls } as Record<string, unknown>),
+        } as unknown as Prisma.ReturnUpdateInput,
+        include: { lines: true },
+      });
+
+      await this.audit.log({
+        actorId,
+        action: "return.inspected",
+        resourceType: "return",
+        resourceId: id,
+        afterState: {
+          status: "INSPECTED",
+          photoCount: input.receivedPhotoUrls.length,
+        },
+      });
+
+      return { updated, vendorId: ret.vendorId, rmaCode: ret.rmaCode };
+    });
+
+    // Notify the vendor that condition + photos are ready and we need
+    // their handling instructions. Best-effort, after-tx.
+    await this.notifications.emit({
+      vendorId: result.vendorId,
+      type: "return.inspected",
+      severity: "INFO",
+      title: `Return ${result.rmaCode} inspected — your instructions needed`,
+      body: "We've inspected the returned items and shared photos. Tell us how to handle each item: restock, dispose, or donate.",
+      href: `/returns/${result.updated.id}`,
+    });
+
+    return result.updated;
+  }
+
+  /**
+   * Vendor disposition instructions (Returns v2). The vendor tells us,
+   * per line, how to handle the received units — restock / dispose /
+   * donate — with the three quantities summing to the received quantity.
+   * Records the split on the lines and advances to INSTRUCTED. No
+   * inventory or money moves yet; the admin applies it at finalize.
+   */
+  async submitInstructions(
+    vendorId: string,
+    actorId: string,
+    id: string,
+    input: InstructReturnInput,
+  ) {
+    // Tenant-scoped existence check before the lock.
+    const owned = await this.prisma.return.findFirst({
+      where: { id, vendorId },
+      select: { id: true },
+    });
+    if (!owned) throw new NotFoundException();
+
+    return this.prisma.$transaction(async (tx) => {
+      const ret = await this.lockReturn(tx, id);
+      if (ret.vendorId !== vendorId) throw new NotFoundException();
+      if (ret.status !== "INSPECTED") {
+        throw new ConflictException({
+          message: `Instructions can only be given once a return is INSPECTED. Current status: ${ret.status}.`,
+          code: "return_not_instructable",
+        });
+      }
+
       const lines = await tx.returnLine.findMany({ where: { returnId: id } });
       const linesById = new Map(lines.map((l) => [l.id, l]));
+
+      // Every received line must be instructed exactly (split == received).
+      const instructedIds = new Set(input.lines.map((l) => l.returnLineId));
+      for (const line of lines) {
+        if (line.receivedQty > 0 && !instructedIds.has(line.id)) {
+          throw new BadRequestException({
+            message: `Line ${line.id} has received units but no handling instruction.`,
+            code: "return_line_uninstructed",
+          });
+        }
+      }
 
       for (const r of input.lines) {
         const line = linesById.get(r.returnLineId);
         if (!line) {
-          throw new BadRequestException(`Return line ${r.returnLineId} is not part of this return.`);
-        }
-        const split = r.restockedQty + r.damagedQty + r.disposedQty;
-        if (split > line.receivedQty) {
           throw new BadRequestException({
-            message: `Disposition split (${split}) exceeds received (${line.receivedQty}) on line ${r.returnLineId}.`,
-            code: "return_disposition_exceeds_received",
+            message: `Return line ${r.returnLineId} is not part of this return.`,
+            code: "return_invalid_line",
           });
         }
+        const split = r.restockQty + r.disposeQty + r.donateQty;
+        if (split !== line.receivedQty) {
+          throw new BadRequestException({
+            message: `Instruction for line ${r.returnLineId} must account for all ${line.receivedQty} received unit(s) (got ${split}).`,
+            code: "return_instruction_mismatch",
+          });
+        }
+        // Store the vendor's chosen split on restocked/disposed/donated.
+        // donatedQty is a new column → cast payload.
         await tx.returnLine.update({
           where: { id: r.returnLineId },
           data: {
-            restockedQty: r.restockedQty,
-            damagedQty: r.damagedQty,
-            disposedQty: r.disposedQty,
-            ...(r.notes !== undefined ? { notes: r.notes } : {}),
-          },
+            restockedQty: r.restockQty,
+            disposedQty: r.disposeQty,
+            ...({ donatedQty: r.donateQty } as Record<string, unknown>),
+          } as unknown as Prisma.ReturnLineUpdateInput,
         });
+      }
 
-        // Restock — increment SKU available + write inventory movement.
-        if (r.restockedQty > 0) {
+      // Advance to INSTRUCTED (new enum value → cast).
+      const updated = await tx.return.update({
+        where: { id },
+        data: { status: "INSTRUCTED" as unknown as ReturnStatus },
+        include: { lines: true },
+      });
+
+      await this.audit.log({
+        actorId,
+        action: "return.instructed",
+        resourceType: "return",
+        resourceId: id,
+        afterState: { status: "INSTRUCTED" },
+      });
+
+      return updated;
+    });
+  }
+
+  /**
+   * Admin finalize (Returns v2). Applies the vendor's disposition:
+   * restocked units go back to inventory; disposed/donated do not. Then
+   * CHARGES the vendor the flat processing fee (config) plus any handling
+   * cost — there is NO refund. The parent order flips to RETURNED.
+   *
+   * If the vendor hasn't instructed yet, finalize is blocked UNLESS a
+   * `disposalOverrideReason` is supplied (legal/safety disposal), in
+   * which case all received units are disposed.
+   */
+  async finalize(actorId: string, id: string, input: FinalizeReturnInput) {
+    const feeCents = await this.loadProcessingFeeCents();
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      const ret = await this.lockReturn(tx, id);
+
+      const isOverride = !!input.disposalOverrideReason;
+      const allowed = isOverride
+        ? ["RECEIVED", "INSPECTED", "INSTRUCTED"]
+        : ["INSTRUCTED"];
+      if (!allowed.includes(ret.status)) {
+        throw new ConflictException({
+          message: isOverride
+            ? `Cannot finalize a return in ${ret.status}.`
+            : `A return needs the vendor's instructions before it can be finalized. Current status: ${ret.status}.`,
+          code: "return_not_finalizable",
+        });
+      }
+
+      const lines = await tx.returnLine.findMany({ where: { returnId: id } });
+
+      let totalRestocked = 0;
+      let totalDonated = 0;
+      let totalDisposed = 0;
+
+      for (const line of lines) {
+        const lc = line as unknown as { donatedQty?: number };
+        // On the legal/safety override path, dispose everything received.
+        const restock = isOverride ? 0 : line.restockedQty;
+        const donate = isOverride ? 0 : lc.donatedQty ?? 0;
+        const dispose = isOverride ? line.receivedQty : line.disposedQty;
+
+        if (isOverride) {
+          await tx.returnLine.update({
+            where: { id: line.id },
+            data: {
+              restockedQty: 0,
+              disposedQty: line.receivedQty,
+              ...({ donatedQty: 0 } as Record<string, unknown>),
+            } as unknown as Prisma.ReturnLineUpdateInput,
+          });
+        }
+
+        // Only restocked units return to available inventory.
+        if (restock > 0) {
           await tx.sku.update({
             where: { id: line.skuId },
-            data: { quantityAvailable: { increment: r.restockedQty } },
+            data: { quantityAvailable: { increment: restock } },
           });
           await tx.inventoryMovement.create({
             data: {
               vendorId: ret.vendorId,
               skuId: line.skuId,
               type: "RETURN",
-              deltaAvailable: r.restockedQty,
+              deltaAvailable: restock,
               deltaReserved: 0,
               referenceType: "return",
               referenceId: id,
               actorId,
+              reason: `Return ${ret.rmaCode} restock`,
             },
           });
         }
+
+        totalRestocked += restock;
+        totalDonated += donate;
+        totalDisposed += dispose;
       }
 
-      // Refund the wallet (net of restock fee).
-      const netRefund = Math.max(0, input.refundAmountCents - input.restockFeeCents);
-      if (netRefund > 0) {
-        await this.wallet.credit(
+      // Charge the vendor: flat processing fee + any handling cost. This
+      // is the money for the WORK of receiving + checking — never a
+      // refund. wallet.debit throws insufficient_funds if the wallet
+      // can't cover it, rolling back the whole finalize (admin asks the
+      // vendor to top up). Both debits compose in this transaction.
+      const walletTx = tx as unknown as Parameters<typeof this.wallet.debit>[1];
+      if (feeCents > 0) {
+        await this.wallet.debit(
           {
             vendorId: ret.vendorId,
-            amountCents: netRefund,
-            type: "REVERSAL",
-            description: `Return refund for ${ret.rmaCode}`,
+            amountCents: feeCents,
+            type: "RETURN",
+            description: `Return processing fee — ${ret.rmaCode}`,
             referenceType: "return",
             referenceId: id,
             actorId,
           },
-          tx as unknown as Parameters<typeof this.wallet.credit>[1],
+          walletTx,
+        );
+      }
+      if (input.handlingCostCents > 0) {
+        await this.wallet.debit(
+          {
+            vendorId: ret.vendorId,
+            amountCents: input.handlingCostCents,
+            type: "RETURN",
+            description: `Return handling cost — ${ret.rmaCode}`,
+            referenceType: "return",
+            referenceId: id,
+            actorId,
+          },
+          walletTx,
         );
       }
 
-      // Determine terminal status.
-      const totalRestocked = input.lines.reduce((s, l) => s + l.restockedQty, 0);
-      const next: ReturnStatus = totalRestocked > 0 ? "RESTOCKED" : "DISPOSED";
+      // Terminal status: restocked wins, else donated, else disposed.
+      const next: ReturnStatus = (
+        totalRestocked > 0 ? "RESTOCKED" : totalDonated > 0 ? "DONATED" : "DISPOSED"
+      ) as ReturnStatus;
 
       const updated = await tx.return.update({
         where: { id },
         data: {
           status: next,
-          refundAmountCents: input.refundAmountCents,
-          restockFeeCents: input.restockFeeCents,
-          inspectorNotes: input.inspectorNotes ?? null,
-          inspectedAt: new Date(),
           resolvedAt: new Date(),
-        },
+          ...({
+            processingFeeCents: feeCents,
+            handlingCostCents: input.handlingCostCents,
+            ...(isOverride
+              ? { inspectorNotes: `Legal/safety disposal: ${input.disposalOverrideReason}` }
+              : {}),
+          } as Record<string, unknown>),
+        } as unknown as Prisma.ReturnUpdateInput,
         include: { lines: true },
       });
 
-      // Mark order as RETURNED on the parent order so the vendor sees it.
-      // Skipping any orders that are CANCELLED — those cannot transition.
+      // Flip the parent order to RETURNED (from DELIVERED or HANDED_OFF).
       const order = await tx.order.findUnique({ where: { id: ret.orderId } });
-      if (order && order.status === "DELIVERED") {
+      if (order && (order.status === "DELIVERED" || order.status === "HANDED_OFF")) {
         await tx.order.update({ where: { id: order.id }, data: { status: "RETURNED" } });
         await tx.orderEvent.create({
           data: {
             orderId: order.id,
             type: "order.returned",
-            description: `Return ${ret.rmaCode} resolved (${next}).`,
+            description: `Return ${ret.rmaCode} finalized (${next}).`,
             source: "ADMIN",
             actorId,
           },
@@ -410,44 +597,53 @@ export class ReturnService {
 
       await this.audit.log({
         actorId,
-        action: "return.inspected",
+        action: "return.finalized",
         resourceType: "return",
         resourceId: id,
         afterState: {
           status: next,
-          refundAmountCents: input.refundAmountCents,
-          restockFeeCents: input.restockFeeCents,
+          processingFeeCents: feeCents,
+          handlingCostCents: input.handlingCostCents,
+          totalRestocked,
+          totalDonated,
+          totalDisposed,
+          override: isOverride,
         },
       });
 
-      return { updated, vendorId: ret.vendorId, netRefund };
+      return { updated, vendorId: ret.vendorId, rmaCode: ret.rmaCode, feeCents, next };
     });
 
-    // After-tx side-effect: notify the vendor + email parity. Errors here
-    // do NOT roll back the inspection.
-    if (result.netRefund > 0) {
-      const wallet = await this.prisma.wallet.findUnique({ where: { vendorId: result.vendorId } });
-      const tpl = returnRefundedTemplate({
-        rmaCode: result.updated.rmaCode,
-        netRefundCents: result.netRefund,
-        balanceAfterCents: wallet?.balanceCents ?? 0,
-      });
-      await this.notifications.emit({
-        vendorId: result.vendorId,
-        type: "return.refunded",
-        severity: "SUCCESS",
-        title: `Return ${result.updated.rmaCode} refunded`,
-        body: `$${(result.netRefund / 100).toFixed(2)} added back to your wallet.`,
-        href: "/wallet",
-        email: { subject: tpl.subject, html: tpl.html, text: tpl.text },
-      });
-    }
+    // Notify the vendor of the outcome + charge. No refund is ever sent.
+    const totalCharged = result.feeCents + input.handlingCostCents;
+    await this.notifications.emit({
+      vendorId: result.vendorId,
+      type: "return.finalized",
+      severity: "INFO",
+      title: `Return ${result.rmaCode} finalized (${result.next})`,
+      body: `Processing complete. $${(totalCharged / 100).toFixed(2)} charged to your wallet for handling this return.`,
+      href: `/returns/${result.updated.id}`,
+    });
+
     return result.updated;
+  }
+
+  /** Admin single-return read (cross-vendor; RBAC is the boundary). */
+  async adminGet(id: string) {
+    const ret = await this.prisma.return.findFirst({
+      where: { id },
+      include: { lines: true },
+    });
+    if (!ret) throw new NotFoundException();
+    return ret;
   }
 
   async adminList(input: ListReturnsInput) {
     const where: Prisma.ReturnWhereInput = {};
-    if (input.status) where.status = input.status;
+    // Cast for the stale Prisma client: the enum union in the Zod schema
+    // includes INSTRUCTED/DONATED before the generated client is
+    // regenerated on deploy.
+    if (input.status) where.status = input.status as unknown as ReturnStatus;
     if (input.from || input.to) {
       where.createdAt = {
         ...(input.from ? { gte: input.from } : {}),
@@ -520,6 +716,38 @@ export class ReturnService {
     } catch {
       // Defensive: a config-table outage shouldn't block returns.
       // Fall back to the safer 30-day default.
+      return FALLBACK;
+    }
+  }
+
+  /**
+   * Public accessor for the processing fee (cents) so the admin UI can
+   * show the exact charge in the finalize preview rather than a
+   * hard-coded default.
+   */
+  async getProcessingFeeCents(): Promise<number> {
+    return this.loadProcessingFeeCents();
+  }
+
+  /**
+   * Read the return processing fee (cents) from the configuration table.
+   * Defaults to 250 ($2.50 per policy) when the row is absent or invalid.
+   * A config-table outage must never silently drop the fee to zero, so
+   * the fallback is the policy default, not 0.
+   */
+  private async loadProcessingFeeCents(): Promise<number> {
+    const FALLBACK = 250;
+    const MAX = 100_000; // sanity ceiling ($1,000)
+    try {
+      const row = await this.prisma.configuration.findUnique({
+        where: { key: "returns_processing_fee_cents" },
+      });
+      if (!row) return FALLBACK;
+      const value = row.value as unknown;
+      const cents = typeof value === "number" ? value : Number(value);
+      if (!Number.isInteger(cents) || cents < 0 || cents > MAX) return FALLBACK;
+      return cents;
+    } catch {
       return FALLBACK;
     }
   }

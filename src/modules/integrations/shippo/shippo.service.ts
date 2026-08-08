@@ -36,7 +36,7 @@
 import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { timingSafeEqual } from "node:crypto";
 
-import { parseUsAddress } from "../../../common/address-parse";
+import { parseUsAddress, toStateAbbr } from "../../../common/address-parse";
 import { loadConfig } from "../../../common/config";
 
 // =============================================================================
@@ -808,11 +808,15 @@ export class ShippoService {
         "GET",
         `/v2/addresses/parse?address=${encodeURIComponent(trimmed)}`,
       );
+      const rawState = (parsed.state_province ?? "").trim();
       const fromShippo: ParsedAddress = {
         line1: parsed.address_line_1?.trim() ?? "",
         line2: parsed.address_line_2?.trim() || null,
         city: parsed.city_locality?.trim() ?? "",
-        state: (parsed.state_province ?? "").trim().toUpperCase(),
+        // Normalise to a 2-letter code so it matches the state <select>
+        // on the form. Shippo may return a full name ("Maryland") or a
+        // code; both map to "MD". Unknown values fall back to uppercase.
+        state: toStateAbbr(rawState) ?? rawState.toUpperCase(),
         postalCode: parsed.postal_code?.trim() ?? "",
         country: (parsed.country_code ?? "US").trim().toUpperCase() || "US",
         phone: parsed.phone?.trim() || null,

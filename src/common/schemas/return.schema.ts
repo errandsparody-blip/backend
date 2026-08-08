@@ -23,8 +23,10 @@ export const RETURN_STATUS = [
   "IN_TRANSIT",
   "RECEIVED",
   "INSPECTED",
+  "INSTRUCTED",
   "RESTOCKED",
   "DISPOSED",
+  "DONATED",
   "REJECTED",
   "CANCELLED",
 ] as const;
@@ -44,6 +46,18 @@ export const createReturnSchema = z.object({
   orderId: z.string().uuid(),
   reason: z.enum(RETURN_REASON),
   lines: z.array(createReturnLineSchema).min(1).max(50),
+  // Returns v2 — the customer ships the return on their own dime, so
+  // the vendor supplies the inbound TRACKING and an EXPECTED DELIVERY
+  // DATE at creation. USA Errands does not buy an inbound label.
+  inboundCarrier: z.string().trim().min(1).max(60).optional(),
+  inboundTracking: z
+    .string()
+    .trim()
+    .min(1, "Return tracking number is required.")
+    .max(128),
+  expectedDeliveryDate: z.coerce.date({
+    errorMap: () => ({ message: "Provide the expected delivery date." }),
+  }),
   // Migration 0018 — optional photo / screenshot evidence the vendor
   // attaches at RMA-creation time. Capped at 5 to keep R2 + the
   // inspector UI sane. Each URL is a public R2 link returned by the
@@ -55,6 +69,28 @@ export const createReturnSchema = z.object({
     .default([]),
 });
 export type CreateReturnInput = z.infer<typeof createReturnSchema>;
+
+// ---------------------------------------------------------------------------
+// Vendor — disposition instructions (Returns v2)
+// ---------------------------------------------------------------------------
+//
+// After USA Errands inspects and shares photos, the vendor tells us how
+// to handle each received line: restock / dispose / donate. The three
+// quantities must sum to the received quantity for that line (validated
+// against the DB in the service).
+
+export const instructReturnLineSchema = z.object({
+  returnLineId: z.string().uuid(),
+  restockQty: z.number().int().nonnegative().max(10_000).default(0),
+  disposeQty: z.number().int().nonnegative().max(10_000).default(0),
+  donateQty: z.number().int().nonnegative().max(10_000).default(0),
+});
+export type InstructReturnLineInput = z.infer<typeof instructReturnLineSchema>;
+
+export const instructReturnSchema = z.object({
+  lines: z.array(instructReturnLineSchema).min(1),
+});
+export type InstructReturnInput = z.infer<typeof instructReturnSchema>;
 
 export const listReturnsSchema = z.object({
   status: z.enum(RETURN_STATUS).optional(),
@@ -119,20 +155,35 @@ export const receiveReturnSchema = z.object({
 });
 export type ReceiveReturnInput = z.infer<typeof receiveReturnSchema>;
 
-export const inspectReturnLineSchema = z
-  .object({
-    returnLineId: z.string().uuid(),
-    restockedQty: z.number().int().nonnegative().max(10_000).default(0),
-    damagedQty: z.number().int().nonnegative().max(10_000).default(0),
-    disposedQty: z.number().int().nonnegative().max(10_000).default(0),
-    notes: z.string().max(500).optional(),
-  });
-export type InspectReturnLineInput = z.infer<typeof inspectReturnLineSchema>;
-
+// Returns v2 — inspection records CONDITION + PHOTOS and shares them
+// with the vendor. It no longer sets disposition or any refund; the
+// vendor decides disposition next (instructReturnSchema), and money is
+// settled at finalize (finalizeReturnSchema).
 export const inspectReturnSchema = z.object({
-  lines: z.array(inspectReturnLineSchema).min(1),
-  refundAmountCents: z.number().int().nonnegative().max(50_000_000).default(0),
-  restockFeeCents: z.number().int().nonnegative().max(50_000_000).default(0),
-  inspectorNotes: z.string().max(2000).optional(),
+  // Photos USA Errands took of the received items (R2 URLs from the
+  // admin presign flow). At least one keeps us honest to the policy
+  // ("take and share pictures").
+  receivedPhotoUrls: z
+    .array(z.string().url().max(2048))
+    .min(1, "Attach at least one photo of the received items.")
+    .max(20, "Up to 20 photos per return."),
+  // Free-text condition summary shared with the vendor.
+  conditionNotes: z.string().trim().min(1, "Describe the condition.").max(2000),
 });
 export type InspectReturnInput = z.infer<typeof inspectReturnSchema>;
+
+// ---------------------------------------------------------------------------
+// Admin — finalize (apply the vendor's disposition + charge the fee)
+// ---------------------------------------------------------------------------
+
+export const finalizeReturnSchema = z.object({
+  // Optional additional shipping/handling cost to charge alongside the
+  // flat processing fee. The $2.50 processing fee itself comes from the
+  // returns_processing_fee_cents config row, not the client.
+  handlingCostCents: z.number().int().nonnegative().max(50_000_000).default(0),
+  // Legal/safety override — allows finalizing as DISPOSED WITHOUT vendor
+  // instructions when disposal is required by law/carrier/safety. A
+  // reason is mandatory when this is set.
+  disposalOverrideReason: z.string().trim().min(1).max(500).optional(),
+});
+export type FinalizeReturnInput = z.infer<typeof finalizeReturnSchema>;

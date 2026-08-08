@@ -14,12 +14,17 @@
  * handles the common US layouts deterministically, with no network
  * dependency.
  *
+ * Segments may be separated by commas AND/OR newlines, so a multi-line
+ * paste (one field per line) parses just as well as a comma-delimited
+ * single line.
+ *
  * Handled inputs (all case-insensitive; trailing "USA"/"US" tolerated):
  *   731 Market St #200, San Francisco, CA 94103
  *   731 Market St, Apt 4, San Francisco, CA 94103
  *   123 Main St, Raleigh, North Carolina 27601
  *   123 Main St, Raleigh, NC, 27601        (legacy each-field-own-part)
  *   500 Pine Ave, Seattle WA 98101         (city+state+zip in one part)
+ *   2201 Tucker Lane⏎Apt B8⏎Gwynn Oak⏎Maryland⏎21207  (one field per line)
  *
  * Anything it can't confidently extract is left blank so the caller can
  * fill what it got and let the user complete the rest — never throws on
@@ -66,7 +71,7 @@ const COUNTRY_TOKENS = new Set([
 ]);
 
 /** Returns the 2-letter state code for a token, or null if not a state. */
-function toStateAbbr(token: string): string | null {
+export function toStateAbbr(token: string): string | null {
   const t = token.trim();
   if (!t) return null;
   const upper = t.toUpperCase();
@@ -94,8 +99,10 @@ export function parseUsAddress(raw: string): ParsedAddressParts {
   const trimmed = raw.trim();
   if (!trimmed) return empty;
 
+  // Segments are delimited by commas and/or newlines — a multi-line
+  // paste (one field per line) is just as valid as a comma-separated one.
   let parts = trimmed
-    .split(",")
+    .split(/[\n\r,]+/)
     .map((p) => p.trim())
     .filter((p) => p.length > 0);
   if (parts.length === 0) return empty;

@@ -286,20 +286,11 @@ export class OrderController {
   @Get(":id")
   async get(@CurrentUser() user: AuthenticatedUser, @Param("id", new ParseUUIDPipe()) id: string) {
     const order = await this.orders.get(user.vendorId!, id);
-    // Migration 0018 — surface the return-window cutoff so the
-    // frontend can hide the "Request return" CTA when this order is
-    // outside the window. Null when the order isn't delivered yet
-    // (return CTA hidden for a different reason). The same
-    // configurable window is enforced server-side at RMA creation;
-    // exposing it on the order GET keeps frontend + backend honest.
-    let returnableUntil: string | null = null;
-    if (order.deliveredAt) {
-      const windowDays = await this.returns.getReturnWindowDays();
-      returnableUntil = new Date(
-        order.deliveredAt.getTime() + windowDays * 24 * 60 * 60 * 1000,
-      ).toISOString();
-    }
-    return { ...order, returnableUntil };
+    // Returns v2 — there is NO platform-enforced return window (the age
+    // limit is the vendor's own policy). `returnableUntil` is retained on
+    // the response shape as always-null for backward compatibility; the
+    // frontend no longer shows a window-expired state.
+    return { ...order, returnableUntil: null as string | null };
   }
 
   // ---------------------------------------------------------------------------

@@ -21,12 +21,13 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { TenantGuard } from "../../common/guards/tenant.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
-import { PrismaService } from "../../common/prisma.service";
 import {
   createReturnSchema,
+  instructReturnSchema,
   listReturnsSchema,
   presignReturnUploadSchema,
   type CreateReturnInput,
+  type InstructReturnInput,
   type ListReturnsInput,
   type PresignReturnUploadInput,
 } from "../../common/schemas/return.schema";
@@ -41,7 +42,6 @@ export class ReturnController {
   constructor(
     private readonly returns: ReturnService,
     private readonly r2: R2Service,
-    private readonly prisma: PrismaService,
   ) {}
 
   @Post()
@@ -61,28 +61,33 @@ export class ReturnController {
     return this.returns.list(user.vendorId!, q);
   }
 
-  /**
-   * Detail GET. Augments the bare return row with a server-computed
-   * `potentialRefundCents` (best-case refund based on requested qty ×
-   * order-line unit price) so the vendor sees what they could expect
-   * before the inspection lands. Once status reaches RESTOCKED /
-   * DISPOSED / REJECTED the actual `refundAmountCents` is the truth;
-   * the potential is informational only.
-   */
   @Get(":id")
-  async get(
+  get(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id", new ParseUUIDPipe()) id: string,
   ) {
-    const ret = await this.returns.get(user.vendorId!, id);
-    const potentialRefundCents = await this.computePotentialRefund(ret);
-    return { ...ret, potentialRefundCents };
+    return this.returns.get(user.vendorId!, id);
   }
 
   @Post(":id/cancel")
   @HttpCode(HttpStatus.OK)
   cancel(@CurrentUser() user: AuthenticatedUser, @Param("id", new ParseUUIDPipe()) id: string) {
     return this.returns.cancel(user.vendorId!, user.sub, id);
+  }
+
+  /**
+   * Returns v2 — vendor submits handling instructions (restock / dispose
+   * / donate per line) after USA Errands has inspected the items and
+   * shared photos. Only valid while the return is INSPECTED.
+   */
+  @Post(":id/instructions")
+  @HttpCode(HttpStatus.OK)
+  instruct(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(instructReturnSchema)) body: InstructReturnInput,
+  ) {
+    return this.returns.submitInstructions(user.vendorId!, user.sub, id, body);
   }
 
   /**
@@ -105,32 +110,5 @@ export class ReturnController {
       contentType: body.contentType,
       contentLengthBytes: body.contentLengthBytes,
     });
-  }
-
-  /**
-   * Compute the potential refund as the sum of (requestedQty ×
-   * order-line unit price). Unit price is derived from
-   * declaredValueCents / quantity on the originating order line.
-   * Best-effort — if the order line was deleted or the quantity is
-   * zero, that line contributes 0.
-   */
-  private async computePotentialRefund(ret: {
-    orderId: string;
-    lines: Array<{ orderLineId: string; requestedQty: number }>;
-  }): Promise<number> {
-    if (ret.lines.length === 0) return 0;
-    const orderLines = await this.prisma.orderLine.findMany({
-      where: { id: { in: ret.lines.map((l) => l.orderLineId) }, orderId: ret.orderId },
-      select: { id: true, quantity: true, declaredValueCents: true },
-    });
-    const lineById = new Map(orderLines.map((l) => [l.id, l]));
-    let total = 0;
-    for (const rl of ret.lines) {
-      const ol = lineById.get(rl.orderLineId);
-      if (!ol || ol.quantity <= 0) continue;
-      const unitCents = Math.floor(ol.declaredValueCents / ol.quantity);
-      total += unitCents * rl.requestedQty;
-    }
-    return total;
   }
 }
