@@ -190,6 +190,14 @@ export interface PublicOrder {
   packedWeightOz: number | null;
   packedAt: Date | null;
   packagingLabel: string | null;
+  /**
+   * Migration 0037 — fulfillment mode + hand-off timestamp. The vendor
+   * UI needs these to decide return eligibility (own-carrier orders
+   * become returnable at HANDED_OFF) and to show the hand-off event.
+   * Defaults to PLATFORM_SHIP for legacy rows.
+   */
+  fulfillmentMode: "PLATFORM_SHIP" | "VENDOR_CARRIER";
+  handedOffAt: Date | null;
   lines: Array<{
     id: string;
     skuId: string;
@@ -1272,6 +1280,15 @@ export class OrderService {
       estimatedShippingMaxCents:
         (o as unknown as { estimatedShippingMaxCents?: number | null })
           .estimatedShippingMaxCents ?? null,
+      // Migration 0037 — fulfillment mode + hand-off timestamp. Read via
+      // cast (stale client) with a PLATFORM_SHIP default for legacy rows.
+      // The vendor UI keys return eligibility off these.
+      fulfillmentMode:
+        ((o as unknown as { fulfillmentMode?: string }).fulfillmentMode as
+          | "PLATFORM_SHIP"
+          | "VENDOR_CARRIER"
+          | undefined) ?? "PLATFORM_SHIP",
+      handedOffAt: (o as unknown as { handedOffAt?: Date | null }).handedOffAt ?? null,
       // Phase O — vendor-visible packaging summary. Reads through
       // `as unknown` casts because the sandbox Prisma client hasn't
       // been regenerated for the pack-step / packaging_option
