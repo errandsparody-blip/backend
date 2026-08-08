@@ -36,6 +36,7 @@
 import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from "@nestjs/common";
 import { timingSafeEqual } from "node:crypto";
 
+import { parseUsAddress } from "../../../common/address-parse";
 import { loadConfig } from "../../../common/config";
 
 // =============================================================================
@@ -790,51 +791,44 @@ export class ShippoService {
         message: "Provide an address to parse.",
       });
     }
-    if (!this.isLive()) return this.parseAddressStub(trimmed);
 
-    const parsed = await this.request<ShParsedAddress>(
-      "GET",
-      `/v2/addresses/parse?address=${encodeURIComponent(trimmed)}`,
-    );
-    return {
-      line1: parsed.address_line_1?.trim() ?? "",
-      line2: parsed.address_line_2?.trim() || null,
-      city: parsed.city_locality?.trim() ?? "",
-      state: (parsed.state_province ?? "").trim().toUpperCase(),
-      postalCode: parsed.postal_code?.trim() ?? "",
-      country: (parsed.country_code ?? "US").trim().toUpperCase() || "US",
-      phone: parsed.phone?.trim() || null,
-    };
-  }
+    // The deterministic local parser is the reliable path — it handles
+    // the standard US layouts (incl. "City, ST ZIP" in one segment) with
+    // no network dependency. Shippo has no dependable free-text parse
+    // endpoint, so it's only an optional enhancement below.
+    const local = parseUsAddress(trimmed);
+    if (!this.isLive()) return local;
 
-  /**
-   * Stub parser for dev/test (no SHIPPO_API_KEY). Naive comma split assuming
-   * the documented order without a line2: "line1, city, state, zip[, country]".
-   * Good enough to exercise the UI locally; production uses the live parser.
-   */
-  private parseAddressStub(raw: string): ParsedAddress {
-    const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
-    if (parts.length >= 4) {
-      const [line1 = "", city = "", state = "", postalCode = "", country = "US"] = parts;
-      return {
-        line1,
-        line2: null,
-        city,
-        state: state.toUpperCase(),
-        postalCode,
-        country: (country || "US").toUpperCase(),
-        phone: null,
+    // If live, try Shippo but only trust it when it actually extracted
+    // the essentials; otherwise fall back to the local parse. Any error
+    // (including a missing/renamed endpoint) also falls back — the
+    // shortcut must never hard-fail the vendor's order form.
+    try {
+      const parsed = await this.request<ShParsedAddress>(
+        "GET",
+        `/v2/addresses/parse?address=${encodeURIComponent(trimmed)}`,
+      );
+      const fromShippo: ParsedAddress = {
+        line1: parsed.address_line_1?.trim() ?? "",
+        line2: parsed.address_line_2?.trim() || null,
+        city: parsed.city_locality?.trim() ?? "",
+        state: (parsed.state_province ?? "").trim().toUpperCase(),
+        postalCode: parsed.postal_code?.trim() ?? "",
+        country: (parsed.country_code ?? "US").trim().toUpperCase() || "US",
+        phone: parsed.phone?.trim() || null,
       };
+      if (
+        fromShippo.line1 &&
+        fromShippo.city &&
+        fromShippo.state &&
+        fromShippo.postalCode
+      ) {
+        return fromShippo;
+      }
+      return local;
+    } catch {
+      return local;
     }
-    return {
-      line1: raw,
-      line2: null,
-      city: "",
-      state: "",
-      postalCode: "",
-      country: "US",
-      phone: null,
-    };
   }
 
   private async validateAddressLive(req: AddressValidationRequest): Promise<AddressValidationOutcome> {
