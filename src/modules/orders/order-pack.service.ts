@@ -490,16 +490,14 @@ export class OrderPackService {
           code: "order_not_pending_packing",
         });
       }
-      if (locked.packed_at !== null) {
-        // Belt-and-braces — the status check above should have caught
-        // this, but the DB check-constraint enforces all-or-none on
-        // the pack columns and we want a friendly 409 rather than a
-        // constraint violation.
-        throw new ConflictException({
-          message: "Order has already been packed.",
-          code: "order_already_packed",
-        });
-      }
+      // NOTE: we do NOT block on `packed_at !== null` here. An order that
+      // was "sent back to pack queue" (sendToPackQueue) is legitimately
+      // back in PENDING_PACKING but still carries its previous pack
+      // columns — so the operator can see/adjust the old dimensions and
+      // RE-PACK. recordPack overwrites the pack columns below. The
+      // PENDING_PACKING status check above is the real single-pack guard:
+      // once this runs, status advances to PACKING_COMPLETED, so a second
+      // concurrent call is rejected by that check (all inside FOR UPDATE).
 
       const now = new Date();
       const notes = input.notes?.trim();
