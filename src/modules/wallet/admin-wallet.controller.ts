@@ -31,7 +31,12 @@ import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { IdempotencyService } from "../../common/idempotency.service";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { PrismaService } from "../../common/prisma.service";
-import { adminCreditSchema, type AdminCreditInput } from "../../common/schemas/deposit.schema";
+import {
+  adminCreditSchema,
+  adminDebitSchema,
+  type AdminCreditInput,
+  type AdminDebitInput,
+} from "../../common/schemas/deposit.schema";
 
 import { WalletService } from "./wallet.service";
 
@@ -161,6 +166,113 @@ export class AdminWalletController {
     await this.idempotency.commit({
       key: idempotencyKey,
       endpoint: "POST /admin/wallets/:vendorId/credit",
+      vendorId,
+      body,
+      responseStatus: 200,
+      responseBody,
+    });
+
+    return responseBody;
+  }
+
+  /**
+   * Sum the actor's manual DEBITS over the last 24 hours (absolute
+   * cents). Debits are stored as negative `amountCents` on the ledger,
+   * so we take the magnitude. Same tamper-resistant approach as the
+   * credit cap — reads the ledger, not the audit log.
+   */
+  private async sumActorDailyDebitsCents(actorId: string): Promise<number> {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const rows = await this.prisma.ledgerEntry.findMany({
+      where: {
+        createdBy: actorId,
+        type: "MANUAL_DEBIT",
+        createdAt: { gte: since },
+      },
+      select: { amountCents: true },
+    });
+    return rows.reduce((sum: number, r: { amountCents: number }) => sum + Math.abs(r.amountCents), 0);
+  }
+
+  /**
+   * Manual DEBIT of a vendor wallet — the inverse of creditVendor. Used
+   * to claw back an erroneous credit, charge an off-platform adjustment,
+   * etc. The debit is blocked if the wallet can't cover it (WalletService
+   * enforces no negative balances). Same guards as credit: idempotency
+   * key required, per-actor rolling daily cap, audit-logged.
+   */
+  @Post(":vendorId/debit")
+  @HttpCode(HttpStatus.OK)
+  async debitVendor(
+    @CurrentUser() actor: AuthenticatedUser,
+    @Param("vendorId", new ParseUUIDPipe()) vendorId: string,
+    @Body(new ZodValidationPipe(adminDebitSchema)) body: AdminDebitInput,
+    @Headers("idempotency-key") idempotencyKey: string | undefined,
+  ) {
+    if (!idempotencyKey || idempotencyKey.length < 8) {
+      throw new BadRequestException({
+        message: "Idempotency-Key header is required for finance operations.",
+        code: "idempotency_key_required",
+      });
+    }
+
+    const cached = await this.idempotency.lookup({
+      key: idempotencyKey,
+      endpoint: "POST /admin/wallets/:vendorId/debit",
+      vendorId,
+      body,
+    });
+    if (cached) return cached.body;
+
+    const capEnv = Number(process.env["FINANCE_DAILY_CREDIT_CAP_CENTS"]);
+    const dailyCapCents =
+      Number.isFinite(capEnv) && capEnv > 0 ? Math.floor(capEnv) : DEFAULT_DAILY_CAP_CENTS;
+    const todaySoFar = await this.sumActorDailyDebitsCents(actor.sub);
+    if (todaySoFar + body.amountCents > dailyCapCents) {
+      this.logger.warn(
+        {
+          actorId: actor.sub,
+          vendorId,
+          attemptedCents: body.amountCents,
+          todaySoFarCents: todaySoFar,
+          dailyCapCents,
+        },
+        "admin.wallet.debit_daily_cap_exceeded",
+      );
+      throw new ForbiddenException({
+        message:
+          "Daily debit ceiling reached. Wait 24 hours or have a SUPER_ADMIN raise the cap.",
+        code: "finance_daily_limit_exceeded",
+        attemptedCents: body.amountCents,
+        todaySoFarCents: todaySoFar,
+        dailyCapCents,
+      });
+    }
+
+    const description = body.reference ? `${body.reason} · ${body.reference}` : body.reason;
+
+    // WalletService.debit throws ConflictException(insufficient_funds) if
+    // the balance can't cover the amount — surfaced to the admin as a 409.
+    const result = await this.wallet.debit({
+      vendorId,
+      amountCents: body.amountCents,
+      type: "MANUAL_DEBIT",
+      description,
+      referenceType: "manual",
+      ...(body.reference ? { referenceId: body.reference } : {}),
+      idempotencyKey,
+      actorId: actor.sub,
+    });
+
+    const responseBody = {
+      ledgerEntryId: result.entry.id,
+      balanceAfterCents: result.balanceAfterCents,
+      amountCents: body.amountCents,
+    };
+
+    await this.idempotency.commit({
+      key: idempotencyKey,
+      endpoint: "POST /admin/wallets/:vendorId/debit",
       vendorId,
       body,
       responseStatus: 200,

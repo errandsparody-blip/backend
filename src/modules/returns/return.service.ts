@@ -23,6 +23,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
@@ -49,6 +50,8 @@ type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction"
 
 @Injectable()
 export class ReturnService {
+  private readonly logger = new Logger(ReturnService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
@@ -581,20 +584,14 @@ export class ReturnService {
         include: { lines: true },
       });
 
-      // Flip the parent order to RETURNED (from DELIVERED or HANDED_OFF).
-      const order = await tx.order.findUnique({ where: { id: ret.orderId } });
-      if (order && (order.status === "DELIVERED" || order.status === "HANDED_OFF")) {
-        await tx.order.update({ where: { id: order.id }, data: { status: "RETURNED" } });
-        await tx.orderEvent.create({
-          data: {
-            orderId: order.id,
-            type: "order.returned",
-            description: `Return ${ret.rmaCode} finalized (${next}).`,
-            source: "ADMIN",
-            actorId,
-          },
-        });
-      }
+      // NOTE: the parent-order status flip (→ RETURNED) is intentionally
+      // NOT done here. It's a secondary reflection of the return, and the
+      // order status trigger can reject DELIVERED → RETURNED unless the
+      // migration-0053 whitelist is present. Doing it inside this
+      // transaction would roll back the WHOLE finalize (restock + fee +
+      // disposition) on any trigger rejection — the "nothing processed"
+      // failure. So we commit the return's inventory + money here and
+      // flip the order best-effort AFTER commit (below).
 
       await this.audit.log({
         actorId,
@@ -612,8 +609,43 @@ export class ReturnService {
         },
       });
 
-      return { updated, vendorId: ret.vendorId, rmaCode: ret.rmaCode, feeCents, next };
+      return { updated, vendorId: ret.vendorId, rmaCode: ret.rmaCode, feeCents, next, orderId: ret.orderId };
     });
+
+    // Best-effort: flip the parent order to RETURNED so the vendor sees it
+    // on the order. Runs in its OWN transaction AFTER the finalize commit,
+    // so a rejection here (e.g. the migration-0053 whitelist not yet
+    // applied) can't undo the completed restock/fee. Recoverable: the
+    // order stays DELIVERED/HANDED_OFF but the return is fully processed.
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const order = await tx.order.findUnique({ where: { id: result.orderId } });
+        if (order && (order.status === "DELIVERED" || order.status === "HANDED_OFF")) {
+          await tx.order.update({ where: { id: order.id }, data: { status: "RETURNED" } });
+          await tx.orderEvent.create({
+            data: {
+              orderId: order.id,
+              type: "order.returned",
+              description: `Return ${result.rmaCode} finalized (${result.next}).`,
+              source: "ADMIN",
+              actorId,
+            },
+          });
+        }
+      });
+    } catch (err) {
+      // The return itself is finalized; only the cosmetic order-status
+      // flip failed. Log so ops can reconcile (usually means migration
+      // 0053 needs applying).
+      this.logger.warn(
+        {
+          msg: "return.finalize: parent order flip to RETURNED failed (return still finalized)",
+          orderId: result.orderId,
+          rmaCode: result.rmaCode,
+          err: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
 
     // Notify the vendor of the outcome + charge. No refund is ever sent.
     const totalCharged = result.feeCents + input.handlingCostCents;
