@@ -680,11 +680,23 @@ export class ReturnService {
     return `RMA-${out}`;
   }
 
+  /**
+   * Acquire a row lock on the return, then return it via the typed
+   * client so callers get camelCase fields.
+   *
+   * IMPORTANT: `$queryRaw` returns RAW snake_case column names
+   * (`vendor_id`, `order_id`, `rma_code`), NOT the Prisma camelCase
+   * fields — so we must NOT read `.vendorId` / `.rmaCode` / `.orderId`
+   * off a `SELECT *` result (they'd be `undefined`). We use the raw
+   * query only to take the `FOR UPDATE` lock, then re-read with
+   * `findUnique` so the returned object is a real, typed `Return`.
+   */
   private async lockReturn(tx: Tx, id: string): Promise<Return> {
-    const rows = await tx.$queryRaw<Return[]>(
-      Prisma.sql`SELECT * FROM returns WHERE id = ${id}::uuid FOR UPDATE`,
+    const locked = await tx.$queryRaw<Array<{ id: string }>>(
+      Prisma.sql`SELECT id FROM returns WHERE id = ${id}::uuid FOR UPDATE`,
     );
-    const row = rows[0];
+    if (!locked[0]) throw new NotFoundException();
+    const row = await tx.return.findUnique({ where: { id } });
     if (!row) throw new NotFoundException();
     return row;
   }
