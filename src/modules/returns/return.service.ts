@@ -29,6 +29,7 @@ import { Prisma } from "@prisma/client";
 import { randomBytes } from "node:crypto";
 import type { PrismaClient, Return, ReturnStatus } from "@prisma/client";
 
+import { loadFeeSchedule } from "../../common/fees";
 import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
 import type {
@@ -742,21 +743,22 @@ export class ReturnService {
   }
 
   /**
-   * Read the return processing fee (cents) from the configuration table.
-   * Defaults to 250 ($2.50 per policy) when the row is absent or invalid.
-   * A config-table outage must never silently drop the fee to zero, so
-   * the fallback is the policy default, not 0.
+   * The return processing fee (cents) comes from the LIVE pricing source
+   * — the `fee_schedule` config row's `returnsHandlingCents` — the same
+   * schedule that drives fulfillment/storage/shipping pricing. This keeps
+   * returns pricing in one editable place (admin → fee schedule) rather
+   * than a separate config key. (The old `returns_processing_fee_cents`
+   * row from migration 0052 is no longer read.)
+   *
+   * Falls back to 199 ($1.99) if the schedule is missing/invalid so a
+   * config outage never drops the fee to zero.
    */
   private async loadProcessingFeeCents(): Promise<number> {
-    const FALLBACK = 250;
+    const FALLBACK = 199; // $1.99 policy default
     const MAX = 100_000; // sanity ceiling ($1,000)
     try {
-      const row = await this.prisma.configuration.findUnique({
-        where: { key: "returns_processing_fee_cents" },
-      });
-      if (!row) return FALLBACK;
-      const value = row.value as unknown;
-      const cents = typeof value === "number" ? value : Number(value);
+      const schedule = await loadFeeSchedule(this.prisma);
+      const cents = schedule.returnsHandlingCents;
       if (!Number.isInteger(cents) || cents < 0 || cents > MAX) return FALLBACK;
       return cents;
     } catch {
