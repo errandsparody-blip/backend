@@ -33,6 +33,7 @@ import { aggregateParcel, computeOrderFees } from "../../common/order-fees";
 import { PrismaService } from "../../common/prisma.service";
 import type { IntegrationOrderInput } from "../../common/schemas/integration.schema";
 import { AuditService } from "../audit/audit.service";
+import { R2Service } from "../integrations/r2/r2.service";
 import { ShippoService, type ShippingRate } from "../integrations/shippo/shippo.service";
 import { SmartyService } from "../integrations/smarty/smarty.service";
 import { NotificationService } from "../notifications/notification.service";
@@ -126,39 +127,342 @@ export class IntegrationOrderService {
     private readonly audit: AuditService,
     private readonly opsAlerts: OpsAlertService,
     private readonly notifications: NotificationService,
+    private readonly r2: R2Service,
   ) {}
 
   // ===========================================================================
   // INGEST — entry point from the API-key-authed controller.
   // ===========================================================================
 
-  async ingest(_args: {
+  async ingest(args: {
     vendorId: string;
     apiKeyId: string | null;
     input: IntegrationOrderInput;
   }): Promise<IntegrationOrderResult> {
-    // ---- Migration 0047 — Fulfillment v1 abolition ----
-    //
-    // Per the v2 spec ("Studio mvp task 71326.pdf", page 4, yellow
-    // highlight): "FOR ORDERS FLOWING IN THROUGH INTEGRATION FROM
-    // VENDOR ECOMMERCE STORE, ONLY FULFILLMENT SHOULD BE CHARGED, AND
-    // WHEN ADMIN OR WAREHOUSE STAFF PROCEEDS TO WORK ON ORDER THEY
-    // CAN CHARGE THE WALLET FOR SHIPMENT".
-    //
-    // The pre-existing implementation of ingest / tryAllocate /
-    // reserveDebitAndPersist was v1 semantics (Shippo quote + full
-    // wallet debit at intake). Rewriting that ~700 lines of financial
-    // code to v2 is a phase in its own right and is deferred alongside
-    // the Shopify/WooCommerce integrations that would consume it
-    // (product plan: vendor dashboard only for now).
-    //
-    // The prior code is preserved below in `tryAllocate` /
-    // `reserveDebitAndPersist` for reference and for the eventual
-    // rewrite. `ingest` itself hard-rejects so no v1 order can be
-    // created via the API-key path in the meantime. The
-    // `releaseHeldOrder` path is also unreachable in production while
-    // ingest is gated, but its type surface stays valid.
-    throw new IntegrationV2NotImplementedError();
+    const { vendorId, input } = args;
+
+    // Idempotency by the store's own order id. A re-send of the same
+    // externalReference returns the existing order rather than creating a
+    // duplicate (DB also enforces this via the unique index).
+    const existing = await this.prisma.order.findFirst({
+      where: { vendorId, externalReference: input.externalReference },
+      include: { lines: true },
+    });
+    if (existing) return this.toResult(existing);
+
+    // Persist a base64 label (Amazon "Buy Shipping") to R2 up front so the
+    // DB payload only ever carries a URL — never raw label bytes.
+    const normalized = await this.normalizeVendorLabel(vendorId, input);
+
+    const outcome = await this.v2Allocate(vendorId, null, normalized, null);
+    if (outcome.kind === "PLACED") {
+      void this.alertOpsNewOrder(outcome.order, vendorId, outcome.order.lines.length);
+      return this.toResult(outcome.order);
+    }
+
+    // Couldn't place yet → header-only hold carrying the normalized payload.
+    const held = await this.createHoldOrder(vendorId, null, normalized, outcome.reason);
+    return this.toResult(held);
+  }
+
+  /**
+   * If a vendor-carrier label arrived as base64 (Amazon), upload it to R2
+   * and return the input with `vendorCarrier.labelUrl` set (and base64
+   * dropped). URL labels (Shopify/WooCommerce) pass through unchanged.
+   */
+  private async normalizeVendorLabel(
+    vendorId: string,
+    input: IntegrationOrderInput,
+  ): Promise<IntegrationOrderInput> {
+    const vc = input.vendorCarrier;
+    if (input.fulfillmentMode !== "VENDOR_CARRIER" || !vc || !vc.labelBase64) return input;
+    const ext =
+      vc.labelContentType === "application/pdf"
+        ? "pdf"
+        : vc.labelContentType === "image/png"
+          ? "png"
+          : "jpg";
+    const key = this.r2.generateKey(
+      `integration/${vendorId}/labels`,
+      `label-${input.externalReference}.${ext}`,
+    );
+    const { publicUrl } = await this.r2.putObject({
+      key,
+      contentType: vc.labelContentType ?? "application/pdf",
+      body: Buffer.from(vc.labelBase64, "base64"),
+    });
+    return {
+      ...input,
+      vendorCarrier: { carrier: vc.carrier, tracking: vc.tracking, labelUrl: publicUrl },
+    };
+  }
+
+  /**
+   * v2 allocation (spec: integration orders charge FULFILLMENT ONLY at
+   * intake; shipment is charged later when staff works the order). Creates
+   * a PENDING_PACKING / workflowVersion=2 order for BOTH modes:
+   *   PLATFORM_SHIP  — warehouse packs, admin picks a rate + buys the
+   *                    label in the rate picker (charging shipping then).
+   *   VENDOR_CARRIER — warehouse packs, recordPack auto-hands-off using the
+   *                    merchant's pass-through label (no platform label,
+   *                    no shipping charge — ever).
+   * Returns PLACED, or HELD with a reason the caller parks the order under.
+   */
+  private async v2Allocate(
+    vendorId: string,
+    actorId: string | null,
+    input: IntegrationOrderInput,
+    existingOrderId: string | null,
+  ): Promise<
+    | { kind: "PLACED"; order: Order & { lines: OrderLine[] } }
+    | { kind: "HELD"; reason: HoldReason }
+  > {
+    const mapping = await this.resolveLines(vendorId, input.lines);
+    if (mapping.kind === "UNMAPPED") return { kind: "HELD", reason: "UNMAPPED_SKU" };
+    const resolved = mapping.resolved;
+
+    const isVendorCarrier = input.fulfillmentMode === "VENDOR_CARRIER";
+
+    // Address deliverability only matters when USA Errands ships it. For a
+    // vendor-carrier pass-through the merchant already made the label, so
+    // the address is their concern — skip the blocking check.
+    let addressOutcome = "SKIPPED";
+    let addressDetail: string | null = null;
+    if (!isVendorCarrier) {
+      const addr = await this.smarty.verifyUS({
+        line1: input.recipient.line1,
+        line2: input.recipient.line2,
+        city: input.recipient.city,
+        state: input.recipient.state,
+        postalCode: input.recipient.postalCode,
+        country: input.recipient.country,
+      });
+      if (addr.outcome === "REJECTED") return { kind: "HELD", reason: "ADDRESS_INVALID" };
+      addressOutcome = addr.outcome;
+      addressDetail = addr.detail ?? null;
+    }
+
+    const totalUnits = resolved.reduce((s, r) => s + r.quantity, 0);
+    const declaredValueCents = resolved.reduce((s, r) => s + r.declaredValueCents, 0);
+    const schedule = await loadFeeSchedule(this.prisma);
+    // FULFILLMENT ONLY — no carrier cost, no insurance at intake.
+    const fees = computeOrderFees({
+      schedule,
+      totalUnits,
+      carrierCostCents: 0,
+      declaredValueCents,
+      insuranceRequested: false,
+    });
+
+    const walletSnapshot = await this.wallet.get(vendorId);
+    if (walletSnapshot.balanceCents < fees.fulfillmentFeeCents) {
+      return { kind: "HELD", reason: "INSUFFICIENT_FUNDS" };
+    }
+
+    try {
+      const order = await this.prisma.$transaction(async (tx) => {
+        const orderId = await this.v2ReserveDebitPersist(tx, {
+          vendorId,
+          actorId,
+          input,
+          resolved,
+          fulfillmentFeeCents: fees.fulfillmentFeeCents,
+          declaredValueCents,
+          isVendorCarrier,
+          addressOutcome,
+          addressDetail,
+          existingOrderId,
+        });
+        return tx.order.findUniqueOrThrow({ where: { id: orderId }, include: { lines: true } });
+      });
+      return { kind: "PLACED", order };
+    } catch (err) {
+      if (err instanceof InsufficientStockError) return { kind: "HELD", reason: "INSUFFICIENT_STOCK" };
+      throw err;
+    }
+  }
+
+  /**
+   * v2 transactional persist: reserve stock + debit the FULFILLMENT fee +
+   * create (or upgrade a held) PENDING_PACKING order. Shipping money is
+   * zero here — it's charged later at the pack/rate step (platform-ship) or
+   * never (vendor-carrier). Mirrors the locking discipline of the legacy
+   * reserveDebitAndPersist.
+   */
+  private async v2ReserveDebitPersist(
+    tx: Tx,
+    p: {
+      vendorId: string;
+      actorId: string | null;
+      input: IntegrationOrderInput;
+      resolved: ResolvedLine[];
+      fulfillmentFeeCents: number;
+      declaredValueCents: number;
+      isVendorCarrier: boolean;
+      addressOutcome: string;
+      addressDetail: string | null;
+      existingOrderId: string | null;
+    },
+  ): Promise<string> {
+    const { vendorId, actorId, input, resolved, isVendorCarrier } = p;
+    const vc = input.vendorCarrier;
+
+    const needBySku = new Map<string, number>();
+    for (const r of resolved) needBySku.set(r.skuId, (needBySku.get(r.skuId) ?? 0) + r.quantity);
+    const skuIds = Array.from(needBySku.keys()).sort();
+    const locked = await this.lockSkus(tx, vendorId, skuIds);
+    for (const [skuId, need] of needBySku) {
+      const row = locked.get(skuId);
+      if (!row || row.vendor_id !== vendorId || row.status !== "ACTIVE") {
+        throw new InsufficientStockError(`SKU ${skuId} unavailable.`);
+      }
+      if (row.quantity_available < need) {
+        throw new InsufficientStockError(`SKU ${skuId} short.`);
+      }
+    }
+
+    // Money: fulfillment fee only. Shipping/insurance are zero at intake.
+    // Migration-0037/0041 columns (fulfillmentMode, workflowVersion, vendor
+    // carrier fields) are written through a cast for the stale-client
+    // pattern used across the codebase.
+    const v2Fields = {
+      workflowVersion: 2,
+      fulfillmentMode: isVendorCarrier ? "VENDOR_CARRIER" : "PLATFORM_SHIP",
+      vendorCarrierName: isVendorCarrier ? vc?.carrier ?? null : null,
+      vendorTrackingNumber: isVendorCarrier ? vc?.tracking ?? null : null,
+      vendorLabelUrl: isVendorCarrier ? vc?.labelUrl ?? null : null,
+    } as Record<string, unknown>;
+
+    const moneyData = {
+      itemsDeclaredValueCents: p.declaredValueCents,
+      shippingCostCents: 0,
+      shippingFeeCents: 0,
+      fulfillmentFeeCents: p.fulfillmentFeeCents,
+      insuranceFeeCents: 0,
+      totalChargedCents: p.fulfillmentFeeCents,
+      carrier: isVendorCarrier ? vc?.carrier ?? null : null,
+      carrierService: isVendorCarrier ? "Vendor carrier" : null,
+      trackingNumber: isVendorCarrier ? vc?.tracking ?? null : null,
+      addressValidationStatus: p.addressOutcome,
+      addressValidationDetail: p.addressDetail
+        ? ({ note: p.addressDetail } as Prisma.InputJsonValue)
+        : Prisma.JsonNull,
+    };
+
+    let orderId: string;
+    if (p.existingOrderId) {
+      const updated = await tx.order.update({
+        where: { id: p.existingOrderId },
+        data: {
+          status: "PENDING_PACKING" as OrderStatus,
+          holdReason: null,
+          sourcePayload: Prisma.JsonNull,
+          submittedAt: new Date(),
+          allocatedAt: null,
+          ...moneyData,
+          ...v2Fields,
+        } as unknown as Prisma.OrderUpdateInput,
+        select: { id: true },
+      });
+      orderId = updated.id;
+    } else {
+      const created = await tx.order.create({
+        data: {
+          vendorId,
+          source: "API",
+          externalReference: input.externalReference,
+          status: "PENDING_PACKING" as OrderStatus,
+          recipientName: input.recipient.name,
+          recipientPhone: input.recipient.phone ?? null,
+          recipientEmail: input.recipient.email ?? null,
+          shipAddressLine1: input.recipient.line1,
+          shipAddressLine2: input.recipient.line2 ?? null,
+          shipCity: input.recipient.city,
+          shipState: input.recipient.state,
+          shipPostalCode: input.recipient.postalCode,
+          shipCountry: input.recipient.country,
+          submittedAt: new Date(),
+          allocatedAt: null,
+          createdBy: null,
+          ...moneyData,
+          ...v2Fields,
+        } as unknown as Prisma.OrderCreateInput,
+        select: { id: true },
+      });
+      orderId = created.id;
+    }
+
+    for (const [skuId, need] of needBySku) {
+      await tx.sku.update({
+        where: { id: skuId },
+        data: {
+          quantityAvailable: { decrement: need },
+          quantityReserved: { increment: need },
+        },
+      });
+      await tx.inventoryMovement.create({
+        data: {
+          vendorId,
+          skuId,
+          type: "RESERVE",
+          deltaAvailable: -need,
+          deltaReserved: need,
+          referenceType: "order",
+          referenceId: orderId,
+          actorId,
+        },
+      });
+    }
+
+    await this.wallet.debit(
+      {
+        vendorId,
+        amountCents: p.fulfillmentFeeCents,
+        type: "FULFILLMENT",
+        description: `Storefront order ${input.externalReference} → ${input.recipient.city} (fulfillment)`,
+        referenceType: "order",
+        referenceId: orderId,
+        actorId: actorId ?? undefined,
+      },
+      tx as unknown as Parameters<typeof this.wallet.debit>[1],
+    );
+
+    for (const r of resolved) {
+      await tx.orderLine.create({
+        data: {
+          orderId,
+          vendorId,
+          productId: r.productId,
+          skuId: r.skuId,
+          productCode: r.code,
+          productName: r.productName,
+          variant: r.variant,
+          quantity: r.quantity,
+          declaredValueCents: r.declaredValueCents,
+          allocationStatus: "RESERVED",
+        },
+      });
+    }
+
+    await tx.orderEvent.create({
+      data: {
+        orderId,
+        type: p.existingOrderId ? "order.released" : "order.ingested",
+        description: p.existingOrderId
+          ? "Hold released; fulfillment charged, order queued for packing."
+          : `Storefront order ingested (${isVendorCarrier ? "vendor carrier" : "platform ship"}) with ${resolved.length} line(s).`,
+        source: "SYSTEM",
+        actorId,
+        metadata: {
+          source: "API",
+          fulfillmentMode: isVendorCarrier ? "VENDOR_CARRIER" : "PLATFORM_SHIP",
+          fulfillmentFeeCents: p.fulfillmentFeeCents,
+          externalReference: input.externalReference,
+        },
+      },
+    });
+
+    return orderId;
   }
 
   // ===========================================================================
@@ -185,19 +489,22 @@ export class IntegrationOrderService {
       return { released: false, status: order.status, holdReason: order.holdReason };
     }
 
-    const outcome = await this.tryAllocate(order.vendorId, actorId, input, order.id);
-    if (outcome.kind === "ALLOCATED") {
+    const outcome = await this.v2Allocate(order.vendorId, actorId, input, order.id);
+    if (outcome.kind === "PLACED") {
       await this.audit.log({
         actorId,
         action: "order.released",
         resourceType: "order",
         resourceId: order.id,
         beforeState: { status: "ON_HOLD", holdReason: order.holdReason },
-        afterState: { status: "ALLOCATED", totalChargedCents: outcome.order.totalChargedCents },
+        afterState: {
+          status: outcome.order.status,
+          totalChargedCents: outcome.order.totalChargedCents,
+        },
       });
       void this.notifyVendorReleased(outcome.order);
       void this.alertOpsNewOrder(outcome.order, order.vendorId, outcome.order.lines.length);
-      return { released: true, status: "ALLOCATED", holdReason: null };
+      return { released: true, status: outcome.order.status, holdReason: null };
     }
 
     // Still stuck — update the reason if it changed (e.g. funds arrived but a

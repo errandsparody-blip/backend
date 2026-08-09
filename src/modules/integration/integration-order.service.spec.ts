@@ -48,6 +48,7 @@ const baseInput = (): IntegrationOrderInput => ({
     country: "US",
   },
   lines: [{ sku: "TSH-BLK-M", quantity: 2 }],
+  fulfillmentMode: "PLATFORM_SHIP",
   shipping: undefined,
 });
 
@@ -84,21 +85,28 @@ function makeService(overrides: {
         created.push(row);
         return { id: row.id };
       }),
-      update: jest.fn(async ({ where }: { where: { id: string } }) => ({ id: where.id })),
-      findUniqueOrThrow: jest.fn(async ({ where }: { where: { id: string } }) => ({
-        id: where.id,
-        vendorId: VENDOR,
-        orderNumber: 1625,
-        externalReference: "STORE-1001",
-        status: "ALLOCATED",
-        holdReason: null,
-        carrierService: "USPS Priority",
-        totalChargedCents: created[0]?.["totalChargedCents"] ?? 0,
-        trackingNumber: null,
-        lines: [
-          { productCode: "TSH-BLK-M", productName: "Black Tee", quantity: 2 },
-        ],
-      })),
+      update: jest.fn(async ({ where, data }: { where: { id: string }; data?: Record<string, unknown> }) => {
+        if (data) created.push({ id: where.id, ...data });
+        return { id: where.id };
+      }),
+      findUniqueOrThrow: jest.fn(async ({ where }: { where: { id: string } }) => {
+        const last = (created[created.length - 1] ?? {}) as Record<string, unknown>;
+        return {
+          id: where.id,
+          vendorId: VENDOR,
+          orderNumber: 1625,
+          externalReference: "STORE-1001",
+          status: last["status"] ?? "PENDING_PACKING",
+          holdReason: null,
+          carrierService: last["carrierService"] ?? null,
+          totalChargedCents: last["totalChargedCents"] ?? 0,
+          shippingCostCents: last["shippingCostCents"] ?? 0,
+          fulfillmentMode: last["fulfillmentMode"] ?? "PLATFORM_SHIP",
+          vendorLabelUrl: last["vendorLabelUrl"] ?? null,
+          trackingNumber: last["trackingNumber"] ?? null,
+          lines: [{ productCode: "TSH-BLK-M", productName: "Black Tee", quantity: 2 }],
+        };
+      }),
     },
     sku: { update: jest.fn(async () => ({})) },
     inventoryMovement: { create: jest.fn(async () => ({})) },
@@ -109,6 +117,7 @@ function makeService(overrides: {
   const prisma = {
     order: {
       findUnique: jest.fn(async () => overrides.existingOrder ?? null),
+      findFirst: jest.fn(async () => overrides.existingOrder ?? null),
       create: jest.fn(async ({ data }: { data: Record<string, unknown> }) => {
         const row = { id: "order-held", orderNumber: 1626, lines: [], ...data };
         created.push(row);
@@ -151,6 +160,10 @@ function makeService(overrides: {
   const audit = { log: jest.fn(async () => {}) };
   const opsAlerts = { send: jest.fn(async () => {}) };
   const notifications = { emit: jest.fn(async () => {}) };
+  const r2 = {
+    generateKey: jest.fn((prefix: string, name: string) => `${prefix}/${name}`),
+    putObject: jest.fn(async () => ({ publicUrl: "https://r2.example/label.pdf", key: "k" })),
+  };
 
   const svc = new IntegrationOrderService(
     prisma as never,
@@ -160,30 +173,88 @@ function makeService(overrides: {
     audit as never,
     opsAlerts as never,
     notifications as never,
+    r2 as never,
   );
-  return { svc, prisma, wallet, smarty, shippo, created, orderEvents, debits };
+  return { svc, prisma, wallet, smarty, shippo, r2, created, orderEvents, debits };
 }
 
-describe("IntegrationOrderService.ingest", () => {
-  // Migration 0047 — Fulfillment v1 was abolished per the v2 spec.
-  // The integration ingest path (Shopify / WooCommerce webhooks) was
-  // v1-shaped and is not yet rewritten for v2 semantics. Until it is,
-  // ingest hard-rejects with a 501 so no v1 order can slip through
-  // the API-key path. The legacy tests below (idempotency,
-  // UNMAPPED_SKU hold, ADDRESS_INVALID hold, INSUFFICIENT_FUNDS hold,
-  // happy allocate) are the SPEC for the eventual rewrite — reinstate
-  // them as failing then passing when tryAllocate is v2-migrated.
-  it("rejects with 501 until the v2 rewrite lands", async () => {
-    const { svc, wallet } = makeService({});
-    await expect(
-      svc.ingest({ vendorId: VENDOR, apiKeyId: null, input: baseInput() }),
-    ).rejects.toMatchObject({
-      status: 501,
-      response: expect.objectContaining({
-        code: "integration_v2_migration_pending",
-      }) as unknown,
+describe("IntegrationOrderService.ingest (v2)", () => {
+  it("is idempotent — a duplicate externalReference returns the existing order, no charge", async () => {
+    const { svc, wallet } = makeService({
+      existingOrder: {
+        id: "existing",
+        orderNumber: 1,
+        externalReference: "STORE-1001",
+        status: "PENDING_PACKING",
+        holdReason: null,
+        carrierService: null,
+        totalChargedCents: 398,
+        trackingNumber: null,
+        lines: [],
+      },
     });
-    // Belt-and-braces: no wallet activity ever, even on rejection.
+    const r = await svc.ingest({ vendorId: VENDOR, apiKeyId: null, input: baseInput() });
+    expect(r.id).toBe("existing");
+    expect(wallet.debit).not.toHaveBeenCalled();
+  });
+
+  it("platform-ship: charges FULFILLMENT only and lands PENDING_PACKING", async () => {
+    const { svc, wallet, created } = makeService({});
+    const r = await svc.ingest({ vendorId: VENDOR, apiKeyId: null, input: baseInput() });
+    expect(r.held).toBe(false);
+    expect(wallet.debit).toHaveBeenCalledTimes(1);
+    const row = created.find((c) => c["status"] === "PENDING_PACKING")!;
+    expect(row["shippingCostCents"]).toBe(0);
+    expect(row["fulfillmentMode"]).toBe("PLATFORM_SHIP");
+    expect(row["totalChargedCents"]).toBe(row["fulfillmentFeeCents"]);
+  });
+
+  it("vendor-carrier: stores the pass-through label, charges fulfillment only, no shipping", async () => {
+    const { svc, created } = makeService({});
+    const input = {
+      ...baseInput(),
+      fulfillmentMode: "VENDOR_CARRIER" as const,
+      vendorCarrier: { carrier: "UPS", tracking: "1Z999AA10123456784", labelUrl: "https://store/label.pdf" },
+    };
+    const r = await svc.ingest({ vendorId: VENDOR, apiKeyId: null, input });
+    expect(r.held).toBe(false);
+    const row = created.find((c) => c["fulfillmentMode"] === "VENDOR_CARRIER")!;
+    expect(row["vendorLabelUrl"]).toBe("https://store/label.pdf");
+    expect(row["shippingCostCents"]).toBe(0);
+  });
+
+  it("uploads a base64 vendor label to R2 and stores the URL", async () => {
+    const { svc, r2, created } = makeService({});
+    const input = {
+      ...baseInput(),
+      fulfillmentMode: "VENDOR_CARRIER" as const,
+      vendorCarrier: {
+        carrier: "USPS",
+        tracking: "9400100000000000000000",
+        labelBase64: Buffer.from("%PDF-1.4 fake").toString("base64"),
+        labelContentType: "application/pdf" as const,
+      },
+    };
+    const r = await svc.ingest({ vendorId: VENDOR, apiKeyId: null, input });
+    expect(r.held).toBe(false);
+    expect(r2.putObject).toHaveBeenCalledTimes(1);
+    const row = created.find((c) => c["fulfillmentMode"] === "VENDOR_CARRIER")!;
+    expect(row["vendorLabelUrl"]).toBe("https://r2.example/label.pdf");
+  });
+
+  it("holds UNMAPPED_SKU without touching the wallet", async () => {
+    const { svc, wallet } = makeService({ products: [] });
+    const r = await svc.ingest({ vendorId: VENDOR, apiKeyId: null, input: baseInput() });
+    expect(r.held).toBe(true);
+    expect(r.holdReason).toBe("UNMAPPED_SKU");
+    expect(wallet.debit).not.toHaveBeenCalled();
+  });
+
+  it("holds INSUFFICIENT_FUNDS (against the fulfillment fee) without charging", async () => {
+    const { svc, wallet } = makeService({ balanceCents: 0 });
+    const r = await svc.ingest({ vendorId: VENDOR, apiKeyId: null, input: baseInput() });
+    expect(r.held).toBe(true);
+    expect(r.holdReason).toBe("INSUFFICIENT_FUNDS");
     expect(wallet.debit).not.toHaveBeenCalled();
   });
 });

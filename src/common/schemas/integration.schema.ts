@@ -73,27 +73,101 @@ export const integrationOrderLineSchema = z.object({
 });
 export type IntegrationOrderLine = z.infer<typeof integrationOrderLineSchema>;
 
-export const integrationOrderSchema = z.object({
-  // The store's own order id. REQUIRED here (unlike the manual flow) because
-  // it is the idempotency anchor — re-sends of the same order must not create
-  // duplicates (DB-enforced by the unique [vendorId, externalReference]).
-  externalReference: z
-    .string()
-    .trim()
-    .min(1)
-    .max(80)
-    .regex(/^[A-Za-z0-9_\-./#]+$/, "Reference can include letters, digits, and -_./#."),
-  recipient: integrationRecipientSchema,
-  lines: z.array(integrationOrderLineSchema).min(1).max(50),
-  shipping: z
-    .object({
-      // Overrides the vendor's default. Omit to use the configured default
-      // (or cheapest available when no default is set).
-      carrierService: z.string().trim().min(2).max(60).optional(),
-      insurance: z.boolean().optional(),
-    })
-    .optional(),
+/**
+ * Allowed MIME types for a passed-through shipping label document. Same
+ * safe set as other uploads (no HTML/SVG). Amazon "Buy Shipping" returns
+ * base64 PDF/PNG; Shopify/WooCommerce plugins usually give a URL.
+ */
+export const INTEGRATION_LABEL_MIME = [
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+] as const;
+
+/** ~15 MB of binary → ~20 MB base64. Labels are far smaller in practice. */
+export const INTEGRATION_LABEL_MAX_BASE64_LEN = 20_000_000;
+
+/**
+ * Vendor-carrier pass-through (migration 0038 + v2). When the merchant
+ * bought the label on their own platform (Shopify Shipping, Amazon Buy
+ * Shipping, a WooCommerce plugin), they send it here and USA Errands just
+ * fulfills + hands off — no platform label is bought and no shipping is
+ * charged. The label may be a hosted URL (Shopify/Woo) OR base64 bytes
+ * (Amazon); exactly one must be provided.
+ */
+export const integrationVendorCarrierSchema = z.object({
+  carrier: z.string().trim().min(2, "Carrier name is too short.").max(60),
+  tracking: z.string().trim().min(1, "Tracking number is required.").max(128),
+  labelUrl: z.string().url().max(2048).optional(),
+  labelBase64: z.string().min(1).max(INTEGRATION_LABEL_MAX_BASE64_LEN).optional(),
+  labelContentType: z.enum(INTEGRATION_LABEL_MIME).optional(),
 });
+export type IntegrationVendorCarrier = z.infer<typeof integrationVendorCarrierSchema>;
+
+export const integrationOrderSchema = z
+  .object({
+    // The store's own order id. REQUIRED here (unlike the manual flow) because
+    // it is the idempotency anchor — re-sends of the same order must not create
+    // duplicates (DB-enforced by the unique [vendorId, externalReference]).
+    externalReference: z
+      .string()
+      .trim()
+      .min(1)
+      .max(80)
+      .regex(/^[A-Za-z0-9_\-./#]+$/, "Reference can include letters, digits, and -_./#."),
+    recipient: integrationRecipientSchema,
+    lines: z.array(integrationOrderLineSchema).min(1).max(50),
+    // How the parcel ships:
+    //   PLATFORM_SHIP  — USA Errands ships it. Only the fulfillment fee is
+    //                    charged at ingest; the admin buys the carrier label
+    //                    later (and the wallet is charged for shipping then).
+    //   VENDOR_CARRIER — the merchant's own pre-bought label is passed through
+    //                    (see vendorCarrier); we pick/pack and hand off.
+    fulfillmentMode: z.enum(["PLATFORM_SHIP", "VENDOR_CARRIER"]).default("PLATFORM_SHIP"),
+    shipping: z
+      .object({
+        // PLATFORM_SHIP only. Preferred carrier service the admin sees when
+        // picking a rate later; omit for the vendor's default / cheapest.
+        carrierService: z.string().trim().min(2).max(60).optional(),
+        insurance: z.boolean().optional(),
+      })
+      .optional(),
+    vendorCarrier: integrationVendorCarrierSchema.optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.fulfillmentMode === "VENDOR_CARRIER") {
+      if (!data.vendorCarrier) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "vendorCarrier (carrier, tracking, and a label) is required for VENDOR_CARRIER.",
+          path: ["vendorCarrier"],
+        });
+        return;
+      }
+      const { labelUrl, labelBase64, labelContentType } = data.vendorCarrier;
+      if (!labelUrl && !labelBase64) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Provide the label as either labelUrl or labelBase64.",
+          path: ["vendorCarrier", "labelUrl"],
+        });
+      }
+      if (labelUrl && labelBase64) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Provide only one of labelUrl or labelBase64, not both.",
+          path: ["vendorCarrier", "labelBase64"],
+        });
+      }
+      if (labelBase64 && !labelContentType) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "labelContentType is required when sending labelBase64.",
+          path: ["vendorCarrier", "labelContentType"],
+        });
+      }
+    }
+  });
 export type IntegrationOrderInput = z.infer<typeof integrationOrderSchema>;
 
 // ---------------------------------------------------------------------------
