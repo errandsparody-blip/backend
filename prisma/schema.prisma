@@ -460,6 +460,12 @@ model Product {
   // Used in SKU format UER-<VendorID>-<ProductCode>-<Variant>-<Sequence>.
   code            String
 
+  // Migration 0054 — the vendor's OWN store SKU (Shopify/Amazon/Woo). When
+  // set, storefront-integration orders can arrive with this value and we map
+  // it to this product — the merchant doesn't have to paste our `code` into
+  // their store. Nullable; unique per vendor.
+  storeSku        String?  @map("store_sku") @db.VarChar(80)
+
   name            String
   variant         String   @default("STD")
   hsCode          String?  @map("hs_code")          // Harmonized System tariff code
@@ -508,6 +514,7 @@ model Product {
   barcodes        ProductBarcode[]
 
   @@unique([vendorId, code])
+  @@unique([vendorId, storeSku])
   @@index([vendorId, status])
   @@map("products")
 }

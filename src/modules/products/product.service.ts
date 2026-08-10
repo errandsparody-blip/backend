@@ -28,6 +28,8 @@ import { AuditService } from "../audit/audit.service";
 export interface PublicProduct {
   id: string;
   code: string;
+  /** Migration 0054 — vendor's own store SKU used to map integration orders. */
+  storeSku: string | null;
   name: string;
   variant: string;
   hsCode: string | null;
@@ -83,6 +85,8 @@ export class ProductService {
       const data = {
         vendorId,
         code: input.code,
+        // Migration 0054 — optional store-SKU mapping.
+        ...(input.storeSku ? { storeSku: input.storeSku } : {}),
         name: input.name,
         variant: input.variant,
         hsCode: input.hsCode ?? null,
@@ -110,8 +114,16 @@ export class ProductService {
       });
       return this.toPublic(product);
     } catch (e) {
-      // Prisma P2002 = unique constraint violation
+      // Prisma P2002 = unique constraint violation. Distinguish the two
+      // unique keys so the vendor sees the right message.
       if ((e as { code?: string }).code === "P2002") {
+        const target = String((e as { meta?: { target?: unknown } }).meta?.target ?? "");
+        if (target.includes("store_sku")) {
+          throw new ConflictException({
+            message: `The store SKU '${input.storeSku}' is already mapped to another product.`,
+            code: "product_store_sku_taken",
+          });
+        }
         throw new ConflictException({
           message: `A product with code '${input.code}' already exists.`,
           code: "product_code_taken",
@@ -239,9 +251,17 @@ export class ProductService {
       });
     }
 
-    const updated = await this.prisma.product.update({
+    let updated: Product;
+    try {
+      updated = await this.prisma.product.update({
       where: { id }, // safe — we just confirmed scope above
       data: {
+        // Migration 0054 — store SKU is a mapping convenience, NOT a locked
+        // identity/compliance field, so vendors can set or change it any
+        // time (empty string clears it). It's absent from `lockableFields`.
+        ...(patch.storeSku !== undefined
+          ? { storeSku: patch.storeSku ? patch.storeSku : null }
+          : {}),
         ...(patch.name !== undefined ? { name: patch.name } : {}),
         ...(patch.variant !== undefined ? { variant: patch.variant } : {}),
         ...(patch.hsCode !== undefined ? { hsCode: patch.hsCode } : {}),
@@ -266,7 +286,19 @@ export class ProductService {
         // tolerated by the lock check (no diff = no error) and end up as
         // a no-op write, which is fine.
       } as Prisma.ProductUncheckedUpdateInput,
-    });
+      });
+    } catch (e) {
+      if (
+        (e as { code?: string }).code === "P2002" &&
+        String((e as { meta?: { target?: unknown } }).meta?.target ?? "").includes("store_sku")
+      ) {
+        throw new ConflictException({
+          message: `The store SKU '${patch.storeSku}' is already mapped to another product.`,
+          code: "product_store_sku_taken",
+        });
+      }
+      throw e;
+    }
 
     await this.audit.log({
       actorId,
@@ -295,6 +327,8 @@ export class ProductService {
     return {
       id: p.id,
       code: p.code,
+      // Stale-client guard (pre-`prisma generate`): store_sku added in 0054.
+      storeSku: (p as unknown as { storeSku?: string | null }).storeSku ?? null,
       name: p.name,
       variant: p.variant,
       hsCode: p.hsCode,

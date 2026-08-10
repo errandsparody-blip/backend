@@ -50,6 +50,15 @@ const imageUrlOptional = z
 
 export const createProductSchema = z.object({
   code: productCodeSchema,
+  // Migration 0054 — the vendor's own store SKU (Shopify/Amazon/Woo), used
+  // to map storefront-integration orders to this product. Optional; empty
+  // string normalises to undefined (no mapping).
+  storeSku: z
+    .string()
+    .trim()
+    .max(80)
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
   name: z.string().min(2).max(120),
   variant: z.string().min(1).max(40).default("STD"),
   hsCode: z.string().min(4).max(12).optional(),

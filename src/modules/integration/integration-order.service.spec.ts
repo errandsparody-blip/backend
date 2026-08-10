@@ -55,6 +55,7 @@ const baseInput = (): IntegrationOrderInput => ({
 const PRODUCT_ROW = {
   id: "prod-1",
   code: "TSH-BLK-M",
+  storeSku: "STORE-TEE-1",
   name: "Black Tee",
   declaredValueCents: 1000,
   weightOz: 8,
@@ -240,6 +241,15 @@ describe("IntegrationOrderService.ingest (v2)", () => {
     expect(r2.putObject).toHaveBeenCalledTimes(1);
     const row = created.find((c) => c["fulfillmentMode"] === "VENDOR_CARRIER")!;
     expect(row["vendorLabelUrl"]).toBe("https://r2.example/label.pdf");
+  });
+
+  it("resolves a line sent with the vendor's own store SKU (mapping table)", async () => {
+    const { svc, wallet } = makeService({});
+    const input = { ...baseInput(), lines: [{ sku: "STORE-TEE-1", quantity: 2 }] };
+    const r = await svc.ingest({ vendorId: VENDOR, apiKeyId: null, input });
+    // Mapped via product.storeSku → not held, fulfillment charged once.
+    expect(r.held).toBe(false);
+    expect(wallet.debit).toHaveBeenCalledTimes(1);
   });
 
   it("holds UNMAPPED_SKU without touching the wallet", async () => {

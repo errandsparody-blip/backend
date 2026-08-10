@@ -925,8 +925,16 @@ export class IntegrationOrderService {
     lines: IntegrationOrderInput["lines"],
   ): Promise<{ kind: "OK"; resolved: ResolvedLine[] } | { kind: "UNMAPPED" }> {
     const codes = Array.from(new Set(lines.map((l) => l.sku)));
+    // Migration 0054 — an incoming `sku` may be the vendor's own STORE SKU
+    // (mapped via product.storeSku) OR our product code. Match either. The
+    // `where` is cast for the stale-client pattern (store_sku exists in the
+    // DB after 0054; the generated client learns it on the next regenerate).
     const products = await this.prisma.product.findMany({
-      where: { vendorId, code: { in: codes }, status: "ACTIVE" },
+      where: {
+        vendorId,
+        status: "ACTIVE",
+        OR: [{ code: { in: codes } }, { storeSku: { in: codes } }],
+      } as unknown as Prisma.ProductWhereInput,
       include: {
         skus: {
           where: { status: "ACTIVE" },
@@ -934,11 +942,19 @@ export class IntegrationOrderService {
         },
       },
     });
-    const byCode = new Map(products.map((p) => [p.code, p]));
+    // Index by BOTH the store SKU (preferred) and our code so a line
+    // resolves whichever identifier the store sent.
+    type ProductWithSkus = (typeof products)[number];
+    const byKey = new Map<string, ProductWithSkus>();
+    for (const p of products) {
+      const storeSku = (p as unknown as { storeSku?: string | null }).storeSku;
+      if (storeSku) byKey.set(storeSku, p);
+      byKey.set(p.code, p);
+    }
 
     const resolved: ResolvedLine[] = [];
     for (const line of lines) {
-      const product = byCode.get(line.sku);
+      const product = byKey.get(line.sku);
       // Unmapped if the code is unknown OR the product has no receivable SKU
       // bucket yet (nothing has been received against it).
       const sku = product?.skus[0];
