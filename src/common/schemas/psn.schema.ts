@@ -104,6 +104,14 @@ export type ReceiveLineInput = z.infer<typeof receiveLineSchema>;
 
 export const completeReceivingSchema = z.object({
   lines: z.array(receiveLineSchema).min(1),
+  // Admin tier correction (optional). When the physical boxes don't match
+  // the tier the vendor declared (e.g. they picked SMALL but shipped a
+  // LARGE), the operator sends the CORRECTED box mix here. On receive we
+  // create the StorageBox rows at these tiers — so recurring monthly
+  // storage bills at the corrected rate — and charge the vendor the
+  // first-month + stocking DIFFERENCE (or place a WRONG_TIER hold for it
+  // if the wallet is short). Omit to accept the vendor's declared mix.
+  correctedBoxCounts: declaredBoxCountsSchema.optional(),
 });
 export type CompleteReceivingInput = z.infer<typeof completeReceivingSchema>;
 

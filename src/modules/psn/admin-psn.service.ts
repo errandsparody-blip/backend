@@ -23,6 +23,11 @@ import {
 } from "@nestjs/common";
 import type { Prisma, PrismaClient, PsnStatus } from "@prisma/client";
 
+import {
+  computeOnboardingFeeCents,
+  loadFeeSchedule,
+  type DeclaredBoxCounts,
+} from "../../common/fees";
 import { PrismaService } from "../../common/prisma.service";
 import type { CompleteReceivingInput, ListPsnsInput } from "../../common/schemas/psn.schema";
 import { ShippingPointService } from "../../common/services/shipping-point.service";
@@ -355,10 +360,19 @@ export class AdminPsnService {
           ? "PARTIALLY_RECEIVED"
           : "RECEIVED";
 
+      // Admin tier correction — if provided, the corrected box mix REPLACES
+      // the vendor's declared mix so the StorageBox rows below are created
+      // at the corrected tier (recurring monthly storage self-corrects).
+      const hasCorrection =
+        !!input.correctedBoxCounts && Object.keys(input.correctedBoxCounts).length > 0;
+
       const updated = await tx.psn.update({
         where: { id: psn.id },
         data: {
           status: next,
+          ...(hasCorrection
+            ? { declaredBoxCounts: input.correctedBoxCounts as Prisma.InputJsonValue }
+            : {}),
           // Stamp `receivedAt` on the FIRST receive action regardless
           // of the resulting status. PARTIALLY_RECEIVED and DISCREPANCY
           // are still real warehouse events — the operator opened the
@@ -397,6 +411,59 @@ export class AdminPsnService {
         updated.receivedAt ?? new Date(),
         updated.shippingMode,
       );
+
+      // Tier-correction billing. The StorageBox rows above were created at
+      // the corrected tier, so RECURRING monthly storage already bills at
+      // the higher rate. Here we settle the ONE-TIME first-month + stocking
+      // DIFFERENCE between the declared and corrected mix. If the wallet
+      // can't cover it, we place a WRONG_TIER hold for the difference —
+      // the boxes stay corrected, so recurring is right regardless of when
+      // the vendor pays.
+      if (hasCorrection) {
+        const schedule = await loadFeeSchedule(this.prisma);
+        const declaredFee = computeOnboardingFeeCents(
+          schedule,
+          (psn.declaredBoxCounts ?? {}) as DeclaredBoxCounts,
+          psn.shippingMode,
+        );
+        const correctedFee = computeOnboardingFeeCents(
+          schedule,
+          input.correctedBoxCounts as DeclaredBoxCounts,
+          psn.shippingMode,
+        );
+        const deltaCents = Math.max(0, correctedFee.totalCents - declaredFee.totalCents);
+        if (deltaCents > 0) {
+          const balance = (await this.wallet.get(psn.vendorId)).balanceCents;
+          if (balance >= deltaCents) {
+            await this.wallet.debit(
+              {
+                vendorId: psn.vendorId,
+                amountCents: deltaCents,
+                type: "ONBOARDING",
+                description: `Box tier correction — PSN ${psn.id.slice(0, 8)}`,
+                referenceType: "psn",
+                referenceId: psn.id,
+                actorId,
+              },
+              tx as unknown as Parameters<typeof this.wallet.debit>[1],
+            );
+          } else {
+            await (
+              tx as unknown as { psnHold: { create: (a: unknown) => Promise<unknown> } }
+            ).psnHold.create({
+              data: {
+                psnId: psn.id,
+                extraChargeCents: deltaCents,
+                reasonCode: "WRONG_TIER",
+                reasonNote: `Box tier corrected at receive; first-month + stocking difference of $${(deltaCents / 100).toFixed(2)} due. Recurring monthly storage now bills at the corrected tier.`,
+                status: "PENDING_PAYMENT",
+                createdBy: actorId,
+                releaseAfter: new Date(Date.now() + HOLD_RELEASE_DAYS * 24 * 60 * 60 * 1000),
+              },
+            });
+          }
+        }
+      }
 
       await this.audit.log({
         actorId,
@@ -917,16 +984,23 @@ export class AdminPsnService {
       if (psn.vendorId !== actorVendorId) {
         throw new NotFoundException();
       }
-      // Cast to string for the comparison — the generated Prisma client may
-      // not yet include "HOLD" in PsnStatus until `prisma generate` is re-run
-      // after migration 0020. At runtime the value is a literal Postgres
-      // enum string. Same pattern used elsewhere in this file.
-      if ((psn.status as string) !== "HOLD") {
+      // A hold can be paid in two situations:
+      //   1. Pre-receive hold: PSN is HOLD → paying it releases the PSN back
+      //      to AWAITING_RECEIPT so the operator can finish receiving.
+      //   2. Tier-correction difference: the PSN was already RECEIVED (boxes
+      //      created at the corrected tier) but the wallet couldn't cover the
+      //      one-time difference, so a WRONG_TIER hold was recorded. Paying
+      //      it just settles the difference — the PSN status stays as-is.
+      // Cast to string — the stale client may not include HOLD/received
+      // enum values until `prisma generate` runs.
+      const payableStatuses = ["HOLD", "RECEIVED", "PARTIALLY_RECEIVED", "DISCREPANCY"];
+      if (!payableStatuses.includes(psn.status as string)) {
         throw new ConflictException({
-          message: `PSN is in status ${psn.status}, not HOLD — no payment due.`,
+          message: `PSN is in status ${psn.status} — no payment due.`,
           code: "psn_no_hold",
         });
       }
+      const wasBlockingHold = (psn.status as string) === "HOLD";
 
       const hold = (await (
         tx as unknown as {
@@ -982,17 +1056,22 @@ export class AdminPsnService {
         },
       });
 
-      const updated = await tx.psn.update({
-        where: { id: psnId },
-        data: { status: "AWAITING_RECEIPT" as PsnStatus },
-      });
+      // Only a pre-receive (blocking) hold reverts the status so receiving
+      // can resume. A post-receive tier-difference hold leaves the PSN
+      // exactly where it was — the boxes are already received & corrected.
+      const updated = wasBlockingHold
+        ? await tx.psn.update({
+            where: { id: psnId },
+            data: { status: "AWAITING_RECEIPT" as PsnStatus },
+          })
+        : psn;
 
       await this.audit.log({
         actorId: actorUserId,
         action: "psn.hold.paid",
         resourceType: "psn",
         resourceId: psnId,
-        beforeState: { status: "HOLD" },
+        beforeState: { status: psn.status },
         afterState: {
           status: updated.status,
           holdId: hold.id,
