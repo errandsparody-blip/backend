@@ -319,10 +319,32 @@ export class AdminOrderService {
         : null);
     const workflowVersion = raw.workflowVersion ?? 1;
 
+    // Migration 0055 — vendor-selected label add-ons. Read via raw SQL so
+    // the admin sees the true choice even when the sandbox Prisma client
+    // predates the new columns (the `...order` spread would omit them).
+    const addonRows = await this.prisma.$queryRaw<
+      Array<{
+        insurance_requested: boolean;
+        signature_required: boolean;
+        adult_signature_required: boolean;
+      }>
+    >(Prisma.sql`
+      SELECT insurance_requested, signature_required, adult_signature_required
+      FROM orders WHERE id = ${id}::uuid
+    `);
+    const addons = addonRows[0] ?? {
+      insurance_requested: false,
+      signature_required: false,
+      adult_signature_required: false,
+    };
+
     return {
       ...order,
       packagingLabel,
       workflowVersion,
+      insuranceRequested: addons.insurance_requested,
+      signatureRequired: addons.signature_required,
+      adultSignatureRequired: addons.adult_signature_required,
     };
   }
 

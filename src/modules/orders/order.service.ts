@@ -198,6 +198,15 @@ export interface PublicOrder {
    */
   fulfillmentMode: "PLATFORM_SHIP" | "VENDOR_CARRIER";
   handedOffAt: Date | null;
+  /**
+   * Vendor-selected label add-ons (migration 0055). Surfaced so the admin
+   * pack/buy-label UI can show what the vendor asked for and the operator
+   * knows to expect the surcharges. insurance is bought against
+   * itemsDeclaredValueCents; adultSignature implies signatureRequired.
+   */
+  insuranceRequested: boolean;
+  signatureRequired: boolean;
+  adultSignatureRequired: boolean;
   lines: Array<{
     id: string;
     skuId: string;
@@ -247,6 +256,31 @@ export class OrderService {
   // see USPS rejection inline, not after wallet debit. No DB write.
   // ===========================================================================
 
+  /**
+   * Country-aware address verification.
+   *
+   * US addresses go through Smarty/Shippo US verification, which is
+   * authoritative and drives the hard submit gate. International addresses
+   * (currently Canada) can't be validated by the US verifier, so we accept
+   * on format — Zod already enforced the province code + Canadian postal
+   * shape — and defer to Shippo's carrier-side validation at label-buy
+   * time, which is authoritative for the destination country. This keeps
+   * US behaviour byte-for-byte identical while unblocking Canada.
+   */
+  private async verifyShipAddress(addr: {
+    line1: string;
+    line2?: string | undefined;
+    city: string;
+    state: string;
+    postalCode: string;
+    country: string;
+  }): Promise<AddressValidationResult> {
+    if ((addr.country ?? "US").toUpperCase() !== "US") {
+      return { outcome: "ACCEPTED" };
+    }
+    return this.smarty.verifyUS(addr);
+  }
+
   async validateAddress(input: {
     shipAddressLine1: string;
     shipAddressLine2?: string | undefined;
@@ -268,7 +302,7 @@ export class OrderService {
         }
       | undefined;
   }> {
-    const result = await this.smarty.verifyUS({
+    const result = await this.verifyShipAddress({
       line1: input.shipAddressLine1,
       line2: input.shipAddressLine2,
       city: input.shipCity,
@@ -315,8 +349,8 @@ export class OrderService {
   // ===========================================================================
 
   async quote(vendorId: string, input: QuoteOrderInput): Promise<QuoteResult> {
-    // 1. Validate the destination address.
-    const addressValidation = await this.smarty.verifyUS({
+    // 1. Validate the destination address (country-aware).
+    const addressValidation = await this.verifyShipAddress({
       line1: input.recipient.shipAddressLine1,
       line2: input.recipient.shipAddressLine2,
       city: input.recipient.shipCity,
@@ -533,7 +567,7 @@ export class OrderService {
     //    Follow-up (not in this phase): the wizard's address step could
     //    render the correction inline with an "Accept suggested" button
     //    so the vendor never gets a submit error at all.
-    const addressValidation = await this.smarty.verifyUS({
+    const addressValidation = await this.verifyShipAddress({
       line1: input.recipient.shipAddressLine1,
       line2: input.recipient.shipAddressLine2,
       city: input.recipient.shipCity,
@@ -792,6 +826,13 @@ export class OrderService {
             workflowVersion: 2,
             estimatedShippingMinCents,
             estimatedShippingMaxCents,
+            // Migration 0055 — vendor-selected label add-ons. Persisted so
+            // the admin honours them at buy-label time. adultSignature
+            // implies signature; normalise here so downstream logic can
+            // read either flag directly.
+            insuranceRequested: input.insuranceRequested,
+            signatureRequired: input.signatureRequired || input.adultSignatureRequired,
+            adultSignatureRequired: input.adultSignatureRequired,
           } as Record<string, unknown>),
           trackingNumber: isVendorCarrier
             ? input.vendorCarrier?.vendorTrackingNumber ?? null
@@ -1289,6 +1330,14 @@ export class OrderService {
           | "VENDOR_CARRIER"
           | undefined) ?? "PLATFORM_SHIP",
       handedOffAt: (o as unknown as { handedOffAt?: Date | null }).handedOffAt ?? null,
+      // Migration 0055 — vendor-selected add-ons. Cast-read (stale client)
+      // with false defaults for legacy rows.
+      insuranceRequested:
+        (o as unknown as { insuranceRequested?: boolean }).insuranceRequested ?? false,
+      signatureRequired:
+        (o as unknown as { signatureRequired?: boolean }).signatureRequired ?? false,
+      adultSignatureRequired:
+        (o as unknown as { adultSignatureRequired?: boolean }).adultSignatureRequired ?? false,
       // Phase O — vendor-visible packaging summary. Reads through
       // `as unknown` casts because the sandbox Prisma client hasn't
       // been regenerated for the pack-step / packaging_option

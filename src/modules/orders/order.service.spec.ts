@@ -313,6 +313,8 @@ describe("OrderService — tenant isolation + address rejection", () => {
         lines: [{ skuId: "UER-VA0001-T-STD", quantity: 1 }],
         carrierService: "USPS Priority",
         insuranceRequested: false,
+        signatureRequired: false,
+        adultSignatureRequired: false,
         // Migration 0037 — fulfillment branch defaults to PLATFORM_SHIP
         // for existing call-sites that haven't been migrated.
         fulfillmentMode: "PLATFORM_SHIP",
@@ -346,6 +348,8 @@ describe("OrderService — tenant isolation + address rejection", () => {
         lines: [{ skuId: "UER-VA0001-T-STD", quantity: 1 }],
         carrierService: "USPS Priority",
         insuranceRequested: false,
+        signatureRequired: false,
+        adultSignatureRequired: false,
         fulfillmentMode: "PLATFORM_SHIP",
       })
       .catch((e: unknown) => e);

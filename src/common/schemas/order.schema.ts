@@ -14,22 +14,86 @@ import { z } from "zod";
 // Helpers
 // ---------------------------------------------------------------------------
 
-// US state — 2 letters, uppercased. Domestic-only check is enforced inside the
-// service when shipCountry === "US".
+// State/province — 2 letters, uppercased. Per-country membership is checked
+// in the country-aware superRefine below.
 const usStateLike = z
   .string()
   .trim()
   .toUpperCase()
-  .regex(/^[A-Z]{2}$/, "Use a 2-letter state code, e.g. CA.");
+  .regex(/^[A-Z]{2}$/, "Use a 2-letter state/province code, e.g. CA or ON.");
 
-// Postal code: trimmed; uppercase; minimal shape. Smarty handles full validation.
+// Postal code: trimmed; uppercase; minimal shape. The country-aware refine
+// below applies the US (ZIP) vs CA (A1A 1A1) format check.
 const postalCode = z.string().trim().toUpperCase().min(3).max(12);
 
-const iso2 = z
+// Supported ship-to countries. US is the default; CA (Canada) is the first
+// international destination. Extend this list as more countries come online.
+const shipCountrySchema = z
   .string()
   .trim()
   .toUpperCase()
-  .regex(/^[A-Z]{2}$/, "Use a 2-letter ISO country code, e.g. US.");
+  .pipe(z.enum(["US", "CA"], { errorMap: () => ({ message: "We currently ship to the US and Canada only." }) }));
+
+// Valid 2-letter codes per country. US = 50 states + DC + common territories;
+// CA = the 10 provinces + 3 territories.
+const US_STATES = new Set([
+  "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL",
+  "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT",
+  "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI",
+  "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+  "DC", "PR", "VI", "GU", "AS", "MP",
+]);
+const CA_PROVINCES = new Set([
+  "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT",
+]);
+
+const US_ZIP_RE = /^\d{5}(-\d{4})?$/;
+// Canadian postal: A1A 1A1 (letter-digit-letter [space] digit-letter-digit).
+const CA_POSTAL_RE = /^[A-Z]\d[A-Z] ?\d[A-Z]\d$/;
+
+/**
+ * Country-aware validation applied to any recipient address. Checks that the
+ * state/province belongs to the declared country and the postal code matches
+ * that country's format. Attaches issues to the specific field so the form
+ * highlights the right input. Shared by the create + address-check schemas.
+ */
+function refineCountryAddress(
+  data: { shipCountry: string; shipState: string; shipPostalCode: string },
+  ctx: z.RefinementCtx,
+): void {
+  const country = (data.shipCountry ?? "US").toUpperCase();
+  if (country === "US") {
+    if (!US_STATES.has(data.shipState)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["shipState"],
+        message: "Enter a valid US state code, e.g. CA.",
+      });
+    }
+    if (!US_ZIP_RE.test(data.shipPostalCode)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["shipPostalCode"],
+        message: "US ZIP must be 5 digits (or ZIP+4, e.g. 90210-1234).",
+      });
+    }
+  } else if (country === "CA") {
+    if (!CA_PROVINCES.has(data.shipState)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["shipState"],
+        message: "Enter a valid Canadian province code, e.g. ON or BC.",
+      });
+    }
+    if (!CA_POSTAL_RE.test(data.shipPostalCode)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["shipPostalCode"],
+        message: "Canadian postal code must look like A1A 1A1.",
+      });
+    }
+  }
+}
 
 const emailNullable = z
   .string()
@@ -99,8 +163,8 @@ export const recipientAddressSchema = z.object({
     .regex(/[A-Za-z]/, "City must contain letters."),
   shipState: usStateLike,
   shipPostalCode: postalCode,
-  shipCountry: iso2.default("US"),
-});
+  shipCountry: shipCountrySchema.default("US"),
+}).superRefine(refineCountryAddress);
 export type RecipientAddress = z.infer<typeof recipientAddressSchema>;
 
 // ---------------------------------------------------------------------------
@@ -116,8 +180,8 @@ export const validateAddressSchema = z.object({
   shipCity: z.string().trim().min(2).max(80),
   shipState: usStateLike,
   shipPostalCode: postalCode,
-  shipCountry: iso2.default("US"),
-});
+  shipCountry: shipCountrySchema.default("US"),
+}).superRefine(refineCountryAddress);
 export type ValidateAddressInput = z.infer<typeof validateAddressSchema>;
 
 /** Free-text address to split into structured fields via Shippo's parser. */
@@ -229,6 +293,11 @@ export const createOrderSchema = z.object({
     .optional()
     .or(z.literal("").transform(() => undefined)),
   insuranceRequested: z.boolean().default(false),
+  // Migration 0055 — signature-on-delivery add-ons the vendor opts into.
+  // The admin honours these at buy-label time. adultSignature implies a
+  // signature and takes precedence when both are set.
+  signatureRequired: z.boolean().default(false),
+  adultSignatureRequired: z.boolean().default(false),
   // Soft cap so a typo can't bankrupt a vendor in one click.
   maxAcceptableTotalCents: z.number().int().positive().max(50_000_000).optional(),
   // Vendor-carrier details — service requires at least one of label URL

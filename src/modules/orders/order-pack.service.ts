@@ -63,6 +63,7 @@ import { AuditService } from "../audit/audit.service";
 import { NotificationService } from "../notifications/notification.service";
 import {
   ShippoService,
+  type CustomsDeclaration,
   type LabelResponse,
   type ShippingRate,
 } from "../integrations/shippo/shippo.service";
@@ -1215,6 +1216,35 @@ export class OrderPackService {
       });
     }
 
+    // Vendor-selected add-ons (migration 0055). Read via raw SQL so this
+    // works even when the local Prisma client hasn't been regenerated with
+    // the new columns (Railway regenerates on deploy; local can lag).
+    const addonRows = await this.prisma.$queryRaw<
+      Array<{
+        insurance_requested: boolean;
+        signature_required: boolean;
+        adult_signature_required: boolean;
+      }>
+    >(Prisma.sql`
+      SELECT insurance_requested, signature_required, adult_signature_required
+      FROM orders WHERE id = ${orderId}::uuid
+    `);
+    const addons = addonRows[0] ?? {
+      insurance_requested: false,
+      signature_required: false,
+      adult_signature_required: false,
+    };
+    // Adult signature supersedes standard signature when both are set.
+    const signatureConfirmation: "STANDARD" | "ADULT" | undefined = addons.adult_signature_required
+      ? "ADULT"
+      : addons.signature_required
+        ? "STANDARD"
+        : undefined;
+    // International (non-US) shipments need a customs declaration built
+    // from the order lines.
+    const isInternational = (order.shipCountry ?? "US").toUpperCase() !== "US";
+    const customs = isInternational ? await this.buildOrderCustoms(orderId) : undefined;
+
     const rateResponse = await this.shippo.getRates({
       fromAddress: this.warehouseOrigin,
       toAddress: {
@@ -1234,9 +1264,9 @@ export class OrderPackService {
         template: raw.parcelTemplate ?? undefined,
       },
       declaredValueCents: order.itemsDeclaredValueCents,
-      // v2 defers insurance to a later phase; the pack step never
-      // re-opens the insurance choice.
-      insuranceRequested: false,
+      insuranceRequested: addons.insurance_requested,
+      signatureConfirmation,
+      customs,
     });
 
     if (rateResponse.rates.length === 0) {
@@ -1589,11 +1619,26 @@ export class OrderPackService {
     //      for manual reconciliation (the audit trail + Shippo dashboard
     //      have the tracking number, we just failed to record it).
 
+    // Vendor-requested insurance (migration 0055). When set, insure the
+    // shipment for the order's declared value. Read via raw SQL so a stale
+    // local Prisma client (missing the new columns) can't break the buy.
+    const insRows = await this.prisma.$queryRaw<
+      Array<{ insurance_requested: boolean; items_declared_value_cents: number }>
+    >(Prisma.sql`
+      SELECT insurance_requested, items_declared_value_cents
+      FROM orders WHERE id = ${orderId}::uuid
+    `);
+    const insuranceCents =
+      insRows[0]?.insurance_requested && (insRows[0]?.items_declared_value_cents ?? 0) > 0
+        ? insRows[0].items_declared_value_cents
+        : 0;
+
     let label: LabelResponse;
     try {
       label = await this.shippo.purchaseLabel({
         shipmentId: inner.shipmentProviderRef,
         rateId: inner.rateProviderRef,
+        ...(insuranceCents > 0 ? { insuranceCents } : {}),
       });
     } catch (labelErr) {
       // ---- Class A — Shippo refused. Compensate. -----------------------
@@ -1960,5 +2005,51 @@ export class OrderPackService {
     if (typeof value === "number") return value;
     if (typeof value === "string") return Number(value);
     return Number(value.toString());
+  }
+
+  /**
+   * Builds a customs declaration for an international order from its lines
+   * joined to their products (HS code, origin country and per-unit weight
+   * live on the product; per-unit value is derived from the line's
+   * declared value ÷ quantity). Returns undefined when the order has no
+   * lines. Contents default to MERCHANDISE / DDU — the common case for a
+   * fulfilled retail shipment.
+   */
+  private async buildOrderCustoms(orderId: string): Promise<CustomsDeclaration | undefined> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        product_name: string;
+        quantity: number;
+        declared_value_cents: number; // unit value × quantity
+        weight_oz: number;
+        hs_code: string | null;
+        country_of_origin: string;
+      }>
+    >(Prisma.sql`
+      SELECT ol.product_name, ol.quantity, ol.declared_value_cents,
+             p.weight_oz, p.hs_code, p.country_of_origin
+      FROM order_lines ol
+      JOIN products p ON p.id = ol.product_id
+      WHERE ol.order_id = ${orderId}::uuid
+    `);
+    if (rows.length === 0) return undefined;
+    return {
+      contentsType: "MERCHANDISE",
+      signer: "USA Errands Fulfillment",
+      incoterm: "DDU",
+      items: rows.map((r) => {
+        const qty = Math.max(1, r.quantity);
+        return {
+          description: r.product_name,
+          quantity: r.quantity,
+          netWeightOz: r.weight_oz,
+          // Line declared value is unit × qty; divide back to per-unit for
+          // the customs item (Shippo expects per-item value).
+          valueCents: Math.round(r.declared_value_cents / qty),
+          hsCode: r.hs_code ?? undefined,
+          originCountry: (r.country_of_origin ?? "US").toUpperCase(),
+        };
+      }),
+    };
   }
 }

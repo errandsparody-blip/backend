@@ -74,9 +74,48 @@ export interface RateRequest {
     country: string;
   };
   parcel: RateRequestParcel;
-  /** Total declared value in cents — informs insurance / customs (US-only v1). */
+  /** Total declared value in cents — informs insurance / customs. */
   declaredValueCents: number;
   insuranceRequested: boolean;
+  /**
+   * Signature-on-delivery add-on. STANDARD = signature confirmation;
+   * ADULT = adult (21+) signature. Set at shipment creation so the rate
+   * reflects the surcharge AND the purchased label inherits it. Omit for
+   * no signature requirement.
+   */
+  signatureConfirmation?: "STANDARD" | "ADULT" | undefined;
+  /**
+   * Customs declaration — REQUIRED by Shippo for any international
+   * shipment (toAddress.country !== "US"). Built from the order lines
+   * (per-item description, quantity, unit value, HS code, origin). Omit
+   * for domestic shipments.
+   */
+  customs?: CustomsDeclaration | undefined;
+}
+
+/** One line on an international customs declaration. */
+export interface CustomsItem {
+  /** Human description printed on the CN22/CN23 (e.g. the product name). */
+  description: string;
+  quantity: number;
+  /** Per-unit net weight in ounces. */
+  netWeightOz: number;
+  /** Per-unit declared value in cents. */
+  valueCents: number;
+  /** Harmonised System tariff code, when the product carries one. */
+  hsCode?: string | undefined;
+  /** ISO-2 country the item was made in. */
+  originCountry: string;
+}
+
+/** International customs declaration passed to Shippo at shipment time. */
+export interface CustomsDeclaration {
+  contentsType: "MERCHANDISE" | "GIFT" | "DOCUMENTS" | "SAMPLE" | "RETURN_MERCHANDISE" | "OTHER";
+  items: CustomsItem[];
+  /** Name certifying the declaration (our warehouse/ops signer). */
+  signer: string;
+  /** DDU = duties billed to recipient (default); DDP = billed to sender. */
+  incoterm?: "DDU" | "DDP" | undefined;
 }
 
 export interface ShippingRate {
@@ -393,12 +432,20 @@ export class ShippoService {
     if (req.parcel.template) {
       parcel.template = req.parcel.template;
     }
-    const body = {
+    const body: Record<string, unknown> = {
       address_from: addressFrom,
       address_to: addressTo,
       parcels: [parcel],
       async: false,
     };
+    // Signature-on-delivery is a shipment-level extra so it's priced into
+    // the rates AND carried onto whatever label the operator later buys.
+    const extra = this.buildShipmentExtra(req);
+    if (extra) body.extra = extra;
+    // International shipments require a customs declaration. Shippo accepts
+    // it inline on the shipment payload.
+    const customs = this.buildCustomsDeclaration(req);
+    if (customs) body.customs_declaration = customs;
 
     const ship = await this.request<ShShipment>("POST", "/shipments/", body);
     if (!ship.rates || ship.rates.length === 0) {
@@ -451,21 +498,29 @@ export class ShippoService {
     addressFrom: Record<string, string>,
     addressTo: Record<string, string>,
   ): Promise<ShippingRate[]> {
+    // USPS domestic flat-rate only. International uses its own flat-rate
+    // services with customs, which we don't model here — skip so we don't
+    // surface a domestic flat rate for a Canada shipment.
+    if ((req.toAddress.country ?? "US").toUpperCase() !== "US") return [];
+
     const eligible = eligibleFlatRateContainers(req.parcel);
     if (eligible.length === 0) return [];
 
+    const extra = this.buildShipmentExtra(req);
     const weightOz = Math.max(1, Math.round(req.parcel.weightOz));
     const perContainer = await Promise.all(
       eligible.map(async (c) => {
         try {
-          const ship = await this.request<ShShipment>("POST", "/shipments/", {
+          const flatBody: Record<string, unknown> = {
             address_from: addressFrom,
             address_to: addressTo,
             // A flat-rate template replaces explicit dimensions — USPS prices
             // by the box, not by size, as long as weight stays under the cap.
             parcels: [{ template: c.template, weight: weightOz.toString(), mass_unit: "oz" }],
             async: false,
-          });
+          };
+          if (extra) flatBody.extra = extra;
+          const ship = await this.request<ShShipment>("POST", "/shipments/", flatBody);
           // Shippo prices a flat-rate box under the standard "Priority Mail"
           // service (token `usps_priority`) — the service NAME does not say
           // "flat rate", so we must match the service, not a label. Keep only
@@ -500,6 +555,48 @@ export class ShippoService {
   }
 
   // ---------------------------------------------------------------------------
+
+  /**
+   * Builds Shippo's shipment-level `extra` object from the requested
+   * add-ons, or `undefined` when none apply. Signature confirmation must
+   * live here (not on the transaction) so it's both priced into the rates
+   * and carried onto the purchased label. Insurance is added at purchase
+   * time (see purchaseLabelLive) to avoid double-charging.
+   */
+  private buildShipmentExtra(req: RateRequest): Record<string, unknown> | undefined {
+    if (!req.signatureConfirmation) return undefined;
+    // Shippo signature_confirmation tokens: STANDARD | ADULT | ...
+    return { signature_confirmation: req.signatureConfirmation };
+  }
+
+  /**
+   * Builds Shippo's inline `customs_declaration` for international
+   * shipments, or `undefined` for domestic. Each item carries a
+   * description, quantity, per-unit net weight/value and origin so the
+   * carrier can generate the CN22/CN23. Duties default to DDU (billed to
+   * the recipient) unless the caller specifies otherwise.
+   */
+  private buildCustomsDeclaration(req: RateRequest): Record<string, unknown> | undefined {
+    const customs = req.customs;
+    if (!customs || customs.items.length === 0) return undefined;
+    return {
+      certify: true,
+      certify_signer: customs.signer,
+      contents_type: customs.contentsType,
+      non_delivery_option: "RETURN",
+      incoterm: customs.incoterm ?? "DDU",
+      items: customs.items.map((it) => ({
+        description: it.description,
+        quantity: it.quantity,
+        net_weight: (Math.max(0.1, it.netWeightOz) / 16).toFixed(4), // oz → lb
+        mass_unit: "lb",
+        value_amount: (it.valueCents / 100).toFixed(2),
+        value_currency: "USD",
+        origin_country: it.originCountry,
+        ...(it.hsCode ? { tariff_number: it.hsCode } : {}),
+      })),
+    };
+  }
 
   private getRatesStub(req: RateRequest): Promise<RateResponse> {
     const lbs = req.parcel.weightOz / 16;
@@ -1096,10 +1193,15 @@ export class ShippoService {
         message: "Parcel dimensions cannot be negative.",
       });
     }
-    if (req.toAddress.country !== "US" || req.fromAddress.country !== "US") {
+    // We ship FROM a US warehouse TO the US or Canada. Anything else is
+    // not supported yet. (Canada added migration 0055 — customs declaration
+    // is attached automatically for the international leg.)
+    const dest = (req.toAddress.country ?? "US").toUpperCase();
+    const origin = (req.fromAddress.country ?? "US").toUpperCase();
+    if (origin !== "US" || (dest !== "US" && dest !== "CA")) {
       throw new BadRequestException({
         code: "shippo_intl_unsupported",
-        message: "v1 supports US domestic shipping only.",
+        message: "We ship from the US to US and Canada destinations only.",
       });
     }
   }

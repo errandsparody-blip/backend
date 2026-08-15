@@ -190,16 +190,16 @@ describe("ShippoService — boundary helpers", () => {
       expect(errorCode(result)).toBe("shippo_invalid_weight");
     });
 
-    it("getRates rejects non-US destinations", async () => {
+    it("getRates rejects unsupported destinations (US + CA only)", async () => {
       const result = await svc
         .getRates({
           fromAddress: { state: "FL", postalCode: "33101", country: "US" },
           toAddress: {
             line1: "x",
-            city: "x",
-            state: "ON",
-            postalCode: "M5H",
-            country: "CA",
+            city: "London",
+            state: "LN",
+            postalCode: "SW1A",
+            country: "GB",
           },
           parcel: { weightOz: 16, lengthIn: 9, widthIn: 6, heightIn: 3 },
           declaredValueCents: 100,
@@ -261,6 +261,120 @@ describe("ShippoService — boundary helpers", () => {
       const secret = "d678b3c36f065c9c22cce5f12fbe4bb7";
       const withSecret = svcWithSecret(secret);
       expect(withSecret.verifyWebhookSecret(secret)).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Live-mode shipment extras — signature confirmation + international
+  // customs declaration (migration 0055 / Canada). We force live mode and
+  // stub the HTTP `request` to capture the shipment body Shippo would
+  // receive, then assert the add-on/customs payload is shaped correctly.
+  // -------------------------------------------------------------------------
+
+  describe("getRatesLive — signature + customs payload", () => {
+    function liveSvc(): { svc: ShippoService; bodies: Array<Record<string, unknown>> } {
+      const svc = new ShippoService();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
+      const cfg = (svc as any).cfg as Record<string, unknown>;
+      cfg.SHIPPO_API_KEY = "shippo_test_key";
+      cfg.WAREHOUSE_FROM_NAME = "USA Errands";
+      cfg.WAREHOUSE_FROM_STREET1 = "1 Warehouse Rd";
+      cfg.WAREHOUSE_FROM_CITY = "Miami";
+      cfg.WAREHOUSE_FROM_STATE = "FL";
+      cfg.WAREHOUSE_FROM_ZIP = "33101";
+      cfg.WAREHOUSE_FROM_PHONE = "3055551234";
+      cfg.WAREHOUSE_FROM_EMAIL = "ops@example.com";
+
+      const bodies: Array<Record<string, unknown>> = [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access
+      (svc as any).request = jest.fn(async (_method: string, _path: string, body?: Record<string, unknown>) => {
+        if (body) bodies.push(body);
+        return {
+          object_id: "shp_live_1",
+          rates: [
+            {
+              object_id: "rate_1",
+              provider: "USPS",
+              servicelevel: { name: "Priority Mail International", token: "usps_priority_intl" },
+              amount: "24.50",
+              estimated_days: 6,
+            },
+          ],
+        };
+      });
+      return { svc, bodies };
+    }
+
+    it("adds signature_confirmation + inline customs_declaration for a Canada shipment", async () => {
+      const { svc, bodies } = liveSvc();
+      const resp = await svc.getRates({
+        fromAddress: { state: "FL", postalCode: "33101", country: "US" },
+        toAddress: {
+          recipientName: "Jean Client",
+          line1: "100 Yonge St",
+          city: "Toronto",
+          state: "ON",
+          postalCode: "M5V 2T6",
+          country: "CA",
+        },
+        parcel: { weightOz: 32, lengthIn: 10, widthIn: 8, heightIn: 6 },
+        declaredValueCents: 12_000,
+        insuranceRequested: true,
+        signatureConfirmation: "ADULT",
+        customs: {
+          contentsType: "MERCHANDISE",
+          signer: "USA Errands Fulfillment",
+          incoterm: "DDU",
+          items: [
+            {
+              description: "Black Tee",
+              quantity: 2,
+              netWeightOz: 8,
+              valueCents: 6_000,
+              hsCode: "610910",
+              originCountry: "US",
+            },
+          ],
+        },
+      });
+
+      expect(resp.rates.length).toBeGreaterThan(0);
+      const shipmentBody = bodies.find((b) => "parcels" in b);
+      expect(shipmentBody).toBeDefined();
+      // Signature extra present.
+      expect((shipmentBody!.extra as { signature_confirmation?: string }).signature_confirmation).toBe("ADULT");
+      // Customs declaration present + shaped.
+      const customs = shipmentBody!.customs_declaration as {
+        contents_type?: string;
+        certify?: boolean;
+        items?: Array<{ description?: string; quantity?: number; tariff_number?: string }>;
+      };
+      expect(customs.contents_type).toBe("MERCHANDISE");
+      expect(customs.certify).toBe(true);
+      expect(customs.items?.[0]?.description).toBe("Black Tee");
+      expect(customs.items?.[0]?.tariff_number).toBe("610910");
+    });
+
+    it("omits customs + signature for a plain domestic shipment", async () => {
+      const { svc, bodies } = liveSvc();
+      await svc.getRates({
+        fromAddress: { state: "FL", postalCode: "33101", country: "US" },
+        toAddress: {
+          recipientName: "Jane Buyer",
+          line1: "1 Test Way",
+          city: "Miami",
+          state: "FL",
+          postalCode: "33101",
+          country: "US",
+        },
+        parcel: { weightOz: 16, lengthIn: 20, widthIn: 16, heightIn: 10 },
+        declaredValueCents: 5_000,
+        insuranceRequested: false,
+      });
+      const shipmentBody = bodies.find((b) => "parcels" in b);
+      expect(shipmentBody).toBeDefined();
+      expect(shipmentBody!.extra).toBeUndefined();
+      expect(shipmentBody!.customs_declaration).toBeUndefined();
     });
   });
 });

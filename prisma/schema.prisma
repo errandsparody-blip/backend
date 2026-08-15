@@ -1275,6 +1275,13 @@ model Order {
   // ---- Money (cents). Captured at submit time so future fee schedule changes
   // do not retro-apply. Reassessment writes a separate ledger entry.
   itemsDeclaredValueCents  Int             @default(0) @map("items_declared_value_cents")
+
+  // Migration 0055 — vendor-selected label add-ons, honoured by the admin
+  // at buy-label time. Insurance is bought against itemsDeclaredValueCents.
+  insuranceRequested       Boolean         @default(false) @map("insurance_requested")
+  signatureRequired        Boolean         @default(false) @map("signature_required")
+  adultSignatureRequired   Boolean         @default(false) @map("adult_signature_required")
+
   shippingCostCents        Int             @default(0) @map("shipping_cost_cents")     // what carrier charged us
   shippingFeeCents         Int             @default(0) @map("shipping_fee_cents")      // what we charge vendor (cost + markup)
   fulfillmentFeeCents      Int             @default(0) @map("fulfillment_fee_cents")   // pick/pack

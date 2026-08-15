@@ -143,4 +143,85 @@ export class AdminDashboardController {
       },
     };
   }
+
+  /**
+   * Insurable inventory value — the real dollar value of everything
+   * physically in our care right now, so ops can size insurance
+   * coverage. Value = Σ (product.declared_value_cents × physical units)
+   * over on-hand SKUs, where physical units = quantity_available +
+   * quantity_reserved (reserved stock is still on the shelf until it
+   * ships). Only ACTIVE / RESERVED SKU statuses count — DAMAGED,
+   * QUARANTINED and OUT_OF_STOCK are excluded from the insurable figure.
+   *
+   * The join-aggregate (product value × sku quantity) can't be expressed
+   * through Prisma's aggregate() so this uses a raw query. The web tab
+   * polls this endpoint, so the headline climbs on its own as new stock
+   * is received. Amounts are ::float8 so they arrive as JS numbers, not
+   * BigInt — realistic inventory values stay well inside Number's safe
+   * integer range (2^53 cents ≈ $90T).
+   */
+  @Get("inventory-value")
+  async inventoryValue() {
+    const [totalRows, byVendorRows, byTierRows] = await Promise.all([
+      this.prisma.$queryRaw<Array<{ value_cents: number; units: number; sku_count: number }>>`
+        SELECT
+          COALESCE(SUM(p.declared_value_cents * (s.quantity_available + s.quantity_reserved)), 0)::float8 AS value_cents,
+          COALESCE(SUM(s.quantity_available + s.quantity_reserved), 0)::float8 AS units,
+          COUNT(*)::float8 AS sku_count
+        FROM skus s
+        JOIN products p ON p.id = s.product_id
+        WHERE s.status IN ('ACTIVE', 'RESERVED')
+      `,
+      this.prisma.$queryRaw<
+        Array<{ vendor_id: string; business_name: string; value_cents: number; units: number }>
+      >`
+        SELECT
+          v.id AS vendor_id,
+          v.business_name AS business_name,
+          COALESCE(SUM(p.declared_value_cents * (s.quantity_available + s.quantity_reserved)), 0)::float8 AS value_cents,
+          COALESCE(SUM(s.quantity_available + s.quantity_reserved), 0)::float8 AS units
+        FROM skus s
+        JOIN products p ON p.id = s.product_id
+        JOIN vendors v ON v.id = s.vendor_id
+        WHERE s.status IN ('ACTIVE', 'RESERVED')
+        GROUP BY v.id, v.business_name
+        HAVING SUM(s.quantity_available + s.quantity_reserved) > 0
+        ORDER BY value_cents DESC
+      `,
+      this.prisma.$queryRaw<Array<{ storage_tier: string; value_cents: number; units: number }>>`
+        SELECT
+          s.storage_tier AS storage_tier,
+          COALESCE(SUM(p.declared_value_cents * (s.quantity_available + s.quantity_reserved)), 0)::float8 AS value_cents,
+          COALESCE(SUM(s.quantity_available + s.quantity_reserved), 0)::float8 AS units
+        FROM skus s
+        JOIN products p ON p.id = s.product_id
+        WHERE s.status IN ('ACTIVE', 'RESERVED')
+        GROUP BY s.storage_tier
+      `,
+    ]);
+
+    const total = totalRows[0] ?? { value_cents: 0, units: 0, sku_count: 0 };
+
+    return {
+      // Total insurable value of goods physically in our care, in cents.
+      totalValueCents: Math.round(total.value_cents),
+      totalUnits: Math.round(total.units),
+      skuCount: Math.round(total.sku_count),
+      // Per-vendor split — biggest exposure first — so ops can see which
+      // merchants drive the coverage number.
+      byVendor: byVendorRows.map((r) => ({
+        vendorId: r.vendor_id,
+        businessName: r.business_name,
+        valueCents: Math.round(r.value_cents),
+        units: Math.round(r.units),
+      })),
+      byTier: byTierRows.map((r) => ({
+        tier: r.storage_tier,
+        valueCents: Math.round(r.value_cents),
+        units: Math.round(r.units),
+      })),
+      // Stamp so the auto-refreshing tab can show "as of …".
+      asOf: new Date().toISOString(),
+    };
+  }
 }
