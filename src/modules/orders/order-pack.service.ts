@@ -1145,7 +1145,19 @@ export class OrderPackService {
   // WRITE — fetchRates
   // =========================================================================
 
-  async fetchRates(orderId: string, actorId: string): Promise<FetchRatesResult> {
+  async fetchRates(
+    orderId: string,
+    actorId: string,
+    // Admin add-on overrides (migration 0055). Any field left undefined
+    // keeps the vendor's requested value. Persisted here — before rating —
+    // so signature confirmation is priced into the returned rates and the
+    // insurance choice is stored for the later label purchase.
+    addonOverrides?: {
+      insuranceRequested?: boolean;
+      signatureRequired?: boolean;
+      adultSignatureRequired?: boolean;
+    },
+  ): Promise<FetchRatesResult> {
     // Read the order (unlocked — the Shippo call is a network I/O we
     // don't want to hold a row lock across). We only take the row lock
     // for the *write* at the end. Between the two, the worst-case race
@@ -1216,6 +1228,29 @@ export class OrderPackService {
       });
     }
 
+    // Admin add-on overrides: persist any provided flags before reading, so
+    // the values below (and the rate pricing) reflect the operator's choice.
+    if (
+      addonOverrides &&
+      (addonOverrides.insuranceRequested !== undefined ||
+        addonOverrides.signatureRequired !== undefined ||
+        addonOverrides.adultSignatureRequired !== undefined)
+    ) {
+      // adultSignature implies signature; normalise so a lone adult flag
+      // still records signature_required = true.
+      const sig =
+        addonOverrides.signatureRequired === undefined
+          ? undefined
+          : addonOverrides.signatureRequired || addonOverrides.adultSignatureRequired === true;
+      await this.prisma.$executeRaw(Prisma.sql`
+        UPDATE orders SET
+          insurance_requested = COALESCE(${addonOverrides.insuranceRequested ?? null}, insurance_requested),
+          signature_required = COALESCE(${sig ?? null}, signature_required),
+          adult_signature_required = COALESCE(${addonOverrides.adultSignatureRequired ?? null}, adult_signature_required)
+        WHERE id = ${orderId}::uuid
+      `);
+    }
+
     // Vendor-selected add-ons (migration 0055). Read via raw SQL so this
     // works even when the local Prisma client hasn't been regenerated with
     // the new columns (Railway regenerates on deploy; local can lag).
@@ -1243,6 +1278,31 @@ export class OrderPackService {
     // International (non-US) shipments need a customs declaration built
     // from the order lines.
     const isInternational = (order.shipCountry ?? "US").toUpperCase() !== "US";
+
+    // Declared-value guard. A $0 declared value produces a $0 customs
+    // declaration (which many carriers reject for international, silently
+    // dropping their rates) and makes insurance meaningless. Block rating
+    // here with a clear, fixable message rather than shipping something the
+    // carrier will refuse or under-insure. The value comes from the
+    // product(s); the operator/vendor must set it before this can rate.
+    const declaredValueCents = order.itemsDeclaredValueCents ?? 0;
+    if (isInternational && declaredValueCents <= 0) {
+      throw new ConflictException({
+        message:
+          "This international order has a $0.00 declared value, but customs requires a real value. " +
+          "Set the declared value on the product(s) before fetching rates.",
+        code: "order_declared_value_required_international",
+      });
+    }
+    if (addons.insurance_requested && declaredValueCents <= 0) {
+      throw new ConflictException({
+        message:
+          "Insurance was requested but this order's declared value is $0.00 — there's nothing to insure. " +
+          "Set the declared value on the product(s), or remove the insurance add-on, before fetching rates.",
+        code: "order_declared_value_required_insurance",
+      });
+    }
+
     const customs = isInternational ? await this.buildOrderCustoms(orderId) : undefined;
 
     const rateResponse = await this.shippo.getRates({

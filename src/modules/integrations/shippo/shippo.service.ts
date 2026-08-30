@@ -483,6 +483,22 @@ export class ShippoService {
       flatRateCount: flatRates.length,
     });
 
+    // Diagnostic (info level so it shows in production): which carriers did
+    // Shippo actually return for this account/parcel? If this lists only one
+    // carrier, the gap is the Shippo account (carrier accounts enabled on the
+    // key), not our code — we return every rate Shippo gives us. Also surfaces
+    // any Shippo `messages` explaining why a carrier was skipped.
+    this.log.log({
+      msg: "getRates.carriers",
+      to: `${req.toAddress.city}, ${req.toAddress.state} ${req.toAddress.country}`,
+      parcel: `${req.parcel.lengthIn}x${req.parcel.widthIn}x${req.parcel.heightIn} ${req.parcel.weightOz}oz`,
+      carriers: [...new Set(rates.map((r) => r.carrier))],
+      serviceCount: rates.length,
+      shippoMessages: (ship.messages ?? [])
+        .map((m) => `${m.source ?? "?"}: ${m.text ?? ""}`)
+        .slice(0, 6),
+    });
+
     return { shipmentId: ship.object_id, rates: [...rates, ...flatRates] };
   }
 

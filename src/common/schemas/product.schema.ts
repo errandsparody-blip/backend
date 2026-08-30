@@ -63,7 +63,11 @@ export const createProductSchema = z.object({
   variant: z.string().min(1).max(40).default("STD"),
   hsCode: z.string().min(4).max(12).optional(),
   countryOfOrigin: isoCountrySchema,
-  declaredValueCents: z.number().int().nonnegative(),
+  // Required and greater than $0. Declared value drives customs (required
+  // for international shipping) and insurance — a $0 value produces a $0
+  // customs declaration that carriers reject and makes insurance
+  // meaningless, so vendors must declare a real value up front.
+  declaredValueCents: z.number().int().positive("Declared value must be greater than $0."),
   weightOz: weightSchema,
   lengthIn: optionalDimension,
   widthIn: optionalDimension,
@@ -104,7 +108,11 @@ export const adminEditProductSchema = z
   .object({
     hsCode: z.string().min(4).max(12).optional(),
     countryOfOrigin: isoCountrySchema.optional(),
-    declaredValueCents: z.number().int().nonnegative().optional(),
+    declaredValueCents: z
+      .number()
+      .int()
+      .positive("Declared value must be greater than $0.")
+      .optional(),
     weightOz: weightSchema.optional(),
     lengthIn: optionalDimension,
     widthIn: optionalDimension,

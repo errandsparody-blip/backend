@@ -6,14 +6,20 @@
  *
  * Implementation Plan §6.5.1, §14.2.
  *
- * Gross-up math: Stripe takes 2.9% + $0.30 per successful charge. Per
- * PRD §6.5.4 the platform passes those fees to the vendor by grossing up the
- * charged amount so the wallet credit equals the requested net.
+ * Gross-up math: the payer covers Stripe's processing fee, so the wallet
+ * credit (or the net the platform keeps) equals the requested amount.
  *
- *   gross = (net + 30) / (1 - 0.029)
+ *   gross = (net + fixed) / (1 - percent)   — rounded UP to the nearest cent.
  *
- * Rounded UP to the nearest cent. The vendor sees the gross at checkout; the
- * wallet credit is exactly `net` once the webhook confirms.
+ * Rate: our customers frequently pay with INTERNATIONAL cards (e.g. Ghana,
+ * Nigeria), which Stripe charges more for — the standard 2.9% PLUS a 1.5%
+ * international-card fee ≈ 4.4% + $0.30. If we grossed up at only the 2.9%
+ * domestic rate, every international deposit would come up ~1.5% short and
+ * the platform would silently absorb it. So we gross up at the international
+ * rate (with a small cushion) — the payer covers all fees, and the platform
+ * is never short. Domestic cards net a few cents over target (kept by the
+ * platform), which is the acceptable trade-off for not being able to know
+ * the card's country before the charge is created.
  *
  * Wallet credit happens ONLY in the webhook handler — never from the API call.
  * This avoids double-credits when a 3DS step puts the intent in
@@ -25,7 +31,11 @@ import Stripe from "stripe";
 
 import { loadConfig } from "../../../common/config";
 
-const STRIPE_PERCENT = 0.029;
+// International-card rate: Stripe 2.9% + 1.5% (international) = 4.4%, plus a
+// 0.1% cushion so rounding/variance never leaves the platform short. Fixed
+// fee stays $0.30. Bump toward ~5.4% if you also need to cover Stripe's +1%
+// currency-conversion fee for cards Stripe converts.
+const STRIPE_PERCENT = 0.045;
 const STRIPE_FIXED_CENTS = 30;
 
 export interface CreatePaymentIntentArgs {

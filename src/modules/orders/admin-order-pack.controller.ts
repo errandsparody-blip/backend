@@ -110,6 +110,20 @@ const selectRateSchema = z.object({
 });
 type SelectRateInput = z.infer<typeof selectRateSchema>;
 
+// Admin add-on overrides sent with fetch-rates. All optional — an omitted
+// field leaves the vendor's requested value untouched. Signature must be set
+// at rate time so the surcharge is priced into the returned rates; insurance
+// is applied later at label purchase but is persisted here too. Body is
+// optional so older clients that POST fetch-rates with no body still work.
+const fetchRatesSchema = z
+  .object({
+    insuranceRequested: z.boolean().optional(),
+    signatureRequired: z.boolean().optional(),
+    adultSignatureRequired: z.boolean().optional(),
+  })
+  .partial();
+type FetchRatesInput = z.infer<typeof fetchRatesSchema>;
+
 // ---------------------------------------------------------------------------
 
 @Controller({ path: "admin/pack", version: "1" })
@@ -218,8 +232,11 @@ export class AdminOrderPackController {
   fetchRates(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(fetchRatesSchema)) body: FetchRatesInput,
   ) {
-    return this.pack.fetchRates(id, user.sub);
+    // `body` is the admin's add-on overrides (may be empty). Persisted +
+    // applied inside fetchRates so signature is priced into the rates.
+    return this.pack.fetchRates(id, user.sub, body);
   }
 
   @Post(":id/select-rate")
