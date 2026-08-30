@@ -1279,13 +1279,35 @@ export class OrderPackService {
     // from the order lines.
     const isInternational = (order.shipCountry ?? "US").toUpperCase() !== "US";
 
+    // Re-sync declared value from the CURRENT product values. The order and
+    // its lines snapshot declared value at submit time, so if a product was
+    // created at $0 and the admin later fixes it, the existing order still
+    // holds the stale $0. Declared value only drives customs + insurance
+    // (not fee-schedule money), so refreshing it at rate time is safe and
+    // matches operator expectation: edit the product → Fetch rates → value
+    // updates. Each line = product.declared_value_cents × quantity; the
+    // order total is the sum.
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE order_lines ol
+      SET declared_value_cents = p.declared_value_cents * ol.quantity
+      FROM products p
+      WHERE ol.product_id = p.id AND ol.order_id = ${orderId}::uuid
+    `);
+    const declaredRows = await this.prisma.$queryRaw<Array<{ total: number }>>(Prisma.sql`
+      SELECT COALESCE(SUM(declared_value_cents), 0)::int AS total
+      FROM order_lines WHERE order_id = ${orderId}::uuid
+    `);
+    const declaredValueCents = declaredRows[0]?.total ?? 0;
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE orders SET items_declared_value_cents = ${declaredValueCents}
+      WHERE id = ${orderId}::uuid
+    `);
+
     // Declared-value guard. A $0 declared value produces a $0 customs
     // declaration (which many carriers reject for international, silently
     // dropping their rates) and makes insurance meaningless. Block rating
     // here with a clear, fixable message rather than shipping something the
-    // carrier will refuse or under-insure. The value comes from the
-    // product(s); the operator/vendor must set it before this can rate.
-    const declaredValueCents = order.itemsDeclaredValueCents ?? 0;
+    // carrier will refuse or under-insure.
     if (isInternational && declaredValueCents <= 0) {
       throw new ConflictException({
         message:
@@ -1323,7 +1345,7 @@ export class OrderPackService {
         weightOz: raw.packedWeightOz,
         template: raw.parcelTemplate ?? undefined,
       },
-      declaredValueCents: order.itemsDeclaredValueCents,
+      declaredValueCents,
       insuranceRequested: addons.insurance_requested,
       signatureConfirmation,
       customs,
