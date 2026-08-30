@@ -11,7 +11,12 @@
 --
 -- All default false so every existing order and any older API client keeps
 -- working unchanged (no add-ons = today's behaviour).
+--
+-- Idempotent (ADD COLUMN IF NOT EXISTS) so a re-run after a partially
+-- applied / interrupted deploy can't fail with "column already exists" and
+-- wedge `prisma migrate deploy` (which would block the container from
+-- starting and fail the Railway healthcheck).
 ALTER TABLE "orders"
-  ADD COLUMN "insurance_requested" BOOLEAN NOT NULL DEFAULT false,
-  ADD COLUMN "signature_required" BOOLEAN NOT NULL DEFAULT false,
-  ADD COLUMN "adult_signature_required" BOOLEAN NOT NULL DEFAULT false;
+  ADD COLUMN IF NOT EXISTS "insurance_requested" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS "signature_required" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS "adult_signature_required" BOOLEAN NOT NULL DEFAULT false;
