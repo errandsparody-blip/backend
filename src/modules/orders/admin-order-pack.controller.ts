@@ -120,6 +120,12 @@ const fetchRatesSchema = z
     insuranceRequested: z.boolean().optional(),
     signatureRequired: z.boolean().optional(),
     adultSignatureRequired: z.boolean().optional(),
+    // Migration 0057 — hazmat / special-handling add-ons.
+    containsAlcohol: z.boolean().optional(),
+    alcoholRecipientType: z.enum(["consumer", "licensee"]).optional(),
+    containsDryIce: z.boolean().optional(),
+    dryIceWeightOz: z.number().int().min(0).max(100000).nullable().optional(),
+    containsLithium: z.boolean().optional(),
   })
   .partial();
 type FetchRatesInput = z.infer<typeof fetchRatesSchema>;

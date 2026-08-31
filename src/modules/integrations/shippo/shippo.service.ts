@@ -85,6 +85,24 @@ export interface RateRequest {
    */
   signatureConfirmation?: "STANDARD" | "ADULT" | undefined;
   /**
+   * Alcohol shipment. Sets Shippo `extra.alcohol` so carriers that
+   * surcharge (and require licensed handling for) alcohol price it into
+   * the rate and carry it onto the label. `recipientType` distinguishes a
+   * licensed reseller from a direct-to-consumer shipment.
+   */
+  alcohol?: { recipientType: "consumer" | "licensee" } | undefined;
+  /**
+   * Dry ice. Sets Shippo `extra.dry_ice` with the net dry-ice weight so
+   * the carrier applies its hazmat/dry-ice surcharge.
+   */
+  dryIce?: { weightOz: number } | undefined;
+  /**
+   * Lithium batteries flag. Passed through to Shippo's `extra` for carriers
+   * that accept it; note that not every carrier prices lithium via the
+   * rating API (some handle it as a manual hazmat surcharge).
+   */
+  lithiumBatteries?: boolean | undefined;
+  /**
    * Customs declaration — REQUIRED by Shippo for any international
    * shipment (toAddress.country !== "US"). Built from the order lines
    * (per-item description, quantity, unit value, HS code, origin). Omit
@@ -580,9 +598,28 @@ export class ShippoService {
    * time (see purchaseLabelLive) to avoid double-charging.
    */
   private buildShipmentExtra(req: RateRequest): Record<string, unknown> | undefined {
-    if (!req.signatureConfirmation) return undefined;
-    // Shippo signature_confirmation tokens: STANDARD | ADULT | ...
-    return { signature_confirmation: req.signatureConfirmation };
+    const extra: Record<string, unknown> = {};
+    if (req.signatureConfirmation) {
+      // Shippo signature_confirmation tokens: STANDARD | ADULT | ...
+      extra.signature_confirmation = req.signatureConfirmation;
+    }
+    if (req.alcohol) {
+      extra.alcohol = { contains_alcohol: true, recipient_type: req.alcohol.recipientType };
+    }
+    if (req.dryIce) {
+      // Shippo dry_ice weight is in the shipment's mass unit; we send lb.
+      extra.dry_ice = {
+        contains_dry_ice: true,
+        weight: (Math.max(0.1, req.dryIce.weightOz) / 16).toFixed(2),
+        weight_unit: "lb",
+      };
+    }
+    if (req.lithiumBatteries) {
+      // Best-effort pass-through; carriers that don't rate lithium via the
+      // API simply ignore it.
+      extra.lithium_batteries = true;
+    }
+    return Object.keys(extra).length > 0 ? extra : undefined;
   }
 
   /**

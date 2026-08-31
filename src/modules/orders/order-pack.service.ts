@@ -1156,6 +1156,11 @@ export class OrderPackService {
       insuranceRequested?: boolean;
       signatureRequired?: boolean;
       adultSignatureRequired?: boolean;
+      containsAlcohol?: boolean;
+      alcoholRecipientType?: "consumer" | "licensee";
+      containsDryIce?: boolean;
+      dryIceWeightOz?: number | null;
+      containsLithium?: boolean;
     },
   ): Promise<FetchRatesResult> {
     // Read the order (unlocked — the Shippo call is a network I/O we
@@ -1230,12 +1235,7 @@ export class OrderPackService {
 
     // Admin add-on overrides: persist any provided flags before reading, so
     // the values below (and the rate pricing) reflect the operator's choice.
-    if (
-      addonOverrides &&
-      (addonOverrides.insuranceRequested !== undefined ||
-        addonOverrides.signatureRequired !== undefined ||
-        addonOverrides.adultSignatureRequired !== undefined)
-    ) {
+    if (addonOverrides && Object.values(addonOverrides).some((v) => v !== undefined)) {
       // adultSignature implies signature; normalise so a lone adult flag
       // still records signature_required = true.
       const sig =
@@ -1246,28 +1246,45 @@ export class OrderPackService {
         UPDATE orders SET
           insurance_requested = COALESCE(${addonOverrides.insuranceRequested ?? null}, insurance_requested),
           signature_required = COALESCE(${sig ?? null}, signature_required),
-          adult_signature_required = COALESCE(${addonOverrides.adultSignatureRequired ?? null}, adult_signature_required)
+          adult_signature_required = COALESCE(${addonOverrides.adultSignatureRequired ?? null}, adult_signature_required),
+          contains_alcohol = COALESCE(${addonOverrides.containsAlcohol ?? null}, contains_alcohol),
+          alcohol_recipient_type = COALESCE(${addonOverrides.alcoholRecipientType ?? null}, alcohol_recipient_type),
+          contains_dry_ice = COALESCE(${addonOverrides.containsDryIce ?? null}, contains_dry_ice),
+          dry_ice_weight_oz = COALESCE(${addonOverrides.dryIceWeightOz ?? null}, dry_ice_weight_oz),
+          contains_lithium = COALESCE(${addonOverrides.containsLithium ?? null}, contains_lithium)
         WHERE id = ${orderId}::uuid
       `);
     }
 
-    // Vendor-selected add-ons (migration 0055). Read via raw SQL so this
-    // works even when the local Prisma client hasn't been regenerated with
-    // the new columns (Railway regenerates on deploy; local can lag).
+    // Vendor/operator add-ons (migrations 0055 + 0057). Read via raw SQL so
+    // this works even when the local Prisma client hasn't been regenerated
+    // with the new columns (Railway regenerates on deploy; local can lag).
     const addonRows = await this.prisma.$queryRaw<
       Array<{
         insurance_requested: boolean;
         signature_required: boolean;
         adult_signature_required: boolean;
+        contains_alcohol: boolean;
+        alcohol_recipient_type: string | null;
+        contains_dry_ice: boolean;
+        dry_ice_weight_oz: number | null;
+        contains_lithium: boolean;
       }>
     >(Prisma.sql`
-      SELECT insurance_requested, signature_required, adult_signature_required
+      SELECT insurance_requested, signature_required, adult_signature_required,
+             contains_alcohol, alcohol_recipient_type, contains_dry_ice,
+             dry_ice_weight_oz, contains_lithium
       FROM orders WHERE id = ${orderId}::uuid
     `);
     const addons = addonRows[0] ?? {
       insurance_requested: false,
       signature_required: false,
       adult_signature_required: false,
+      contains_alcohol: false,
+      alcohol_recipient_type: null,
+      contains_dry_ice: false,
+      dry_ice_weight_oz: null,
+      contains_lithium: false,
     };
     // Adult signature supersedes standard signature when both are set.
     const signatureConfirmation: "STANDARD" | "ADULT" | undefined = addons.adult_signature_required
@@ -1275,6 +1292,12 @@ export class OrderPackService {
       : addons.signature_required
         ? "STANDARD"
         : undefined;
+    const alcohol =
+      addons.contains_alcohol
+        ? { recipientType: (addons.alcohol_recipient_type === "licensee" ? "licensee" : "consumer") as "consumer" | "licensee" }
+        : undefined;
+    const dryIce = addons.contains_dry_ice ? { weightOz: addons.dry_ice_weight_oz ?? 16 } : undefined;
+    const lithiumBatteries = addons.contains_lithium || undefined;
     // International (non-US) shipments need a customs declaration built
     // from the order lines.
     const isInternational = (order.shipCountry ?? "US").toUpperCase() !== "US";
@@ -1348,6 +1371,9 @@ export class OrderPackService {
       declaredValueCents,
       insuranceRequested: addons.insurance_requested,
       signatureConfirmation,
+      alcohol,
+      dryIce,
+      lithiumBatteries,
       customs,
     });
 

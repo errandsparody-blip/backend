@@ -327,15 +327,27 @@ export class AdminOrderService {
         insurance_requested: boolean;
         signature_required: boolean;
         adult_signature_required: boolean;
+        contains_alcohol: boolean;
+        alcohol_recipient_type: string | null;
+        contains_dry_ice: boolean;
+        dry_ice_weight_oz: number | null;
+        contains_lithium: boolean;
       }>
     >(Prisma.sql`
-      SELECT insurance_requested, signature_required, adult_signature_required
+      SELECT insurance_requested, signature_required, adult_signature_required,
+             contains_alcohol, alcohol_recipient_type, contains_dry_ice,
+             dry_ice_weight_oz, contains_lithium
       FROM orders WHERE id = ${id}::uuid
     `);
     const addons = addonRows[0] ?? {
       insurance_requested: false,
       signature_required: false,
       adult_signature_required: false,
+      contains_alcohol: false,
+      alcohol_recipient_type: null,
+      contains_dry_ice: false,
+      dry_ice_weight_oz: null,
+      contains_lithium: false,
     };
 
     return {
@@ -345,6 +357,11 @@ export class AdminOrderService {
       insuranceRequested: addons.insurance_requested,
       signatureRequired: addons.signature_required,
       adultSignatureRequired: addons.adult_signature_required,
+      containsAlcohol: addons.contains_alcohol,
+      alcoholRecipientType: addons.alcohol_recipient_type,
+      containsDryIce: addons.contains_dry_ice,
+      dryIceWeightOz: addons.dry_ice_weight_oz,
+      containsLithium: addons.contains_lithium,
     };
   }
 

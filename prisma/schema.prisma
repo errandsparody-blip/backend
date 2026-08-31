@@ -1286,6 +1286,12 @@ model Order {
   insuranceRequested       Boolean         @default(false) @map("insurance_requested")
   signatureRequired        Boolean         @default(false) @map("signature_required")
   adultSignatureRequired   Boolean         @default(false) @map("adult_signature_required")
+  // Migration 0057 — hazmat / special-handling add-ons (affect carrier rates).
+  containsAlcohol          Boolean         @default(false) @map("contains_alcohol")
+  alcoholRecipientType     String?         @map("alcohol_recipient_type")
+  containsDryIce           Boolean         @default(false) @map("contains_dry_ice")
+  dryIceWeightOz           Int?            @map("dry_ice_weight_oz")
+  containsLithium          Boolean         @default(false) @map("contains_lithium")
 
   shippingCostCents        Int             @default(0) @map("shipping_cost_cents")     // what carrier charged us
   shippingFeeCents         Int             @default(0) @map("shipping_fee_cents")      // what we charge vendor (cost + markup)

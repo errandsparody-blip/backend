@@ -376,5 +376,35 @@ describe("ShippoService — boundary helpers", () => {
       expect(shipmentBody!.extra).toBeUndefined();
       expect(shipmentBody!.customs_declaration).toBeUndefined();
     });
+
+    it("adds alcohol + dry_ice + lithium extras when requested", async () => {
+      const { svc, bodies } = liveSvc();
+      await svc.getRates({
+        fromAddress: { state: "FL", postalCode: "33101", country: "US" },
+        toAddress: {
+          recipientName: "Jane Buyer",
+          line1: "1 Test Way",
+          city: "Miami",
+          state: "FL",
+          postalCode: "33101",
+          country: "US",
+        },
+        parcel: { weightOz: 32, lengthIn: 10, widthIn: 8, heightIn: 6 },
+        declaredValueCents: 5_000,
+        insuranceRequested: false,
+        alcohol: { recipientType: "consumer" },
+        dryIce: { weightOz: 32 }, // 2 lb
+        lithiumBatteries: true,
+      });
+      const shipmentBody = bodies.find((b) => "parcels" in b);
+      const extra = shipmentBody!.extra as {
+        alcohol?: { contains_alcohol?: boolean; recipient_type?: string };
+        dry_ice?: { contains_dry_ice?: boolean; weight?: string; weight_unit?: string };
+        lithium_batteries?: boolean;
+      };
+      expect(extra.alcohol).toEqual({ contains_alcohol: true, recipient_type: "consumer" });
+      expect(extra.dry_ice).toEqual({ contains_dry_ice: true, weight: "2.00", weight_unit: "lb" });
+      expect(extra.lithium_batteries).toBe(true);
+    });
   });
 });
