@@ -236,6 +236,8 @@ model Vendor {
   id            String        @id @default(uuid()) @db.Uuid
   businessName  String        @map("business_name")
   country       String        @db.Char(2) // ISO 3166-1 alpha-2
+  // Migration 0056 — the vendor's own shareable referral code.
+  referralCode  String?       @unique @map("referral_code")
 
   kycStatus     KycStatus     @default(PENDING) @map("kyc_status")
   kycProviderId String?       @map("kyc_provider_id")  // e.g., Stripe Identity verification id
@@ -995,6 +997,9 @@ enum LedgerEntryType {
   PARTNERSHIP_ITEM_COST
   PURCHASE_FEE
   REFUND
+  // Migration 0056 — referral bonus paid to referrer + referee on the
+  // referred vendor's first received PSN.
+  REFERRAL_BONUS
 }
 
 model LedgerEntry {

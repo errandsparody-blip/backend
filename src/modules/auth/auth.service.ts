@@ -33,6 +33,7 @@ import {
 } from "../email/email-templates";
 import { EmailService } from "../email/email.service";
 import { AgreementService } from "../vendors/agreement.service";
+import { ReferralService } from "../referral/referral.service";
 
 import type { LoginInput, SignupInput } from "../../common/schemas/auth.schema";
 import { MfaService } from "./mfa.service";
@@ -93,6 +94,7 @@ export class AuthService {
     private readonly hibp: HibpService,
     private readonly email: EmailService,
     private readonly agreement: AgreementService,
+    private readonly referrals: ReferralService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -174,7 +176,7 @@ export class AuthService {
     const { plaintext: emailCode, hash: emailTokenHash } = this.tokens.generateNumericCode(8);
 
     // Create the vendor + wallet + user atomically. If any fails, none persist.
-    const { userId } = await this.prisma.$transaction(async (tx) => {
+    const { userId, vendorId } = await this.prisma.$transaction(async (tx) => {
       const vendor = await tx.vendor.create({
         data: {
           businessName: input.businessName,
@@ -205,8 +207,12 @@ export class AuthService {
         select: { id: true },
       });
 
-      return { userId: u.id };
+      return { userId: u.id, vendorId: vendor.id };
     });
+
+    // Referral / event attribution (migration 0056). Best-effort — the
+    // service swallows errors so a referral hiccup never breaks signup.
+    await this.referrals.recordAttribution(vendorId, input.refCode);
 
     const user = { id: userId };
 

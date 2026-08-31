@@ -34,6 +34,7 @@ import { ShippingPointService } from "../../common/services/shipping-point.servi
 import { AuditService } from "../audit/audit.service";
 import { computeFirstBillingDate, SkuService } from "../sku/sku.service";
 import { WalletService } from "../wallet/wallet.service";
+import { ReferralService } from "../referral/referral.service";
 
 // Default window before a stale PsnHold auto-converts to RETURN_REQUESTED.
 // 7 days is long enough for a vendor to notice the dashboard banner /
@@ -54,6 +55,7 @@ export class AdminPsnService {
     // PSN to have shippingPoints assigned before the PSN can be
     // sealed. The service is @Global(); we just consume it.
     private readonly shippingPoints: ShippingPointService,
+    private readonly referrals: ReferralService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -186,7 +188,7 @@ export class AdminPsnService {
     actorId: string,
     input: CompleteReceivingInput,
   ): Promise<{ status: PsnStatus; psnId: string }> {
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       const psn = await tx.psn.findUnique({ where: { id: psnId }, include: { lines: true } });
       if (!psn) throw new NotFoundException();
       // Single-shot receive policy: once the operator clicks Accept the
@@ -474,8 +476,19 @@ export class AdminPsnService {
         afterState: { status: updated.status, lines: input.lines.length },
       });
 
-      return { status: updated.status, psnId: updated.id };
+      return { status: updated.status, psnId: updated.id, vendorId: updated.vendorId };
     });
+
+    // Referral reward (migration 0056): when a referred vendor's first PSN
+    // is received, credit the referrer + referee $50 each. Fired AFTER the
+    // receive commits, best-effort — the service is idempotent (only the
+    // first received PSN pays) and never throws back here, so a referral
+    // hiccup can't undo a completed receive.
+    if (result.status === "RECEIVED" || result.status === "PARTIALLY_RECEIVED") {
+      await this.referrals.rewardOnFirstPsn(result.vendorId);
+    }
+
+    return { status: result.status, psnId: result.psnId };
   }
 
   /**

@@ -4,6 +4,7 @@ import { PassportModule } from "@nestjs/passport";
 
 import { HibpService } from "../../common/hibp.service";
 import { AuditModule } from "../audit/audit.module";
+import { ReferralModule } from "../referral/referral.module";
 import { AgreementService } from "../vendors/agreement.service";
 
 import { AuthController } from "./auth.controller";
@@ -17,6 +18,7 @@ import { TokenService } from "./token.service";
     PassportModule.register({ defaultStrategy: "jwt", session: false }),
     JwtModule.register({}),
     AuditModule,
+    ReferralModule,
   ],
   controllers: [AuthController],
   // AgreementService is listed directly (rather than importing VendorModule)

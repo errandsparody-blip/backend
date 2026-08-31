@@ -30,6 +30,7 @@ import { PagePermissionModule } from "./common/services/page-permission.module";
 import { ShippingPointModule } from "./common/services/shipping-point.module";
 import { PrismaModule } from "./common/prisma.module";
 import { AdminModule } from "./modules/admin/admin.module";
+import { ReferralModule } from "./modules/referral/referral.module";
 import { AuditModule } from "./modules/audit/audit.module";
 import { AuthModule } from "./modules/auth/auth.module";
 import { EmailModule } from "./modules/email/email.module";
@@ -146,6 +147,7 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     JobsModule,
     MarketingModule,
     AdminModule,
+    ReferralModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

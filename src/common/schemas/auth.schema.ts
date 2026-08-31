@@ -53,6 +53,15 @@ export const signupSchema = z.object({
       message: "You must accept the Vendor Agreement to continue.",
     }),
   }),
+  // Optional referral / event code (migration 0056). Captured from the
+  // signup link (?ref=CODE) — a vendor's referral code or an event campaign
+  // code. Unknown codes are ignored server-side; never blocks signup.
+  refCode: z
+    .string()
+    .trim()
+    .max(40)
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
 });
 export type SignupInput = z.infer<typeof signupSchema>;
 

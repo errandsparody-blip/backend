@@ -58,7 +58,13 @@ export interface CreditArgs {
   amountCents: number;
   // REFUND added in migration 0019 — distinct from REVERSAL (which is for
   // order cancellations); REFUND is for explicit money-back-to-vendor.
-  type: Extract<LedgerEntryType, "DEPOSIT" | "MANUAL_CREDIT" | "REVERSAL" | "REFUND">;
+  // REFERRAL_BONUS (migration 0056) is a string literal here rather than an
+  // Extract<LedgerEntryType, …> so it typechecks before the local Prisma
+  // client is regenerated with the new enum value; the write casts to the
+  // enum, and the regenerated client (Railway) accepts it at runtime.
+  type:
+    | Extract<LedgerEntryType, "DEPOSIT" | "MANUAL_CREDIT" | "REVERSAL" | "REFUND">
+    | "REFERRAL_BONUS";
   description: string;
   referenceType?: string;
   referenceId?: string;
@@ -224,7 +230,9 @@ export class WalletService {
       const entry = await txc.ledgerEntry.create({
         data: {
           vendorId: args.vendorId,
-          type: args.type,
+          // Cast: REFERRAL_BONUS may not be in the local (stale) generated
+          // enum yet; the DB + regenerated client accept it.
+          type: args.type as LedgerEntryType,
           amountCents: args.amountCents,
           balanceAfterCents: after,
           description: args.description,
