@@ -366,6 +366,197 @@ export class AdminOrderService {
   }
 
   // ---------------------------------------------------------------------------
+  // Edit recipient / shipping address (pre-label).
+  //
+  // Why: when a carrier refuses a shipment because of the recipient
+  // details (most often a missing/blank phone, occasionally a bad
+  // postal code) the order gets stuck in the rate picker — every retry
+  // hits the same wall because there was no way to correct the data the
+  // vendor entered. This lets an operator fix name / phone / email /
+  // address / postal on the order, then re-fetch rates and buy.
+  //
+  // Guardrails:
+  //   * Allowed ONLY before the shipping charge is committed. Once the
+  //     wallet has been debited (SHIPPING_PAID) the Shippo shipment —
+  //     and any label bought from it — is already bound to the old
+  //     address, so editing here would silently print the wrong label.
+  //     Those orders go back through "Send to pack queue" / force-cancel
+  //     instead.
+  //   * Cached rate options are dropped — they were priced against the
+  //     old destination. The picker shows an empty list and the
+  //     operator re-fetches (mirrors updatePackDetails / sendToPackQueue).
+  //   * address_validation_status is reset to PENDING; the authoritative
+  //     re-check is the next getRates() call against Shippo.
+  //   * Every edit writes an OrderEvent + AuditLogEntry with before/after.
+  // ---------------------------------------------------------------------------
+
+  async updateRecipient(
+    id: string,
+    actorId: string,
+    input: {
+      recipientName: string;
+      recipientPhone: string;
+      recipientEmail?: string | undefined;
+      shipAddressLine1: string;
+      shipAddressLine2?: string | undefined;
+      shipCity: string;
+      shipState: string;
+      shipPostalCode: string;
+      shipCountry: string;
+    },
+  ): Promise<{
+    id: string;
+    status: OrderStatus;
+    ratesCleared: boolean;
+    recipientName: string;
+    recipientPhone: string;
+    recipientEmail: string | null;
+    shipAddressLine1: string;
+    shipAddressLine2: string | null;
+    shipCity: string;
+    shipState: string;
+    shipPostalCode: string;
+    shipCountry: string;
+  }> {
+    // Pre-flight: NotFound + snapshot the old values for the audit trail.
+    const before = await this.prisma.order.findFirst({
+      where: { id },
+      select: {
+        id: true,
+        status: true,
+        recipientName: true,
+        recipientPhone: true,
+        recipientEmail: true,
+        shipAddressLine1: true,
+        shipAddressLine2: true,
+        shipCity: true,
+        shipState: true,
+        shipPostalCode: true,
+        shipCountry: true,
+      },
+    });
+    if (!before) throw new NotFoundException();
+
+    // Everything strictly BEFORE the shipping wallet debit. Covers both
+    // workflow versions: v1 sits in SUBMITTED/ALLOCATED/ON_HOLD before
+    // the label buy; v2 sits in the pack/rate statuses before
+    // SHIPPING_PAID. Compared as plain strings so a Prisma client that
+    // predates a status enum value (sandbox drift) can't narrow the set.
+    const EDITABLE = new Set<string>([
+      "DRAFT",
+      "SUBMITTED",
+      "ON_HOLD",
+      "ALLOCATED",
+      "PENDING_PACKING",
+      "PACKING_COMPLETED",
+      "AWAITING_SHIPPING_SELECTION",
+      "AWAITING_WALLET_FUNDING",
+    ]);
+
+    const email = input.recipientEmail?.trim() || null;
+    const line2 = input.shipAddressLine2?.trim() || null;
+
+    let ratesCleared = false;
+    await this.prisma.$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw<
+        Array<{ id: string; status: OrderStatus }>
+      >(Prisma.sql`
+        SELECT id, status FROM orders WHERE id = ${id}::uuid FOR UPDATE
+      `);
+      const locked = lockedRows[0];
+      if (!locked) throw new NotFoundException();
+
+      if (!EDITABLE.has(locked.status)) {
+        throw new ConflictException({
+          message: `Recipient details can't be edited once the order reaches ${locked.status}. The shipping charge and any label are already bound to the current address — send the order back to the pack queue or force-cancel it instead.`,
+          code: "recipient_edit_locked",
+        });
+      }
+
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE orders SET
+          recipient_name          = ${input.recipientName},
+          recipient_phone         = ${input.recipientPhone},
+          recipient_email         = ${email},
+          ship_address_line1      = ${input.shipAddressLine1},
+          ship_address_line2      = ${line2},
+          ship_city               = ${input.shipCity},
+          ship_state              = ${input.shipState},
+          ship_postal_code        = ${input.shipPostalCode},
+          ship_country            = ${input.shipCountry},
+          address_validation_status = 'PENDING',
+          updated_at              = NOW()
+        WHERE id = ${id}::uuid
+      `);
+
+      // Drop rate options priced against the old destination. Harmless
+      // no-op for v1 (no rows) and for a v2 order still in PENDING_PACKING.
+      const deleted = await tx.$executeRaw(Prisma.sql`
+        DELETE FROM order_shipping_rate_options WHERE order_id = ${id}::uuid
+      `);
+      ratesCleared = deleted > 0;
+
+      await tx.orderEvent.create({
+        data: {
+          orderId: id,
+          type: "order.recipient_updated",
+          description: `Recipient / shipping address edited by operator${
+            ratesCleared ? " (cached rates cleared — re-fetch required)" : ""
+          }.`,
+          source: "ADMIN",
+          actorId,
+        },
+      });
+    });
+
+    await this.audit
+      .log({
+        actorId,
+        action: "order.recipient_updated",
+        resourceType: "order",
+        resourceId: id,
+        beforeState: {
+          recipientName: before.recipientName,
+          recipientPhone: before.recipientPhone,
+          recipientEmail: before.recipientEmail,
+          shipAddressLine1: before.shipAddressLine1,
+          shipAddressLine2: before.shipAddressLine2,
+          shipCity: before.shipCity,
+          shipState: before.shipState,
+          shipPostalCode: before.shipPostalCode,
+          shipCountry: before.shipCountry,
+        } as unknown as Prisma.InputJsonValue,
+        afterState: {
+          recipientName: input.recipientName,
+          recipientPhone: input.recipientPhone,
+          recipientEmail: email,
+          shipAddressLine1: input.shipAddressLine1,
+          shipAddressLine2: line2,
+          shipCity: input.shipCity,
+          shipState: input.shipState,
+          shipPostalCode: input.shipPostalCode,
+          shipCountry: input.shipCountry,
+        } as unknown as Prisma.InputJsonValue,
+      })
+      .catch(() => undefined);
+
+    return {
+      id,
+      status: before.status,
+      ratesCleared,
+      recipientName: input.recipientName,
+      recipientPhone: input.recipientPhone,
+      recipientEmail: email,
+      shipAddressLine1: input.shipAddressLine1,
+      shipAddressLine2: line2,
+      shipCity: input.shipCity,
+      shipState: input.shipState,
+      shipPostalCode: input.shipPostalCode,
+      shipCountry: input.shipCountry,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // Transitions
   // ---------------------------------------------------------------------------
 

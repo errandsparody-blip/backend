@@ -12,7 +12,7 @@
  * Roles: WAREHOUSE_OPERATOR, FINANCE_ADMIN, SUPER_ADMIN.
  */
 
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query } from "@nestjs/common";
 import { Role } from "@prisma/client";
 import { z } from "zod";
 
@@ -21,6 +21,7 @@ import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
+import { recipientAddressSchema } from "../../common/schemas/order.schema";
 
 import { IntegrationOrderService } from "../integration/integration-order.service";
 
@@ -35,6 +36,13 @@ const forceCancelSchema = z.object({
   reason: z.string().trim().min(5, "Reason required.").max(280),
 });
 type ForceCancelInput = z.infer<typeof forceCancelSchema>;
+
+// Edit-recipient body. Reuses the exact schema the vendor order form and
+// CSV import validate against — same required phone, same country-aware
+// state + postal checks — so an operator edit can't write a shape the
+// original create flow would have rejected.
+const updateRecipientSchema = recipientAddressSchema;
+type UpdateRecipientInput = z.infer<typeof updateRecipientSchema>;
 
 const listSchema = z.object({
   status: z
@@ -101,6 +109,34 @@ export class AdminOrderController {
   @RequiresPage("admin.orders.read")
   get(@Param("id", new ParseUUIDPipe()) id: string) {
     return this.orders.get(id);
+  }
+
+  /**
+   * Edit the recipient / shipping address on an order that hasn't been
+   * charged for shipping yet. Used from the rate picker when a carrier
+   * refuses the shipment over the recipient details (missing phone is
+   * the common one). On success the operator re-fetches rates and buys
+   * the label. The service refuses the edit once the order is
+   * SHIPPING_PAID or later.
+   */
+  @Patch(":id/recipient")
+  @HttpCode(HttpStatus.OK)
+  updateRecipient(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(updateRecipientSchema)) body: UpdateRecipientInput,
+  ) {
+    return this.orders.updateRecipient(id, user.sub, {
+      recipientName: body.recipientName,
+      recipientPhone: body.recipientPhone,
+      recipientEmail: body.recipientEmail,
+      shipAddressLine1: body.shipAddressLine1,
+      shipAddressLine2: body.shipAddressLine2,
+      shipCity: body.shipCity,
+      shipState: body.shipState,
+      shipPostalCode: body.shipPostalCode,
+      shipCountry: body.shipCountry,
+    });
   }
 
   @Post(":id/purchase-label")

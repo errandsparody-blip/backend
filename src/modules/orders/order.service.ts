@@ -392,6 +392,8 @@ export class OrderService {
         state: input.recipient.shipState,
         postalCode: input.recipient.shipPostalCode,
         country: input.recipient.shipCountry,
+        phone: input.recipient.recipientPhone,
+        email: input.recipient.recipientEmail,
       },
       parcel,
       declaredValueCents,

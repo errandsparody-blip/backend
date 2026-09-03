@@ -118,16 +118,24 @@ const streetLine = z
   .max(120)
   .refine((s) => /\s/.test(s), "Street must include a number and a street name.");
 
-// Stricter phone — require exactly 10 US digits (optionally with +1 prefix or
-// formatting noise like dashes/parens/spaces). Rejects sequential-digit
-// placeholders like "1234567890" via a separate refine because some users
-// genuinely have nice round phone numbers; we filter the obvious garbage.
-const phoneUS10 = z
-  .string()
+// Recipient phone — REQUIRED. Exactly 10 NANP digits (US + Canada share
+// the plan), optionally with a +1 prefix or formatting noise like
+// dashes/parens/spaces. Rejects sequential-digit placeholders like
+// "1234567890" via a separate refine.
+//
+// This used to be optional — and, separately, the value was never
+// forwarded to Shippo. That combination is the root cause of the
+// "Shippo says the phone number is wrong" failures at label-buy time:
+// UPS, FedEx and every Canada shipment refuse a parcel with no
+// recipient phone. It's mandatory now on the manual order form and the
+// CSV import (both feed `recipientAddressSchema`).
+const recipientPhoneRequired = z
+  .string({ required_error: "Recipient phone is required." })
   .trim()
+  .min(1, "Recipient phone is required.")
   .transform((s) => s.replace(/[^\d+]/g, "")) // strip formatting
   .pipe(
-    z.string().regex(/^(\+?1)?\d{10}$/, "US phone must be 10 digits."),
+    z.string().regex(/^(\+?1)?\d{10}$/, "Enter a 10-digit US or Canada phone number."),
   )
   .refine((s) => {
     const digits = s.replace(/[^\d]/g, "").slice(-10);
@@ -137,9 +145,7 @@ const phoneUS10 = z
     if (/(\d)\1{4,}/.test(digits)) return false;
     if (/01234567|12345678|23456789|98765432|87654321/.test(digits)) return false;
     return true;
-  }, "Phone number looks like a placeholder.")
-  .optional()
-  .or(z.literal("").transform(() => undefined));
+  }, "Phone number looks like a placeholder.");
 
 export const recipientAddressSchema = z.object({
   recipientName: z
@@ -148,7 +154,7 @@ export const recipientAddressSchema = z.object({
     .min(2, "Recipient name is too short.")
     .max(120)
     .refine((s) => /\s|[A-Za-z]{3,}/.test(s), "Use a real name (first + last)."),
-  recipientPhone: phoneUS10,
+  recipientPhone: recipientPhoneRequired,
   recipientEmail: emailNullable,
   shipAddressLine1: streetLine,
   shipAddressLine2: z.string().trim().max(120).optional().or(z.literal("").transform(() => undefined)),

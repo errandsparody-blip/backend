@@ -620,6 +620,8 @@ export class IntegrationOrderService {
         state: input.recipient.state,
         postalCode: input.recipient.postalCode,
         country: input.recipient.country,
+        phone: input.recipient.phone ?? undefined,
+        email: input.recipient.email ?? undefined,
       },
       parcel,
       declaredValueCents,

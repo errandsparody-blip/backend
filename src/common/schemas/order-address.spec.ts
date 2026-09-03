@@ -11,6 +11,8 @@ import { createOrderSchema, recipientAddressSchema } from "./order.schema";
 
 const baseAddress = {
   recipientName: "Jane Buyer",
+  // Required — carriers refuse a shipment with no recipient phone.
+  recipientPhone: "5125550142",
   shipAddressLine1: "123 Market St",
   shipCity: "Austin",
 };
@@ -104,6 +106,41 @@ describe("recipientAddressSchema — country-aware validation", () => {
     });
     expect(r.success).toBe(true);
     if (r.success) expect(r.data.shipCountry).toBe("US");
+  });
+
+  it("requires a recipient phone", () => {
+    const r = recipientAddressSchema.safeParse({
+      recipientName: baseAddress.recipientName,
+      shipAddressLine1: baseAddress.shipAddressLine1,
+      shipCity: baseAddress.shipCity,
+      shipState: "TX",
+      shipPostalCode: "78701",
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.path.includes("recipientPhone"))).toBe(true);
+    }
+  });
+
+  it("rejects a placeholder phone", () => {
+    const r = recipientAddressSchema.safeParse({
+      ...baseAddress,
+      recipientPhone: "1111111111",
+      shipState: "TX",
+      shipPostalCode: "78701",
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it("normalises a formatted phone to digits", () => {
+    const r = recipientAddressSchema.safeParse({
+      ...baseAddress,
+      recipientPhone: "(512) 555-0142",
+      shipState: "TX",
+      shipPostalCode: "78701",
+    });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.recipientPhone).toBe("5125550142");
   });
 });
 

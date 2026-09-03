@@ -37,7 +37,7 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
-import type { CreateOrderInput } from "../../common/schemas/order.schema";
+import { createOrderSchema, type CreateOrderInput } from "../../common/schemas/order.schema";
 import { PrismaService } from "../../common/prisma.service";
 
 import { OrderService } from "./order.service";
@@ -413,7 +413,25 @@ export class OrderImportService {
       // branch they should keep using the wizard.
       fulfillmentMode: "PLATFORM_SHIP" as const,
     };
-    return input as unknown as CreateOrderInput;
+
+    // Validate the shaped row against the SAME schema the wizard's
+    // controller enforces. OrderService.create trusts its typed input
+    // (the HTTP pipe validates there), so the import path — which calls
+    // create() directly — has to run the schema itself. This is what
+    // makes recipient_phone (and the country-aware postal/state checks)
+    // actually mandatory on a CSV import: a row missing the phone fails
+    // here with a per-field reason and the other rows still import.
+    const parsed = createOrderSchema.safeParse(input);
+    if (!parsed.success) {
+      const detail = parsed.error.issues
+        .map((iss) => {
+          const field = iss.path.join(".").replace(/^recipient\./, "");
+          return field ? `${field}: ${iss.message}` : iss.message;
+        })
+        .join("; ");
+      throw new BadRequestException({ message: detail, code: "validation_failed" });
+    }
+    return parsed.data;
   }
 
   private formatRowError(err: unknown): string {

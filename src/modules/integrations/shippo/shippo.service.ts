@@ -72,6 +72,17 @@ export interface RateRequest {
     state: string;
     postalCode: string;
     country: string;
+    /**
+     * Recipient phone. REQUIRED by UPS/FedEx and every Canada
+     * shipment — Shippo returns a shipment `message` (and later
+     * refuses the transaction) when it's missing. We collect it on the
+     * order (`Order.recipientPhone`) so it should almost always be
+     * present; kept optional on the type so the legacy quote path and
+     * tests don't have to thread it through.
+     */
+    phone?: string | undefined;
+    /** Recipient email — used by carriers for delivery-exception notices. */
+    email?: string | undefined;
   };
   parcel: RateRequestParcel;
   /** Total declared value in cents — informs insurance / customs. */
@@ -421,7 +432,7 @@ export class ShippoService {
       // USPS rejects label purchase without sender email. See config.ts.
       email: this.cfg.WAREHOUSE_FROM_EMAIL,
     };
-    const addressTo = {
+    const addressTo: Record<string, string> = {
       // Recipient name as printed on the label. Trim and fall back to a
       // placeholder only if the caller genuinely has no name on file —
       // an empty string here would make USPS reject the label.
@@ -433,6 +444,17 @@ export class ShippoService {
       zip: req.toAddress.postalCode,
       country: req.toAddress.country,
     };
+    // Phone / email — only send when we actually have them. An empty
+    // string is worse than an absent key: some carriers validate the
+    // FORMAT of a present-but-blank phone and reject the shipment. UPS,
+    // FedEx and every Canada shipment REQUIRE a recipient phone, which
+    // is the single most common cause of "Shippo says the phone number
+    // is wrong" even when the vendor entered one — historically we
+    // never forwarded it.
+    const toPhone = req.toAddress.phone?.trim();
+    if (toPhone) addressTo.phone = toPhone;
+    const toEmail = req.toAddress.email?.trim();
+    if (toEmail) addressTo.email = toEmail;
     // Migration 0049 / Phase N — carrier template. When set, Shippo
     // returns flat-rate / one-rate / simple-rate pricing for that
     // container. Shippo accepts either a `template` id OR raw dims;

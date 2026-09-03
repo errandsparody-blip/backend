@@ -146,7 +146,9 @@ describe("OrderService — tenant isolation + address rejection", () => {
 
   const validRecipient = {
     recipientName: "Jane Doe",
-    recipientPhone: undefined,
+    // Recipient phone is required now (carriers refuse a shipment
+    // without one). 305-555-0142 — valid NANP, not a placeholder pattern.
+    recipientPhone: "3055550142",
     recipientEmail: undefined,
     shipAddressLine1: "123 Main St",
     shipAddressLine2: undefined,

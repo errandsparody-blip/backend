@@ -192,6 +192,8 @@ describe("P3 Order flow (e2e)", () => {
 
   const RECIPIENT = {
     recipientName: "Jane Doe",
+    // Required — the carrier refuses a shipment with no recipient phone.
+    recipientPhone: "3055550142",
     shipAddressLine1: "1 Test Way",
     shipCity: "Miami",
     shipState: "FL",

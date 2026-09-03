@@ -1360,6 +1360,11 @@ export class OrderPackService {
         state: order.shipState,
         postalCode: order.shipPostalCode,
         country: order.shipCountry,
+        // Forward the recipient phone/email so UPS/FedEx/Canada rates
+        // aren't silently dropped and the later label purchase (which
+        // reuses this shipment) doesn't get refused for a missing phone.
+        phone: order.recipientPhone ?? undefined,
+        email: order.recipientEmail ?? undefined,
       },
       parcel: {
         lengthIn: this.decimalToNumber(raw.packedLengthIn),
