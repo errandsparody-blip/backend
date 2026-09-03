@@ -1855,6 +1855,16 @@ model ShopperRequest {
   // do NOT trust the client to pick.
   paymentMethod               ShopperPaymentMethod   @default(STRIPE) @map("payment_method")
 
+  // Migration 0058 — buyer's COMMITTED payment method on the manual/WIRE
+  // rail. Null until the buyer confirms a specific method (wire/ach/zelle/
+  // cashapp/stripe). Once set, the picker is hard-locked: the buyer cannot
+  // switch (an admin must reset it). This is what actually reflects HOW the
+  // buyer paid — the `paymentMethod` column above is only the rail (WIRE),
+  // which is why a card payment previously still read as "wire". Also acts
+  // as the flag that the buyer has collected payment details.
+  committedPaymentMethodCode  String?                @map("committed_payment_method_code")
+  paymentCommittedAt          DateTime?              @map("payment_committed_at")
+
   // Migration 0023 — ID-verification packet. Only meaningful when
   // paymentMethod = WIRE. Status is NONE by default for STRIPE-track
   // requests; the buyer never uploads anything.

@@ -56,6 +56,7 @@ import { OpsAlertService } from "../notifications/ops-alert.service";
 import { R2Service } from "../integrations/r2/r2.service";
 import { StripeService } from "../integrations/stripe/stripe.service";
 
+import { assertEmailDeliverable } from "./email-deliverability.util";
 import {
   buyerIdCheckPassed,
   buyerIdVerificationRequired,
@@ -136,6 +137,12 @@ export class ShopperController {
     intakeTotalCents: number;
     paymentMethod: "STRIPE" | "WIRE";
   }> {
+    // Deliverability gate — the buyer will be emailed their payment details,
+    // so reject a well-formed address at a domain that can't receive mail
+    // (e.g. a doubled-TLD typo) before we create anything. Fails open on
+    // transient DNS errors so a resolver hiccup never blocks a real buyer.
+    await assertEmailDeliverable(body.buyerEmail, this.logger);
+
     const cfg = loadConfig();
     const commissionBps = await this.loadCommissionBps();
     // Migration 0023 — load the wire threshold AFTER computing the items
@@ -481,7 +488,17 @@ export class ShopperController {
     const paymentMethodsFull = shouldRevealBank
       ? await this.loadActivePaymentMethods()
       : [];
-    const paymentMethods = paymentMethodsFull.map((m) => ({
+    // Migration 0058 — once the buyer has committed to a method, the choice is
+    // hard-locked. Collapse the offered list to just that method so the client
+    // can't render a picker that lets them switch. `committedPaymentMethodCode`
+    // is also surfaced below so the UI shows the locked state even if the
+    // committed method has since been deactivated in config.
+    const committedCode = request.committedPaymentMethodCode;
+    const paymentMethods = (
+      committedCode
+        ? paymentMethodsFull.filter((m) => m.code === committedCode)
+        : paymentMethodsFull
+    ).map((m) => ({
       code: m.code,
       label: m.label,
     }));
@@ -504,8 +521,14 @@ export class ShopperController {
         // bank details inline — they arrive by email.
         bankInstructionsAvailable: legacyAvailable,
         // Each entry is { code, label }. Empty array when payment
-        // isn't due yet. Details are intentionally NOT included.
+        // isn't due yet. Details are intentionally NOT included. When the
+        // buyer has committed, this is collapsed to the single locked method.
         paymentMethods,
+        // Migration 0058 — the committed (locked) method + when it happened.
+        // Null until the buyer confirms. Drives the buyer UI's locked state
+        // and tells the buyer they can no longer switch.
+        committedPaymentMethodCode: request.committedPaymentMethodCode,
+        paymentCommittedAt: request.paymentCommittedAt,
         warehouseShipFrom,
         // Live threshold — drives the IdVerificationCard's copy.
         idVerificationThresholdCents,
@@ -969,6 +992,19 @@ export class ShopperController {
         code: "shopper_payment_method_not_active",
       });
     }
+
+    // HARD-LOCK the choice before we release any details. commitPaymentMethod
+    // sets the method atomically on first call and throws
+    // `shopper_payment_method_locked` (409) if the buyer already committed to a
+    // DIFFERENT method — so once someone confirms wire and we email the bank
+    // details, they can't flip to card (which is how a card payment previously
+    // ended up recorded against the WIRE rail). Re-confirming the SAME method
+    // is allowed (a legitimate "resend my details").
+    await this.requests.commitPaymentMethod({
+      requestId: request.id,
+      methodCode: chosen.code,
+    });
+
     // Card (Stripe) rail — no emailed credentials. Create a hosted Checkout
     // session (buyer covers the processing fee via gross-up) and hand the URL
     // back for the client to redirect to. The webhook lands the request in

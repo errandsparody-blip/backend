@@ -99,6 +99,11 @@ export interface RequestRow {
   buyerPhone: string | null;
   // Migration 0023 — payment rail this request is on.
   paymentMethod: "STRIPE" | "WIRE";
+  // Migration 0058 — the specific method the buyer COMMITTED to on the manual
+  // rail (wire/ach/zelle/cashapp/stripe). Null until they confirm. Once set,
+  // the choice is hard-locked and this reflects how they actually paid.
+  committedPaymentMethodCode: string | null;
+  paymentCommittedAt: Date | null;
   // Migration 0023 — gov-ID review packet (only meaningful when WIRE).
   idVerificationStatus:
     | "NONE"
@@ -501,6 +506,101 @@ export class ShopperRequestService {
       });
     }
     return row as RequestWithLines;
+  }
+
+  /**
+   * Migration 0058 — commit the buyer to a specific payment method and
+   * HARD-LOCK the choice.
+   *
+   * Called the moment the buyer confirms a method (before we email them the
+   * account details / open Stripe Checkout). The commit is atomic: the SQL
+   * only writes when no method is committed yet, so two concurrent confirms
+   * can't both "win". After the write we re-read and enforce:
+   *
+   *   - committed code == requested  → OK (we just set it, OR the buyer is
+   *     re-requesting the SAME method's details — a legitimate resend).
+   *   - committed code != requested  → LOCKED. The buyer already committed to
+   *     a different method; they cannot switch. An admin must reset it.
+   *
+   * Returns the fresh snapshot so callers can read `committedPaymentMethodCode`.
+   */
+  async commitPaymentMethod(args: {
+    requestId: string;
+    methodCode: string;
+  }): Promise<RequestWithLines> {
+    const before = await this.getById(args.requestId, { includeLines: false });
+    if (before.paymentMethod !== "WIRE") {
+      throw new BadRequestException({
+        message: "This request isn't on the manual-payment track.",
+        code: "shopper_payment_not_applicable",
+      });
+    }
+
+    // Atomic set-if-null. Written via raw SQL so it works even before the
+    // Prisma client is regenerated with the new columns (deploy-time), and so
+    // the `IS NULL` guard runs in the database rather than in a read-modify-
+    // write that could race.
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "shopper_requests"
+      SET "committed_payment_method_code" = ${args.methodCode},
+          "payment_committed_at" = now()
+      WHERE "id" = ${args.requestId}::uuid
+        AND "committed_payment_method_code" IS NULL
+    `);
+
+    const after = await this.getById(args.requestId, { includeLines: false });
+    if (after.committedPaymentMethodCode !== args.methodCode) {
+      throw new ConflictException({
+        message:
+          "You've already chosen a payment method for this order, so it's locked in. If you need to change it, reply here and we'll help.",
+        code: "shopper_payment_method_locked",
+        committedMethod: after.committedPaymentMethodCode,
+      });
+    }
+
+    // Audit only the FIRST commit (the transition null → set), not resends.
+    if (!before.committedPaymentMethodCode && after.committedPaymentMethodCode) {
+      await this.audit.log({
+        action: "shopper.payment_method.committed",
+        resourceType: "shopper_request",
+        resourceId: args.requestId,
+        beforeState: { committedPaymentMethodCode: null },
+        afterState: {
+          committedPaymentMethodCode: after.committedPaymentMethodCode,
+          paymentCommittedAt:
+            after.paymentCommittedAt?.toISOString() ?? new Date().toISOString(),
+        },
+      });
+    }
+    return after;
+  }
+
+  /**
+   * Migration 0058 — admin clears a committed payment method so the buyer can
+   * pick again ("contact us to change"). Audit-logged with the acting admin.
+   */
+  async resetPaymentMethodCommitment(args: {
+    requestId: string;
+    actorId: string;
+  }): Promise<RequestWithLines> {
+    const before = await this.getById(args.requestId, { includeLines: false });
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "shopper_requests"
+      SET "committed_payment_method_code" = NULL,
+          "payment_committed_at" = NULL
+      WHERE "id" = ${args.requestId}::uuid
+    `);
+    await this.audit.log({
+      actorId: args.actorId,
+      action: "shopper.payment_method.reset",
+      resourceType: "shopper_request",
+      resourceId: args.requestId,
+      beforeState: {
+        committedPaymentMethodCode: before.committedPaymentMethodCode,
+      },
+      afterState: { committedPaymentMethodCode: null },
+    });
+    return this.getById(args.requestId, { includeLines: false });
   }
 
   /**

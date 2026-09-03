@@ -25,6 +25,8 @@ const baseRequest: RequestRow = {
   // them; we fill in the defaults so the fixture matches RequestRow.
   buyerPhone: null,
   paymentMethod: "STRIPE",
+  committedPaymentMethodCode: null,
+  paymentCommittedAt: null,
   idVerificationStatus: "NONE",
   idDocumentUrl: null,
   idSelfieUrl: null,

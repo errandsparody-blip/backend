@@ -979,6 +979,39 @@ export class AdminShopperController {
   }
 
   /**
+   * Migration 0058 — clear the buyer's committed (locked) payment method so
+   * they can choose again. Used when a buyer legitimately needs to switch
+   * (e.g. they picked wire, then asked to pay by card instead). Finance-gated
+   * and audit-logged with the acting admin. Posts a chat note so the buyer
+   * knows they can re-pick.
+   */
+  @Post(":id/payment/reset-commitment")
+  @HttpCode(HttpStatus.OK)
+  async resetPaymentCommitment(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    this.assertFinanceRole(user);
+    const updated = await this.requests.resetPaymentMethodCommitment({
+      requestId: id,
+      actorId: user.sub,
+    });
+    try {
+      await this.postAdminNote(
+        id,
+        "We've reset your payment method — you can choose how to pay again from your order page.",
+        user.sub,
+      );
+    } catch (err) {
+      this.logger.warn(
+        { err, requestId: id },
+        "shopper.payment.reset_commitment.note_failed",
+      );
+    }
+    return updated;
+  }
+
+  /**
    * Reject the buyer's wire-transfer proof. Status returns to
    * AWAITING_WIRE_PAYMENT and the rejection reason is posted to chat so
    * the buyer can resubmit.
