@@ -12,7 +12,7 @@
  * The secret key + fetch implementation are constructor-injectable so unit
  * tests run without network or real keys.
  */
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { createHmac, timingSafeEqual } from "crypto";
 
 import {
@@ -43,7 +43,9 @@ export class PaystackProcessor extends PaymentProcessor {
   private readonly secretKey: string;
   private readonly fetchFn: FetchFn;
 
-  constructor(secretKey?: string, fetchFn?: FetchFn) {
+  // @Optional() so Nest DI doesn't try to resolve these test-only params in
+  // production (falls back to the environment + global fetch).
+  constructor(@Optional() secretKey?: string, @Optional() fetchFn?: FetchFn) {
     super();
     this.secretKey = secretKey ?? process.env.PAYSTACK_SECRET_KEY ?? "";
     this.fetchFn = fetchFn ?? globalThis.fetch;

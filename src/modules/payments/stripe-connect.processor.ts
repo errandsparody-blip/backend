@@ -11,7 +11,7 @@
  * The Stripe client + webhook secret are constructor-injectable so unit tests
  * can supply fakes; in production they default to the environment.
  */
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import Stripe from "stripe";
 
 import {
@@ -39,7 +39,13 @@ export class StripeConnectProcessor extends PaymentProcessor {
   private readonly stripe: Stripe | null;
   private readonly webhookSecret: string;
 
-  constructor(stripeClient?: Stripe | null, webhookSecret?: string) {
+  // Params are constructor-injectable for tests only; @Optional() stops Nest's
+  // DI from trying to resolve them as providers in production (it injects
+  // nothing and we fall back to the environment).
+  constructor(
+    @Optional() stripeClient?: Stripe | null,
+    @Optional() webhookSecret?: string,
+  ) {
     super();
     const apiKey = process.env.STRIPE_SECRET_KEY ?? "";
     // A dedicated endpoint secret for storefront/Connect events keeps them
