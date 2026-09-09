@@ -1248,9 +1248,152 @@ export function pricingGuideTemplate(args: {
       `Hi ${businessName},\n\n` +
       `Thanks for your interest in USA Errands. Download the full pricing guide as a PDF here:\n` +
       `${args.downloadUrl}\n\n` +
-     
-     
+
+
       `If you'd like a walk-through or a custom quote for higher volume, just reply to this email.\n\n` +
+      `— The USA Errands team`,
+  };
+}
+
+/**
+ * Storefront buyer — return request received (Migration 0061).
+ */
+export function storefrontReturnReceivedTemplate(args: {
+  reference: string;
+  orderReference: string;
+  storeName: string;
+  buyerName?: string | null;
+}): RenderedEmail {
+  const hi = args.buyerName ? `Hi ${escape(args.buyerName)},` : "Hi there,";
+  return {
+    subject: `We received your return request (${args.reference})`,
+    html: shell({
+      eyebrow: "  Return requested",
+      title: "Your return request is in",
+      bodyHtml:
+        `<p style="margin:0 0 12px 0;">${hi}</p>` +
+        `<p style="margin:0 0 12px 0;">We've received your return request <strong>${escape(args.reference)}</strong> for order <strong>${escape(args.orderReference)}</strong> from ${escape(args.storeName)}. Our team will review it and email you the outcome.</p>` +
+        `<p style="margin:16px 0 0 0;color:#9C9892;font-size:13px;">— The USA Errands team</p>`,
+    }),
+    text:
+      `${args.buyerName ? `Hi ${args.buyerName},` : "Hi there,"}\n\n` +
+      `We've received your return request ${args.reference} for order ${args.orderReference} from ${args.storeName}. ` +
+      `We'll review it and email you the outcome.\n\n— The USA Errands team`,
+  };
+}
+
+/**
+ * Storefront buyer — return request declined (Migration 0061).
+ */
+export function storefrontReturnRejectedTemplate(args: {
+  reference: string;
+  storeName: string;
+  note?: string | null;
+  buyerName?: string | null;
+}): RenderedEmail {
+  const hi = args.buyerName ? `Hi ${escape(args.buyerName)},` : "Hi there,";
+  return {
+    subject: `Update on your return request ${args.reference}`,
+    html: shell({
+      eyebrow: "  Return update",
+      title: "About your return request",
+      bodyHtml:
+        `<p style="margin:0 0 12px 0;">${hi}</p>` +
+        `<p style="margin:0 0 12px 0;">We've reviewed your return request <strong>${escape(args.reference)}</strong> and can't approve it at this time.</p>` +
+        (args.note ? `<p style="margin:0 0 12px 0;color:#2A2A2A;">${escape(args.note)}</p>` : "") +
+        `<p style="margin:16px 0 0 0;color:#9C9892;font-size:13px;">Reply to this email if you have questions. — The USA Errands team</p>`,
+    }),
+    text:
+      `${args.buyerName ? `Hi ${args.buyerName},` : "Hi there,"}\n\n` +
+      `We've reviewed your return request ${args.reference} and can't approve it at this time.` +
+      (args.note ? `\n\n${args.note}` : "") +
+      `\n\nReply to this email if you have questions. — The USA Errands team`,
+  };
+}
+
+/**
+ * Storefront buyer — refund issued (Migration 0059).
+ */
+export function storefrontRefundTemplate(args: {
+  reference: string;
+  storeName: string;
+  amountCents: number;
+  buyerName?: string | null;
+}): RenderedEmail {
+  const hi = args.buyerName ? `Hi ${escape(args.buyerName)},` : "Hi there,";
+  const amount = `$${(args.amountCents / 100).toFixed(2)}`;
+  return {
+    subject: `Refund issued for order ${args.reference}`,
+    html: shell({
+      eyebrow: "  Refund issued",
+      title: "Your refund is on the way",
+      bodyHtml:
+        `<p style="margin:0 0 12px 0;">${hi}</p>` +
+        `<p style="margin:0 0 12px 0;">We've refunded <strong>${escape(amount)}</strong> for your order <strong>${escape(args.reference)}</strong> from ${escape(args.storeName)}. It should appear on your original payment method within a few business days.</p>` +
+        `<p style="margin:16px 0 0 0;color:#9C9892;font-size:13px;">— The USA Errands team</p>`,
+    }),
+    text:
+      `${args.buyerName ? `Hi ${args.buyerName},` : "Hi there,"}\n\n` +
+      `We've refunded ${amount} for your order ${args.reference} from ${args.storeName}. ` +
+      `It should appear on your original payment method within a few business days.\n\n` +
+      `— The USA Errands team`,
+  };
+}
+
+/**
+ * Buyer account — passwordless sign-in link (Migration 0060).
+ */
+export function buyerLoginTemplate(args: { link: string }): RenderedEmail {
+  return {
+    subject: "Your USA Errands sign-in link",
+    html: shell({
+      eyebrow: "  Sign in",
+      title: "Sign in to your account",
+      bodyHtml:
+        `<p style="margin:0 0 12px 0;">Tap the button below to sign in and view your orders or check out faster. This link expires in 30 minutes.</p>` +
+        `<p style="margin:16px 0 0 0;color:#9C9892;font-size:13px;">If you didn't request this, you can ignore it.</p>`,
+      cta: { label: "Sign in", href: args.link },
+    }),
+    text:
+      `Sign in to your USA Errands account (link expires in 30 minutes):\n${args.link}\n\n` +
+      `If you didn't request this, ignore this email.`,
+  };
+}
+
+/**
+ * Storefront buyer — order shipped, tracking details (Migration 0059, Layer 9).
+ * Sent automatically once the warehouse buys the label. Shows the tracking
+ * number + carrier so the buyer can follow their parcel.
+ */
+export function storefrontTrackingTemplate(args: {
+  reference: string;
+  storeName: string;
+  trackingNumber: string;
+  carrier: string;
+  buyerName?: string | null;
+}): RenderedEmail {
+  const hi = args.buyerName ? `Hi ${escape(args.buyerName)},` : "Hi there,";
+  const carrier = escape(args.carrier || "our carrier");
+  const tracking = escape(args.trackingNumber);
+  return {
+    subject: `Your ${args.storeName} order ${args.reference} has shipped`,
+    html: shell({
+      eyebrow: "  Order shipped",
+      title: "Your order is on its way",
+      bodyHtml:
+        `<p style="margin:0 0 12px 0;">${hi}</p>` +
+        `<p style="margin:0 0 12px 0;">Good news — your order <strong>${escape(args.reference)}</strong> from <strong>${escape(args.storeName)}</strong> has shipped.</p>` +
+        `<div style="margin:8px 0 16px 0;padding:16px 20px;background:#F1EFE9;border:1px solid #E2DFD7;border-radius:6px;">` +
+        `<div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:1.4px;text-transform:uppercase;color:#777270;margin-bottom:6px;">Tracking · ${carrier}</div>` +
+        `<div style="font-family:'JetBrains Mono',monospace;font-size:18px;font-weight:600;color:#0A0A0A;">${tracking}</div></div>` +
+        `<p style="margin:0 0 12px 0;">Track it with ${carrier} using the number above.</p>` +
+        `<p style="margin:16px 0 0 0;color:#9C9892;font-size:13px;">— The USA Errands team</p>`,
+    }),
+    text:
+      `${args.buyerName ? `Hi ${args.buyerName},` : "Hi there,"}\n\n` +
+      `Your order ${args.reference} from ${args.storeName} has shipped.\n\n` +
+      `Carrier: ${args.carrier || "our carrier"}\n` +
+      `Tracking number: ${args.trackingNumber}\n\n` +
       `— The USA Errands team`,
   };
 }

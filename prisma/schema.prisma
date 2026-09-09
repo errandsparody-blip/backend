@@ -362,6 +362,24 @@ model Vendor {
   // the dashboard. Retained for audit / dispute review.
   orderImportJobs OrderImportJob[]
 
+  // Migration 0059 — Marketplace / storefront.
+  //   slug              — URL-safe handle for /store/[slug] AND [slug].usaerrands.com.
+  //                       Unique; null until the vendor opens a storefront.
+  //   storefrontEnabled — the storefront is live (gated on an ACTIVE payout account).
+  //   storefrontFeePaidAt — the one-time $50 setup fee was debited from the wallet.
+  //   marketplaceFeatured — vendor opted into the (free) multi-vendor feed.
+  slug                String?  @unique
+  storefrontEnabled   Boolean  @default(false) @map("storefront_enabled")
+  storefrontFeePaidAt DateTime? @map("storefront_fee_paid_at")
+  marketplaceFeatured Boolean  @default(false) @map("marketplace_featured")
+
+  storefront          VendorStorefront?
+  payoutAccounts      VendorPayoutAccount[]
+  storefrontOrders    StorefrontOrder[]
+  discountCodes       DiscountCode[]
+  discountCodeVendors DiscountCodeVendor[]
+  domains             VendorDomain[]
+
   @@index([status])
   @@index([kycStatus])
   @@map("vendors")
@@ -505,6 +523,19 @@ model Product {
   // existing products keep working without backfill.
   imageUrl        String?  @map("image_url")
 
+  // Migration 0059 — Marketplace / storefront catalog.
+  //   listed          — vendor has published this product to their storefront.
+  //                     Only listed + ACTIVE + in-stock products appear publicly.
+  //   retailPriceCents — the PUBLIC price the buyer pays the vendor. Editable by
+  //                     the vendor; DISTINCT from declaredValueCents (which is the
+  //                     customs/insurance value and is NOT editable on the store).
+  //                     Required (> 0) before a product can be listed.
+  //   category / tags  — storefront browsing + (later) the marketplace feed.
+  listed          Boolean  @default(false)
+  retailPriceCents Int?    @map("retail_price_cents")
+  category        String?
+  tags            String[] @default([])
+
   status          String   @default("ACTIVE")  // ACTIVE | ARCHIVED
 
   createdAt       DateTime @default(now()) @map("created_at")
@@ -518,6 +549,10 @@ model Product {
   @@unique([vendorId, code])
   @@unique([vendorId, storeSku])
   @@index([vendorId, status])
+  // Migration 0059 — storefront catalog reads (vendor's listed products) and
+  // the marketplace category feed.
+  @@index([vendorId, listed, status])
+  @@index([listed, category])
   @@map("products")
 }
 
@@ -1000,6 +1035,9 @@ enum LedgerEntryType {
   // Migration 0056 — referral bonus paid to referrer + referee on the
   // referred vendor's first received PSN.
   REFERRAL_BONUS
+  // Migration 0059 — one-time $50 fee charged when a vendor opens a
+  // dedicated storefront. Featuring on the marketplace stays free.
+  STOREFRONT_FEE
 }
 
 model LedgerEntry {
@@ -1738,6 +1776,246 @@ model VendorInvitation {
   @@index([vendorId, status, createdAt])
   @@index([email])
   @@map("vendor_invitations")
+}
+
+// =============================================================================
+// Marketplace / Vendor Storefronts (Migration 0059)
+//
+// A public sales layer on top of the fulfillment engine. Money auto-splits at
+// checkout (product → vendor's connected processor account; shipping + platform
+// fee → USA Errands), so we never custody vendor product cash. Single-vendor
+// storefront first; the multi-vendor feed is Phase 2. All amounts in USD cents.
+// =============================================================================
+
+// Per-vendor storefront presentation (1:1). Separate from Vendor so the
+// storefront's look-and-feel evolves without touching the core vendor row.
+model VendorStorefront {
+  vendorId    String   @id @map("vendor_id") @db.Uuid
+  vendor      Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  displayName String   @map("display_name")
+  logoUrl     String?  @map("logo_url")
+  bannerUrl   String?  @map("banner_url")
+  accentColor String?  @map("accent_color")   // hex, e.g. "#0F172A"
+  about       String?  @db.Text
+  currency    String   @default("USD")         // USD everywhere for launch
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("vendor_storefronts")
+}
+
+// A connected payout destination. A vendor may connect Stripe and/or Paystack;
+// the storefront charges through whichever is ACTIVE. Secrets never live here —
+// only the external account/subaccount identifier + status mirrored from the
+// processor's webhooks.
+model VendorPayoutAccount {
+  id                String   @id @default(uuid()) @db.Uuid
+  vendorId          String   @map("vendor_id") @db.Uuid
+  vendor            Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  processor         String   // "STRIPE" | "PAYSTACK"
+  externalAccountId String?  @map("external_account_id") // acct_… | subaccount code
+  status            String   @default("PENDING") // PENDING | ACTIVE | RESTRICTED | DISABLED
+  detailsSubmitted  Boolean  @default(false) @map("details_submitted")
+  chargesEnabled    Boolean  @default(false) @map("charges_enabled")
+  payoutsEnabled    Boolean  @default(false) @map("payouts_enabled")
+
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@unique([vendorId, processor])
+  @@index([vendorId, status])
+  @@map("vendor_payout_accounts")
+}
+
+// The public sale. Created PENDING_PAYMENT at checkout (soft-reserving stock),
+// marked PAID only by a verified processor webhook, then linked to a normal v2
+// fulfillment order. `items` / `shipAddress` are JSON snapshots so the record is
+// self-contained even if the catalog changes later.
+model StorefrontOrder {
+  id                  String   @id @default(uuid()) @db.Uuid
+  reference           String   @unique                 // SF-000001
+  vendorId            String   @map("vendor_id") @db.Uuid
+  vendor              Vendor   @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+
+  // Buyer — email mandatory (validated); account optional (future buyer_account).
+  buyerEmail          String   @map("buyer_email")
+  buyerName           String?  @map("buyer_name")
+  buyerPhone          String?  @map("buyer_phone")
+
+  shipAddress         Json     @map("ship_address")
+  items               Json                              // [{ productId, sku, name, qty, unitRetailCents }]
+
+  // Money (USD cents). productSubtotal - discount + shipping + tax = total.
+  productSubtotalCents Int     @map("product_subtotal_cents")
+  discountCode        String?  @map("discount_code")
+  discountCents       Int      @default(0) @map("discount_cents")
+  shippingCents       Int      @map("shipping_cents")   // the speed the buyer chose (estimate)
+  shippingSpeed       String   @map("shipping_speed")   // STANDARD | EXPRESS
+  shippingServiceToken String? @map("shipping_service_token") // internal Shippo servicelevel bucket
+  platformFeeCents    Int      @default(0) @map("platform_fee_cents")
+  taxCents            Int      @default(0) @map("tax_cents")
+  totalCents          Int      @map("total_cents")      // what the buyer paid
+  currency            String   @default("USD")
+
+  processor           String                            // STRIPE | PAYSTACK
+  paymentRef          String?  @map("payment_ref")      // processor reference/intent
+  paymentIntentId     String?  @map("payment_intent_id")
+  paidAt              DateTime? @map("paid_at")
+
+  status              String   @default("PENDING_PAYMENT")
+  // PENDING_PAYMENT | PAID | FULFILLING | SHIPPED | DELIVERED | CANCELLED | REFUNDED
+
+  // Link to the fulfillment order once payment confirms.
+  fulfillmentOrderId  String?  @unique @map("fulfillment_order_id") @db.Uuid
+
+  trackingNumber      String?  @map("tracking_number")
+  carrier             String?
+  shippedAt           DateTime? @map("shipped_at")
+
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  returnRequests      StorefrontReturnRequest[]
+
+  @@index([vendorId, status])
+  @@index([status, createdAt])
+  @@index([paymentRef])
+  @@map("storefront_orders")
+}
+
+// Discount codes. Two scopes:
+//   VENDOR      — owned by a vendor; only ever discounts THAT vendor's goods.
+//   MARKETPLACE — created by a super-admin; applies to ALL vendors when it has
+//                 no discountCodeVendors rows, or to the listed vendors when it
+//                 does. Uniqueness is enforced by partial indexes in the SQL
+//                 migration (unique code per marketplace; unique code per vendor).
+model DiscountCode {
+  id              String   @id @default(uuid()) @db.Uuid
+  code            String                                 // stored UPPERCASE
+  scope           String                                 // VENDOR | MARKETPLACE
+
+  vendorId        String?  @map("vendor_id") @db.Uuid    // set when scope=VENDOR
+  vendor          Vendor?  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  createdById     String?  @map("created_by") @db.Uuid   // admin, when scope=MARKETPLACE
+
+  discountType    String   @map("discount_type")         // PERCENT | FIXED
+  valueBps        Int?     @map("value_bps")             // PERCENT (1000 = 10%)
+  valueCents      Int?     @map("value_cents")           // FIXED
+
+  active          Boolean  @default(true)
+  startsAt        DateTime? @map("starts_at")
+  endsAt          DateTime? @map("ends_at")
+  minSubtotalCents Int?    @map("min_subtotal_cents")
+  maxRedemptions  Int?     @map("max_redemptions")
+  redemptionCount Int      @default(0) @map("redemption_count")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  vendorScopes    DiscountCodeVendor[]
+
+  @@index([scope, active])
+  @@index([vendorId, active])
+  @@map("discount_codes")
+}
+
+// Which vendors a MARKETPLACE discount code targets. Empty set = all vendors.
+model DiscountCodeVendor {
+  discountCodeId String       @map("discount_code_id") @db.Uuid
+  discountCode   DiscountCode @relation(fields: [discountCodeId], references: [id], onDelete: Cascade)
+  vendorId       String       @map("vendor_id") @db.Uuid
+  vendor         Vendor       @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@id([discountCodeId, vendorId])
+  @@index([vendorId])
+  @@map("discount_code_vendors")
+}
+
+// Vendor custom domains (Migration 0062, Phase 3). Points a vendor's own host
+// at their storefront once DNS-TXT verified. DNS + SSL provisioned in infra.
+model VendorDomain {
+  id                String   @id @default(uuid()) @db.Uuid
+  vendorId          String   @map("vendor_id") @db.Uuid
+  vendor            Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  host              String   @unique
+  status            String   @default("PENDING") // PENDING | VERIFIED | DISABLED
+  verificationToken String   @map("verification_token")
+  verifiedAt        DateTime? @map("verified_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@index([vendorId])
+  @@index([status])
+  @@map("vendor_domains")
+}
+
+// Buyer self-service return requests (Migration 0061). A buyer requests a
+// return on a shipped/delivered storefront order; an admin approves (→ refund)
+// or rejects.
+model StorefrontReturnRequest {
+  id               String   @id @default(uuid()) @db.Uuid
+  reference        String   @unique                 // SR-000001
+  storefrontOrderId String  @map("storefront_order_id") @db.Uuid
+  order            StorefrontOrder @relation(fields: [storefrontOrderId], references: [id], onDelete: Cascade)
+  buyerEmail       String   @map("buyer_email")
+  status           String   @default("REQUESTED")   // REQUESTED | APPROVED | REJECTED
+  reason           String
+  resolutionNote   String?  @map("resolution_note")
+  refundId         String?  @map("refund_id")
+  refundedCents    Int?     @map("refunded_cents")
+  resolvedById     String?  @map("resolved_by") @db.Uuid
+  resolvedAt       DateTime? @map("resolved_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@index([storefrontOrderId])
+  @@map("storefront_return_requests")
+}
+
+// Optional buyer accounts (Migration 0060) — passwordless. Buyers may shop as
+// guests; an account just saves details for faster checkout + order history.
+model BuyerAccount {
+  id                 String   @id @default(uuid()) @db.Uuid
+  email              String   @unique
+  name               String?
+  phone              String?
+  defaultShipAddress Json?    @map("default_ship_address")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  loginTokens        BuyerLoginToken[]
+  sessions           BuyerSession[]
+
+  @@map("buyer_accounts")
+}
+
+model BuyerLoginToken {
+  id             String       @id @default(uuid()) @db.Uuid
+  buyerAccountId String       @map("buyer_account_id") @db.Uuid
+  buyerAccount   BuyerAccount @relation(fields: [buyerAccountId], references: [id], onDelete: Cascade)
+  tokenHash      String       @unique @map("token_hash")
+  expiresAt      DateTime     @map("expires_at")
+  consumedAt     DateTime?    @map("consumed_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@index([buyerAccountId])
+  @@map("buyer_login_tokens")
+}
+
+model BuyerSession {
+  id             String       @id @default(uuid()) @db.Uuid
+  buyerAccountId String       @map("buyer_account_id") @db.Uuid
+  buyerAccount   BuyerAccount @relation(fields: [buyerAccountId], references: [id], onDelete: Cascade)
+  tokenHash      String       @unique @map("token_hash")
+  expiresAt      DateTime     @map("expires_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@index([buyerAccountId])
+  @@map("buyer_sessions")
 }
 
 // =============================================================================

@@ -61,6 +61,7 @@ import { CarrierPackagingRegistryService } from "../../common/services/carrier-p
 import { PackagingLibraryService } from "../../common/services/packaging-library.service";
 import { AuditService } from "../audit/audit.service";
 import { NotificationService } from "../notifications/notification.service";
+import { StorefrontShipmentSyncService } from "../storefront/storefront-shipment-sync.service";
 import {
   ShippoService,
   type CustomsDeclaration,
@@ -227,6 +228,9 @@ export class OrderPackService {
     // AdminOrderService.markHandedOff notification). NotificationModule
     // is already imported by OrderModule.
     private readonly notifications: NotificationService,
+    // Migration 0059 / Layer 9 — when a storefront-sourced order's label is
+    // purchased, propagate tracking to the storefront order + email the buyer.
+    private readonly storefrontShipmentSync: StorefrontShipmentSyncService,
   ) {}
 
   // =========================================================================
@@ -1945,6 +1949,21 @@ export class OrderPackService {
         service: label.service,
       } as unknown as Prisma.InputJsonValue,
     });
+
+    // Layer 9 — if this is a storefront order, mark it shipped + email the
+    // buyer their tracking. Best-effort: a sync/email hiccup must never fail a
+    // completed label purchase (the vendor has already been charged).
+    await this.storefrontShipmentSync
+      .syncFromFulfillmentOrder(orderId, {
+        trackingNumber: label.trackingNumber,
+        carrier: label.carrier,
+      })
+      .catch((err) =>
+        this.logger.warn(
+          { err: `${err}`, orderId },
+          "storefront.shipment_sync.failed",
+        ),
+      );
 
     return {
       outcome: "LABEL_PURCHASED" as const,

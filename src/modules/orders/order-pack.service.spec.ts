@@ -29,6 +29,7 @@ import { PackagingLibraryService } from "../../common/services/packaging-library
 import { AuditService } from "../audit/audit.service";
 import { ShippoService } from "../integrations/shippo/shippo.service";
 import { NotificationService } from "../notifications/notification.service";
+import { StorefrontShipmentSyncService } from "../storefront/storefront-shipment-sync.service";
 import { WalletService } from "../wallet/wallet.service";
 
 import { OrderPackService } from "./order-pack.service";
@@ -75,6 +76,11 @@ describe("OrderPackService — pre-flight validation", () => {
     // never reach the notification path (they 404 or reject before any
     // hand-off), so a no-op mock suffices.
     const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
+    // Storefront ship-sync dep (Layer 9). Pre-flight tests never reach the
+    // label-purchase path, so a no-op mock suffices.
+    const storefrontShipmentSync = {
+      syncFromFulfillmentOrder: jest.fn().mockResolvedValue(undefined),
+    };
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -86,6 +92,10 @@ describe("OrderPackService — pre-flight validation", () => {
         { provide: PackagingLibraryService, useValue: packagingLibrary },
         { provide: CarrierPackagingRegistryService, useValue: carrierRegistry },
         { provide: NotificationService, useValue: notifications },
+        {
+          provide: StorefrontShipmentSyncService,
+          useValue: storefrontShipmentSync,
+        },
       ],
     }).compile();
     svc = moduleRef.get(OrderPackService);

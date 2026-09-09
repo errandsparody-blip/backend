@@ -30,7 +30,11 @@ import { PagePermissionModule } from "./common/services/page-permission.module";
 import { ShippingPointModule } from "./common/services/shipping-point.module";
 import { PrismaModule } from "./common/prisma.module";
 import { AdminModule } from "./modules/admin/admin.module";
+import { BuyerAccountModule } from "./modules/buyer-account/buyer-account.module";
+import { DiscountsModule } from "./modules/discounts/discount.module";
+import { PaymentsModule } from "./modules/payments/payments.module";
 import { ReferralModule } from "./modules/referral/referral.module";
+import { StorefrontModule } from "./modules/storefront/storefront.module";
 import { AuditModule } from "./modules/audit/audit.module";
 import { AuthModule } from "./modules/auth/auth.module";
 import { EmailModule } from "./modules/email/email.module";
@@ -148,6 +152,10 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     MarketingModule,
     AdminModule,
     ReferralModule,
+    PaymentsModule,
+    DiscountsModule,
+    StorefrontModule,
+    BuyerAccountModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

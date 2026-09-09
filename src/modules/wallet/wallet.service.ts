@@ -45,7 +45,11 @@ export interface DebitArgs {
     // with an extra-charge amount; this debit fires when vendor's wallet
     // covers the charge and the hold transitions to PAID.
     | "RECEIVING_HOLD_FEE"
-  >;
+  >
+    // Migration 0059 — one-time $50 storefront setup fee. String literal
+    // (like REFERRAL_BONUS) so it typechecks before the local Prisma client
+    // is regenerated with the new enum value; the write casts to the enum.
+    | "STOREFRONT_FEE";
   description: string;
   referenceType?: string;
   referenceId?: string;
@@ -156,7 +160,10 @@ export class WalletService {
       const entry = await txc.ledgerEntry.create({
         data: {
           vendorId: args.vendorId,
-          type: args.type,
+          // Cast for the same reason as credit(): STOREFRONT_FEE may not be in
+          // the locally-generated enum yet; the DB migration adds it and the
+          // regenerated client accepts it at runtime.
+          type: args.type as LedgerEntryType,
           // Charges stored as negative cents.
           amountCents: -args.amountCents,
           balanceAfterCents: after,

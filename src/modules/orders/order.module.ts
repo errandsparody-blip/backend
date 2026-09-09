@@ -7,6 +7,7 @@ import { ShippoModule } from "../integrations/shippo/shippo.module";
 import { SmartyModule } from "../integrations/smarty/smarty.module";
 import { NotificationModule } from "../notifications/notification.module";
 import { ReturnModule } from "../returns/return.module";
+import { StorefrontShipmentModule } from "../storefront/storefront-shipment.module";
 import { WalletModule } from "../wallet/wallet.module";
 
 import { AdminOrderController } from "./admin-order.controller";
@@ -41,6 +42,7 @@ import { OrderService } from "./order.service";
     // admin orders list to discover work.
     NotificationModule,
     IntegrationModule,
+    StorefrontShipmentModule,
     forwardRef(() => ReturnModule),
   ],
   controllers: [OrderController, AdminOrderController, AdminOrderPackController],
