@@ -91,7 +91,7 @@ async function bootstrap(): Promise<void> {
         callback(new Error(`Origin ${origin} not allowed by CORS allowlist.`));
       },
       credentials: true,
-      methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowedHeaders: ["Authorization", "Content-Type", "X-Correlation-Id", "Idempotency-Key"],
       exposedHeaders: ["X-Correlation-Id"],
       maxAge: 600,
