@@ -106,29 +106,30 @@ export class StripeConnectProcessor extends PaymentProcessor {
       // v2 account ids are accepted by the v1 endpoints used elsewhere in this
       // file (accountLinks.create, accounts.retrieve) and by Checkout's
       // transfer_data.destination, so only creation changes.
+      // Fields mirror Stripe's documented working v2 create example. The
+      // `merchant` configuration (card_payments) enables the account to be paid;
+      // for an `express` dashboard Stripe requires both fees_collector and
+      // losses_collector to be `application` (the platform), matching the
+      // Marketplace setup chosen in the dashboard. Stripe collects the account's
+      // onboarding requirements through the hosted account link below.
       const params: Record<string, unknown> = {
         dashboard: "express",
         identity: { country: (args.country || "US").toLowerCase() },
         configuration: {
           merchant: { capabilities: { card_payments: { requested: true } } },
-          recipient: {
-            capabilities: { stripe_balance: { stripe_transfers: { requested: true } } },
-          },
         },
         defaults: {
-          currency: "usd",
           responsibilities: {
             fees_collector: "application",
             losses_collector: "application",
           },
-          locales: ["en-US"],
         },
-        include: ["configuration.merchant", "configuration.recipient", "identity"],
+        include: ["configuration.merchant", "identity"],
       };
       if (args.email) params.contact_email = args.email;
 
       const created = (await stripe.rawRequest("POST", "/v2/core/accounts", params, {
-        apiVersion: "2026-08-26.preview",
+        apiVersion: "2026-08-26.dahlia",
       })) as unknown as { id: string };
       accountId = created.id;
     }
