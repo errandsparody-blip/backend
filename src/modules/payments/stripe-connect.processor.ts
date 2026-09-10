@@ -133,6 +133,21 @@ export class StripeConnectProcessor extends PaymentProcessor {
       })) as unknown as { id: string };
       accountId = created.id;
     }
+
+    // Destination charges (checkout transfer_data.destination) require the
+    // connected account to hold the `transfers` capability — and Stripe requires
+    // `card_payments` and `transfers` to be requested together. The v2 create
+    // above only sets up the merchant config, so explicitly request both here
+    // via the v1 Capabilities API (v2 account ids are accepted by v1 endpoints).
+    // This is idempotent and also repairs accounts created before this fix, since
+    // `createAccountLink` runs again whenever the vendor re-opens onboarding.
+    await stripe.accounts.update(accountId, {
+      capabilities: {
+        card_payments: { requested: true },
+        transfers: { requested: true },
+      },
+    });
+
     const link = await stripe.accountLinks.create({
       account: accountId,
       refresh_url: args.refreshUrl,
