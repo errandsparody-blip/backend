@@ -54,6 +54,7 @@ function makeService(state: State) {
   const service = new StorefrontService(
     prisma as never,
     { debit } as never,
+    { list: async () => [], refresh: async () => undefined } as never,
   );
   return { service, executed, debit, prisma };
 }

@@ -27,6 +27,7 @@ import type {
   SetProductListingInput,
   UpsertStorefrontSettingsInput,
 } from "../../common/schemas/storefront.schema";
+import { PayoutAccountService } from "../payments/payout-account.service";
 import { WalletService } from "../wallet/wallet.service";
 
 /** One-time storefront setup fee, in cents ($50). Featuring stays free. */
@@ -70,6 +71,7 @@ export class StorefrontService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly wallet: WalletService,
+    private readonly payouts: PayoutAccountService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -315,7 +317,26 @@ export class StorefrontService {
         code: "storefront_settings_required",
       });
     }
-    if (!settings.hasActivePayoutAccount) {
+    // Sync the payout status live from the processor before gating on it. The
+    // stored status is set to PENDING at connect time and is otherwise only
+    // updated by a webhook; a vendor who has just finished Stripe onboarding
+    // (account already "Enabled" on Stripe) would still read PENDING here and
+    // be blocked. Best-effort: refresh each connected account, ignore failures.
+    let hasActivePayoutAccount = settings.hasActivePayoutAccount;
+    if (!hasActivePayoutAccount) {
+      try {
+        const connected = await this.payouts.list(vendorId);
+        for (const acc of connected) {
+          if (acc.externalAccountId) {
+            await this.payouts.refresh(vendorId, acc.processor).catch(() => undefined);
+          }
+        }
+      } catch {
+        // fall through to the check below with the last-known status
+      }
+      hasActivePayoutAccount = (await this.getSettings(vendorId)).hasActivePayoutAccount;
+    }
+    if (!hasActivePayoutAccount) {
       throw new BadRequestException({
         message:
           "Connect a payout account (Stripe or Paystack) before going live so sales can settle to you.",
