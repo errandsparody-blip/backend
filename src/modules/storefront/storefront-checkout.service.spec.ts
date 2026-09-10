@@ -116,7 +116,7 @@ describe("StorefrontCheckoutService.createCrossVendorOrder", () => {
     buyerEmail: "buyer@gmail.com",
     groups: [
       { slug: "acme", items: [{ productId: PRODUCT, quantity: 1 }], shippingSpeed: "STANDARD" as const, processor: "STRIPE" as const },
-      { slug: "beta", items: [{ productId: PRODUCT, quantity: 2 }], shippingSpeed: "EXPRESS" as const, processor: "PAYSTACK" as const },
+      { slug: "beta", items: [{ productId: PRODUCT, quantity: 2 }], shippingSpeed: "EXPRESS" as const, processor: "FLUTTERWAVE" as const },
     ],
   };
 

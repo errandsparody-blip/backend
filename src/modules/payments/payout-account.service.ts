@@ -10,9 +10,9 @@ import { Prisma } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
 
+import { FlutterwaveProcessor } from "./flutterwave.processor";
 import type { ProcessorKey } from "./payment-processor.interface";
 import { PaymentProcessorRegistry } from "./payment-processor.registry";
-import { PaystackProcessor } from "./paystack.processor";
 import { StripeConnectProcessor } from "./stripe-connect.processor";
 
 export interface PayoutAccountRow {
@@ -30,13 +30,13 @@ export class PayoutAccountService {
     private readonly prisma: PrismaService,
     private readonly registry: PaymentProcessorRegistry,
     private readonly stripe: StripeConnectProcessor,
-    private readonly paystack: PaystackProcessor,
+    private readonly flutterwave: FlutterwaveProcessor,
   ) {}
 
-  /** Paystack settlement banks for the connect form's dropdown. */
-  async listPaystackBanks(): Promise<Array<{ name: string; code: string }>> {
-    if (!this.paystack.isConfigured()) return [];
-    return this.paystack.listBanks();
+  /** Flutterwave settlement banks for the connect form's dropdown. */
+  async listFlutterwaveBanks(country = "NG"): Promise<Array<{ name: string; code: string }>> {
+    if (!this.flutterwave.isConfigured()) return [];
+    return this.flutterwave.listBanks(country);
   }
 
   async list(vendorId: string): Promise<PayoutAccountRow[]> {
@@ -88,14 +88,20 @@ export class PayoutAccountService {
     return { url };
   }
 
-  /** Create a Paystack subaccount from the vendor's bank details. */
-  async connectPaystack(
+  /** Create a Flutterwave payout subaccount from the vendor's bank details. */
+  async connectFlutterwave(
     vendorId: string,
-    args: { businessName: string; settlementBank: string; accountNumber: string },
+    args: {
+      businessName: string;
+      accountBank: string;
+      accountNumber: string;
+      country: string;
+      businessMobile?: string;
+    },
   ): Promise<PayoutAccountRow> {
-    const { externalAccountId } = await this.paystack.createSubaccount(args);
-    const snap = await this.paystack.getAccountStatus(externalAccountId);
-    await this.upsert(vendorId, "PAYSTACK", {
+    const { externalAccountId } = await this.flutterwave.createSubaccount(args);
+    const snap = await this.flutterwave.getAccountStatus(externalAccountId);
+    await this.upsert(vendorId, "FLUTTERWAVE", {
       externalAccountId: snap.externalAccountId,
       status: snap.status,
       detailsSubmitted: snap.detailsSubmitted,
@@ -103,7 +109,7 @@ export class PayoutAccountService {
       payoutsEnabled: snap.payoutsEnabled,
     });
     return {
-      processor: "PAYSTACK",
+      processor: "FLUTTERWAVE",
       externalAccountId: snap.externalAccountId,
       status: snap.status,
       detailsSubmitted: snap.detailsSubmitted,

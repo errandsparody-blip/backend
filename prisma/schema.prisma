@@ -1815,8 +1815,8 @@ model VendorPayoutAccount {
   vendorId          String   @map("vendor_id") @db.Uuid
   vendor            Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
 
-  processor         String   // "STRIPE" | "PAYSTACK"
-  externalAccountId String?  @map("external_account_id") // acct_… | subaccount code
+  processor         String   // "STRIPE" | "FLUTTERWAVE" (legacy rows may be "PAYSTACK")
+  externalAccountId String?  @map("external_account_id") // acct_… | subaccount id
   status            String   @default("PENDING") // PENDING | ACTIVE | RESTRICTED | DISABLED
   detailsSubmitted  Boolean  @default(false) @map("details_submitted")
   chargesEnabled    Boolean  @default(false) @map("charges_enabled")
@@ -1860,7 +1860,7 @@ model StorefrontOrder {
   totalCents          Int      @map("total_cents")      // what the buyer paid
   currency            String   @default("USD")
 
-  processor           String                            // STRIPE | PAYSTACK
+  processor           String                            // STRIPE | FLUTTERWAVE (legacy: PAYSTACK)
   paymentRef          String?  @map("payment_ref")      // processor reference/intent
   paymentIntentId     String?  @map("payment_intent_id")
   paidAt              DateTime? @map("paid_at")

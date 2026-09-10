@@ -1,7 +1,7 @@
 import { Test } from "@nestjs/testing";
 
+import { FlutterwaveProcessor } from "./flutterwave.processor";
 import { PaymentProcessorRegistry } from "./payment-processor.registry";
-import { PaystackProcessor } from "./paystack.processor";
 import { StripeConnectProcessor } from "./stripe-connect.processor";
 
 /**
@@ -12,13 +12,13 @@ import { StripeConnectProcessor } from "./stripe-connect.processor";
  * graph the way Nest does — if the @Optional() is dropped, .compile() throws.
  */
 describe("Payments DI", () => {
-  it("resolves the Stripe + Paystack processors and the registry", async () => {
+  it("resolves the Stripe + Flutterwave processors and the registry", async () => {
     const moduleRef = await Test.createTestingModule({
-      providers: [StripeConnectProcessor, PaystackProcessor, PaymentProcessorRegistry],
+      providers: [StripeConnectProcessor, FlutterwaveProcessor, PaymentProcessorRegistry],
     }).compile();
 
     expect(moduleRef.get(StripeConnectProcessor)).toBeInstanceOf(StripeConnectProcessor);
-    expect(moduleRef.get(PaystackProcessor)).toBeInstanceOf(PaystackProcessor);
+    expect(moduleRef.get(FlutterwaveProcessor)).toBeInstanceOf(FlutterwaveProcessor);
     expect(moduleRef.get(PaymentProcessorRegistry)).toBeInstanceOf(PaymentProcessorRegistry);
   });
 });

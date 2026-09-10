@@ -4,8 +4,8 @@
  * browser callback. Handlers verify the signature (via the processor), then
  * hand the normalised event to the idempotent StorefrontOrderService.
  *
- *   POST /v1/storefront/webhooks/stripe     (header: stripe-signature)
- *   POST /v1/storefront/webhooks/paystack   (header: x-paystack-signature)
+ *   POST /v1/storefront/webhooks/stripe        (header: stripe-signature)
+ *   POST /v1/storefront/webhooks/flutterwave   (header: verif-hash)
  */
 import {
   BadRequestException,
@@ -49,15 +49,15 @@ export class StorefrontWebhookController {
   }
 
   @Public()
-  @Post("paystack")
+  @Post("flutterwave")
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { limit: 600, ttl: 60_000 } })
-  async paystack(
-    @Headers("x-paystack-signature") signature: string | undefined,
+  async flutterwave(
+    @Headers("verif-hash") signature: string | undefined,
     @Req() req: Request & { rawBody?: Buffer },
     @Body() body: unknown,
   ): Promise<{ ok: true }> {
-    return this.handle("PAYSTACK", signature, req, body);
+    return this.handle("FLUTTERWAVE", signature, req, body);
   }
 
   private async handle(

@@ -339,7 +339,7 @@ export class StorefrontService {
     if (!hasActivePayoutAccount) {
       throw new BadRequestException({
         message:
-          "Connect a payout account (Stripe or Paystack) before going live so sales can settle to you.",
+          "Connect a payout account (Stripe or Flutterwave) before going live so sales can settle to you.",
         code: "payout_account_required",
       });
     }

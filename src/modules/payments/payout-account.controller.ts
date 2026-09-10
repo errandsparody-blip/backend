@@ -2,8 +2,9 @@
  * Vendor-facing payout-account connection (Migration 0059).
  *
  *   GET  /v1/payments/accounts               — connected payout accounts + status
+ *   GET  /v1/payments/flutterwave/banks      — settlement banks for a country
  *   POST /v1/payments/stripe/connect         — start Stripe Express onboarding
- *   POST /v1/payments/paystack/connect       — create a Paystack subaccount
+ *   POST /v1/payments/flutterwave/connect    — create a Flutterwave subaccount
  *   POST /v1/payments/:processor/refresh     — re-pull status from the processor
  */
 import {
@@ -14,6 +15,7 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
   UseGuards,
 } from "@nestjs/common";
 import { Role } from "@prisma/client";
@@ -25,9 +27,9 @@ import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { TenantGuard } from "../../common/guards/tenant.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import {
-  connectPaystackSchema,
+  connectFlutterwaveSchema,
   processorParamSchema,
-  type ConnectPaystackInput,
+  type ConnectFlutterwaveInput,
 } from "../../common/schemas/payout.schema";
 
 import { PayoutAccountService } from "./payout-account.service";
@@ -43,9 +45,9 @@ export class PayoutAccountController {
     return this.payouts.list(user.vendorId!);
   }
 
-  @Get("paystack/banks")
-  listPaystackBanks() {
-    return this.payouts.listPaystackBanks();
+  @Get("flutterwave/banks")
+  listFlutterwaveBanks(@Query("country") country?: string) {
+    return this.payouts.listFlutterwaveBanks((country ?? "NG").toUpperCase());
   }
 
   @Post("stripe/connect")
@@ -61,13 +63,13 @@ export class PayoutAccountController {
     });
   }
 
-  @Post("paystack/connect")
+  @Post("flutterwave/connect")
   @HttpCode(HttpStatus.OK)
-  connectPaystack(
+  connectFlutterwave(
     @CurrentUser() user: AuthenticatedUser,
-    @Body(new ZodValidationPipe(connectPaystackSchema)) body: ConnectPaystackInput,
+    @Body(new ZodValidationPipe(connectFlutterwaveSchema)) body: ConnectFlutterwaveInput,
   ) {
-    return this.payouts.connectPaystack(user.vendorId!, body);
+    return this.payouts.connectFlutterwave(user.vendorId!, body);
   }
 
   @Post(":processor/refresh")

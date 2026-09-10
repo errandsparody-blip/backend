@@ -1,5 +1,5 @@
+import { FlutterwaveProcessor } from "./flutterwave.processor";
 import { PaymentProcessorRegistry } from "./payment-processor.registry";
-import { PaystackProcessor } from "./paystack.processor";
 import { StripeConnectProcessor } from "./stripe-connect.processor";
 
 function fakeStripe() {
@@ -161,10 +161,12 @@ describe("StripeConnectProcessor single-card primitives", () => {
 describe("PaymentProcessorRegistry", () => {
   it("resolves processors by key and lists configured ones", () => {
     const stripe = new StripeConnectProcessor(fakeStripe() as never, "whsec"); // configured
-    const paystack = new PaystackProcessor("", jest.fn() as never); // not configured
-    const registry = new PaymentProcessorRegistry(stripe, paystack);
+    const flutterwave = new FlutterwaveProcessor("", "", jest.fn() as never); // not configured
+    const registry = new PaymentProcessorRegistry(stripe, flutterwave);
     expect(registry.get("STRIPE").key).toBe("STRIPE");
-    expect(registry.get("PAYSTACK").key).toBe("PAYSTACK");
+    expect(registry.get("FLUTTERWAVE").key).toBe("FLUTTERWAVE");
+    // PAYSTACK is intentionally unregistered now → unsupported_processor.
+    expect(() => registry.get("PAYSTACK")).toThrow();
     expect(registry.configuredKeys()).toEqual(["STRIPE"]);
   });
 });

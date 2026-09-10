@@ -1,7 +1,7 @@
 import { Module } from "@nestjs/common";
 
+import { FlutterwaveProcessor } from "./flutterwave.processor";
 import { PaymentProcessorRegistry } from "./payment-processor.registry";
-import { PaystackProcessor } from "./paystack.processor";
 import { PayoutAccountController } from "./payout-account.controller";
 import { PayoutAccountService } from "./payout-account.service";
 import { StripeConnectProcessor } from "./stripe-connect.processor";
@@ -13,13 +13,13 @@ import { StripeConnectProcessor } from "./stripe-connect.processor";
   controllers: [PayoutAccountController],
   providers: [
     StripeConnectProcessor,
-    PaystackProcessor,
+    FlutterwaveProcessor,
     PaymentProcessorRegistry,
     PayoutAccountService,
   ],
   exports: [
     StripeConnectProcessor,
-    PaystackProcessor,
+    FlutterwaveProcessor,
     PaymentProcessorRegistry,
     PayoutAccountService,
   ],

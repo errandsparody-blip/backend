@@ -1,6 +1,6 @@
 /**
  * PaymentProcessor — the abstraction every storefront payment rail implements
- * (Migration 0059). Stripe Connect and Paystack are the two concrete
+ * (Migration 0059). Stripe Connect and Flutterwave are the two concrete
  * implementations; the checkout + webhook code depends ONLY on this interface,
  * so adding a rail later is Open/Closed (new class, no caller changes) and each
  * implementation is substitutable (Liskov).
@@ -11,7 +11,10 @@
  * fulfillment). All amounts are integer USD cents.
  */
 
-export type ProcessorKey = "STRIPE" | "PAYSTACK";
+// PAYSTACK is retained in the union for backward compatibility with any historic
+// vendor_payout_accounts rows, but it is no longer wired: the African rail is now
+// FLUTTERWAVE (one account covers 30+ countries, unlike Paystack's per-country model).
+export type ProcessorKey = "STRIPE" | "PAYSTACK" | "FLUTTERWAVE";
 
 export type PayoutAccountStatus =
   | "PENDING"

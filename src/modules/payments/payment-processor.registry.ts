@@ -9,18 +9,21 @@ import {
   PaymentProcessor,
   type ProcessorKey,
 } from "./payment-processor.interface";
-import { PaystackProcessor } from "./paystack.processor";
+import { FlutterwaveProcessor } from "./flutterwave.processor";
 import { StripeConnectProcessor } from "./stripe-connect.processor";
 
 @Injectable()
 export class PaymentProcessorRegistry {
-  private readonly byKey: Record<ProcessorKey, PaymentProcessor>;
+  // Partial: PAYSTACK remains in the ProcessorKey union for backward
+  // compatibility but is intentionally not registered (the African rail is now
+  // Flutterwave). get() throws "unsupported_processor" for any unregistered key.
+  private readonly byKey: Partial<Record<ProcessorKey, PaymentProcessor>>;
 
   constructor(
     stripe: StripeConnectProcessor,
-    paystack: PaystackProcessor,
+    flutterwave: FlutterwaveProcessor,
   ) {
-    this.byKey = { STRIPE: stripe, PAYSTACK: paystack };
+    this.byKey = { STRIPE: stripe, FLUTTERWAVE: flutterwave };
   }
 
   get(key: ProcessorKey): PaymentProcessor {
@@ -37,7 +40,7 @@ export class PaymentProcessorRegistry {
   /** Processors whose credentials are configured in this environment. */
   configuredKeys(): ProcessorKey[] {
     return (Object.keys(this.byKey) as ProcessorKey[]).filter((k) =>
-      this.byKey[k].isConfigured(),
+      this.byKey[k]?.isConfigured(),
     );
   }
 }

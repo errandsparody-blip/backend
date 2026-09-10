@@ -38,7 +38,7 @@ export const checkoutSchema = z.object({
   buyerName: z.string().trim().min(1).max(120).optional(),
   buyerPhone: z.string().trim().min(7).max(30).optional(),
   shippingSpeed: z.enum(["STANDARD", "EXPRESS"]),
-  processor: z.enum(["STRIPE", "PAYSTACK"]),
+  processor: z.enum(["STRIPE", "FLUTTERWAVE"]),
   discountCode: z.string().trim().min(1).max(40).optional(),
 });
 export type CheckoutInput = z.infer<typeof checkoutSchema>;
@@ -55,7 +55,7 @@ export const crossVendorCheckoutSchema = z.object({
         slug: z.string().trim().min(1).max(60),
         items: itemsSchema,
         shippingSpeed: z.enum(["STANDARD", "EXPRESS"]),
-        processor: z.enum(["STRIPE", "PAYSTACK"]),
+        processor: z.enum(["STRIPE", "FLUTTERWAVE"]),
         discountCode: z.string().trim().min(1).max(40).optional(),
       }),
     )
