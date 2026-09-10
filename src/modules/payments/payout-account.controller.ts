@@ -53,8 +53,11 @@ export class PayoutAccountController {
   connectStripe(@CurrentUser() user: AuthenticatedUser) {
     const web = loadConfig().WEB_PUBLIC_URL;
     return this.payouts.connectStripe(user.vendorId!, {
-      returnUrl: `${web}/settings/payouts?connected=stripe`,
-      refreshUrl: `${web}/settings/payouts?refresh=stripe`,
+      // The payouts UI lives on the storefront settings page (app/(portal)/
+      // storefront → /storefront), not /settings/payouts, which doesn't exist
+      // and 404s on return from Stripe onboarding.
+      returnUrl: `${web}/storefront?connected=stripe`,
+      refreshUrl: `${web}/storefront?refresh=stripe`,
     });
   }
 
