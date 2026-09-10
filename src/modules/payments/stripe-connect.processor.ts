@@ -89,8 +89,20 @@ export class StripeConnectProcessor extends PaymentProcessor {
     const stripe = this.client();
     let accountId = args.externalAccountId ?? null;
     if (!accountId) {
+      // Stripe deprecated `type: "express"` account creation for platforms
+      // onboarded after mid-2024 ("Stripe no longer recommends Accounts v1").
+      // The modern equivalent uses `controller` properties, which reproduce the
+      // exact Express setup we chose in the dashboard: an Express-style Stripe
+      // dashboard, the platform pays Stripe's fees, the platform is liable for
+      // negative balances, and Stripe collects the connected account's
+      // onboarding requirements via the hosted account-link flow below.
       const account = await stripe.accounts.create({
-        type: "express",
+        controller: {
+          stripe_dashboard: { type: "express" },
+          fees: { payer: "application" },
+          losses: { payments: "application" },
+          requirement_collection: "stripe",
+        },
         email: args.email,
         country: args.country || "US",
         capabilities: {
