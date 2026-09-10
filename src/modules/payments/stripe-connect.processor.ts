@@ -89,28 +89,48 @@ export class StripeConnectProcessor extends PaymentProcessor {
     const stripe = this.client();
     let accountId = args.externalAccountId ?? null;
     if (!accountId) {
-      // Stripe deprecated `type: "express"` account creation for platforms
-      // onboarded after mid-2024 ("Stripe no longer recommends Accounts v1").
-      // The modern equivalent uses `controller` properties, which reproduce the
-      // exact Express setup we chose in the dashboard: an Express-style Stripe
-      // dashboard, the platform pays Stripe's fees, the platform is liable for
-      // negative balances, and Stripe collects the connected account's
-      // onboarding requirements via the hosted account-link flow below.
-      const account = await stripe.accounts.create({
-        controller: {
-          stripe_dashboard: { type: "express" },
-          fees: { payer: "application" },
-          losses: { payments: "application" },
-          requirement_collection: "stripe",
+      // Platforms created in the current Stripe dashboard must create connected
+      // accounts with the Accounts v2 API (`POST /v2/core/accounts`); the old
+      // v1 `accounts.create` endpoint is rejected ("Stripe no longer recommends
+      // Accounts v1 for new integrations"). The pinned SDK (17.x) doesn't expose
+      // typed v2 account methods yet, so we call the endpoint via `rawRequest`
+      // with the preview API version.
+      //
+      // This recreates our Express / Marketplace setup: an Express-style Stripe
+      // dashboard; the `merchant` configuration (card_payments) and the
+      // `recipient` configuration (stripe_transfers) — the latter is required
+      // for the account to be the destination of our destination charges; the
+      // platform pays Stripe's fees and covers losses. Stripe collects the
+      // account's onboarding requirements via the hosted account link below.
+      //
+      // v2 account ids are accepted by the v1 endpoints used elsewhere in this
+      // file (accountLinks.create, accounts.retrieve) and by Checkout's
+      // transfer_data.destination, so only creation changes.
+      const params: Record<string, unknown> = {
+        dashboard: "express",
+        identity: { country: (args.country || "US").toLowerCase() },
+        configuration: {
+          merchant: { capabilities: { card_payments: { requested: true } } },
+          recipient: {
+            capabilities: { stripe_balance: { stripe_transfers: { requested: true } } },
+          },
         },
-        email: args.email,
-        country: args.country || "US",
-        capabilities: {
-          card_payments: { requested: true },
-          transfers: { requested: true },
+        defaults: {
+          currency: "usd",
+          responsibilities: {
+            fees_collector: "application",
+            losses_collector: "application",
+          },
+          locales: ["en-US"],
         },
-      });
-      accountId = account.id;
+        include: ["configuration.merchant", "configuration.recipient", "identity"],
+      };
+      if (args.email) params.contact_email = args.email;
+
+      const created = (await stripe.rawRequest("POST", "/v2/core/accounts", params, {
+        apiVersion: "2026-08-26.preview",
+      })) as unknown as { id: string };
+      accountId = created.id;
     }
     const link = await stripe.accountLinks.create({
       account: accountId,
