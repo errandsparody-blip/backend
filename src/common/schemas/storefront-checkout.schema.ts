@@ -44,22 +44,34 @@ export const checkoutSchema = z.object({
 export type CheckoutInput = z.infer<typeof checkoutSchema>;
 
 // Cross-vendor cart (Phase 2): shared buyer + address, one group per store.
+// The whole cart is ONE physical delivery from the USA Errands warehouse, so the
+// buyer picks a single delivery speed and is charged shipping ONCE for the cart
+// (shipping + fulfillment go to USA Errands; each vendor still receives only
+// their own product amount). Per-group: which items, which payment rail, and an
+// optional vendor discount that applies to that vendor's goods only.
+const crossVendorGroupSchema = z.object({
+  slug: z.string().trim().min(1).max(60),
+  items: itemsSchema,
+  processor: z.enum(["STRIPE", "FLUTTERWAVE"]),
+  discountCode: z.string().trim().min(1).max(40).optional(),
+});
+
+export const crossVendorQuoteSchema = z.object({
+  shipAddress: storefrontShipAddressSchema,
+  groups: z
+    .array(z.object({ slug: z.string().trim().min(1).max(60), items: itemsSchema }))
+    .min(1, "Your cart is empty.")
+    .max(20),
+});
+export type CrossVendorQuoteInput = z.infer<typeof crossVendorQuoteSchema>;
+
 export const crossVendorCheckoutSchema = z.object({
   shipAddress: storefrontShipAddressSchema,
   buyerEmail: z.string().trim().toLowerCase().email("Enter a valid email.").max(254),
   buyerName: z.string().trim().min(1).max(120).optional(),
   buyerPhone: z.string().trim().min(7).max(30).optional(),
-  groups: z
-    .array(
-      z.object({
-        slug: z.string().trim().min(1).max(60),
-        items: itemsSchema,
-        shippingSpeed: z.enum(["STANDARD", "EXPRESS"]),
-        processor: z.enum(["STRIPE", "FLUTTERWAVE"]),
-        discountCode: z.string().trim().min(1).max(40).optional(),
-      }),
-    )
-    .min(1, "Your cart is empty.")
-    .max(20),
+  // One delivery speed for the whole cart — one shipment, one shipping charge.
+  shippingSpeed: z.enum(["STANDARD", "EXPRESS"]),
+  groups: z.array(crossVendorGroupSchema).min(1, "Your cart is empty.").max(20),
 });
 export type CrossVendorCheckoutInput = z.infer<typeof crossVendorCheckoutSchema>;

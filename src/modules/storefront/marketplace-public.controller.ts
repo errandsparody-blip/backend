@@ -12,7 +12,9 @@ import { Public } from "../../common/decorators/public.decorator";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import {
   crossVendorCheckoutSchema,
+  crossVendorQuoteSchema,
   type CrossVendorCheckoutInput,
+  type CrossVendorQuoteInput,
 } from "../../common/schemas/storefront-checkout.schema";
 
 import { StorefrontCheckoutService } from "./storefront-checkout.service";
@@ -46,7 +48,19 @@ export class MarketplacePublicController {
     return this.publicStore.listFeaturedStores();
   }
 
-  // Cross-vendor cart → one sub-order + one payment per store.
+  // Cross-vendor cart → ONE consolidated shipping quote for the whole cart.
+  @Public()
+  @Post("quote")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  quoteCart(
+    @Body(new ZodValidationPipe(crossVendorQuoteSchema)) body: CrossVendorQuoteInput,
+  ) {
+    return this.checkout.quoteCrossVendor(body);
+  }
+
+  // Cross-vendor cart → one sub-order + payment per store, but shipping is
+  // charged once for the whole cart (one shipment).
   @Public()
   @Post("checkout")
   @HttpCode(HttpStatus.OK)

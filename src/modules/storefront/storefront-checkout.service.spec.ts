@@ -86,7 +86,7 @@ function makeDeps(opts: { rates: unknown[]; twoSpeeds?: boolean }) {
     discounts as never,
     tax as never,
   );
-  return { service, createCheckout, executed, prisma, discounts, tax };
+  return { service, createCheckout, executed, prisma, discounts, tax, shippo };
 }
 
 const STD_ONLY = [
@@ -110,39 +110,61 @@ describe("StorefrontCheckoutService.quote", () => {
   });
 });
 
+describe("StorefrontCheckoutService.quoteCrossVendor", () => {
+  it("returns ONE consolidated shipping quote for the whole cart", async () => {
+    const { service, shippo } = makeDeps({ rates: TWO });
+    const q = await service.quoteCrossVendor({
+      shipAddress: ADDR,
+      groups: [
+        { slug: "acme", items: [{ productId: PRODUCT, quantity: 1 }] },
+        { slug: "beta", items: [{ productId: PRODUCT, quantity: 2 }] },
+      ],
+    });
+    // 2500 (qty 1) + 5000 (qty 2), summed across vendors.
+    expect(q.productSubtotalCents).toBe(7500);
+    expect(q.shippingOptions.map((o) => o.speed)).toEqual(["STANDARD", "EXPRESS"]);
+    // A single combined-parcel estimate — not one Shippo call per store.
+    expect(shippo.getRates).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("StorefrontCheckoutService.createCrossVendorOrder", () => {
   const shared = {
     shipAddress: ADDR,
     buyerEmail: "buyer@gmail.com",
+    // One delivery speed for the whole cart.
+    shippingSpeed: "STANDARD" as const,
     groups: [
-      { slug: "acme", items: [{ productId: PRODUCT, quantity: 1 }], shippingSpeed: "STANDARD" as const, processor: "STRIPE" as const },
-      { slug: "beta", items: [{ productId: PRODUCT, quantity: 2 }], shippingSpeed: "EXPRESS" as const, processor: "FLUTTERWAVE" as const },
+      { slug: "acme", items: [{ productId: PRODUCT, quantity: 1 }], processor: "STRIPE" as const },
+      { slug: "beta", items: [{ productId: PRODUCT, quantity: 2 }], processor: "FLUTTERWAVE" as const },
     ],
   };
 
-  it("creates one sub-order per store and returns each checkout URL", async () => {
-    const { service } = makeDeps({ rates: TWO });
-    jest
-      .spyOn(service, "createOrder")
-      .mockResolvedValueOnce({ reference: "SF-1", checkoutUrl: "https://pay/1" })
-      .mockResolvedValueOnce({ reference: "SF-2", checkoutUrl: "https://pay/2" });
+  it("charges shipping once across the cart and returns a checkout per store", async () => {
+    const { service, createCheckout, shippo } = makeDeps({ rates: TWO });
     const res = await service.createCrossVendorOrder(shared);
     expect(res.results).toHaveLength(2);
     expect(res.errors).toHaveLength(0);
     expect(res.results.map((r) => r.slug)).toEqual(["acme", "beta"]);
+    // One consolidated shipping estimate for the cart.
+    expect(shippo.getRates).toHaveBeenCalledTimes(1);
+    // Exactly one leg carries shipping (800) + fulfillment (300); the other is
+    // product-only (platform fee 0). So the buyer pays delivery once.
+    const fees = createCheckout.mock.calls.map((c) => (c[0] as { platformFeeCents: number }).platformFeeCents).sort((a, b) => a - b);
+    expect(fees).toEqual([0, 1100]);
   });
 
-  it("reports a per-store failure without dropping the others", async () => {
-    const { service } = makeDeps({ rates: TWO });
-    jest
-      .spyOn(service, "createOrder")
-      .mockResolvedValueOnce({ reference: "SF-1", checkoutUrl: "https://pay/1" })
-      .mockRejectedValueOnce(new BadRequestException({ message: "Out of stock", code: "insufficient_stock" }));
+  it("reports a leg whose payment fails without dropping the others", async () => {
+    const { service, createCheckout } = makeDeps({ rates: TWO });
+    createCheckout
+      .mockResolvedValueOnce({ checkoutUrl: "https://pay/1", paymentRef: "pi_1" })
+      .mockRejectedValueOnce(new Error("processor down"));
     const res = await service.createCrossVendorOrder(shared);
     expect(res.results).toHaveLength(1);
+    expect(res.results[0]!.slug).toBe("acme");
     expect(res.errors).toHaveLength(1);
     expect(res.errors[0]!.slug).toBe("beta");
-    expect(res.errors[0]!.code).toBe("insufficient_stock");
+    expect(res.errors[0]!.code).toBe("storefront_checkout_failed");
   });
 });
 

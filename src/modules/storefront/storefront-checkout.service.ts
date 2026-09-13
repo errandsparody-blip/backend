@@ -27,6 +27,7 @@ import { PrismaService } from "../../common/prisma.service";
 import type {
   CheckoutInput,
   CrossVendorCheckoutInput,
+  CrossVendorQuoteInput,
   QuoteInput,
   StorefrontShipAddress,
 } from "../../common/schemas/storefront-checkout.schema";
@@ -134,24 +135,70 @@ export class StorefrontCheckoutService {
       });
     }
 
-    // Apply a discount code if supplied (vendor-owned or a marketplace code
-    // that targets this vendor). A bad code stops the order so the buyer knows.
+    return this.placeOrder(store, items, {
+      buyerEmail: input.buyerEmail,
+      buyerName: input.buyerName,
+      buyerPhone: input.buyerPhone,
+      shipAddress: input.shipAddress,
+      processor: input.processor,
+      discountCode: input.discountCode,
+      shippingSpeed: input.shippingSpeed,
+      // Single-store: this order is the whole shipment, so it carries the full
+      // shipping + fulfillment.
+      shippingCents: chosen.costCents,
+      serviceToken: chosen.serviceToken,
+      fulfillmentFeeCents: STOREFRONT_FULFILLMENT_FEE_CENTS,
+    });
+  }
+
+  /**
+   * Persist one storefront order + open its split checkout, from an already
+   * validated item list and a resolved shipping decision. Shared by the
+   * single-store path and each leg of a cross-vendor cart.
+   *
+   * Money invariant: the vendor always receives only the (discounted) product
+   * amount; USA Errands keeps shipping + fulfillment + tax via the processor
+   * application fee. In a cross-vendor cart the shipping + fulfillment are placed
+   * on ONE leg only (the rest pass shippingCents/fulfillmentFeeCents = 0), so the
+   * buyer pays a single delivery charge for the whole cart — one shipment, one
+   * shipping fee, exactly as the storefront spec requires.
+   */
+  private async placeOrder(
+    store: { vendorId: string; slug: string },
+    items: CheckoutItem[],
+    params: {
+      buyerEmail: string;
+      buyerName?: string;
+      buyerPhone?: string;
+      shipAddress: StorefrontShipAddress;
+      processor: ProcessorKey;
+      discountCode?: string;
+      shippingSpeed: string;
+      shippingCents: number;
+      serviceToken: string | null;
+      fulfillmentFeeCents: number;
+    },
+  ): Promise<{ reference: string; checkoutUrl: string }> {
+    const productSubtotalCents = items.reduce((s, i) => s + i.unitRetailCents * i.qty, 0);
+
+    // Apply a discount code if supplied (vendor-owned or a marketplace code that
+    // targets this vendor). A bad code stops the order so the buyer knows.
     let discountCents = 0;
     let discountCodeId: string | null = null;
-    if (input.discountCode) {
+    if (params.discountCode) {
       const disc = await this.discounts.quoteForCheckout(
         store.vendorId,
-        input.discountCode,
+        params.discountCode,
         productSubtotalCents,
       );
       discountCents = disc.discountCents;
       discountCodeId = disc.id;
     }
-    const shippingCents = chosen.costCents;
-    const fulfillmentFeeCents = STOREFRONT_FULFILLMENT_FEE_CENTS;
+    const shippingCents = params.shippingCents;
+    const fulfillmentFeeCents = params.fulfillmentFeeCents;
     // Destination sales tax on the (discounted) goods — $0 unless configured.
     const taxCents = await this.tax.taxFor(
-      input.shipAddress.state,
+      params.shipAddress.state,
       Math.max(0, productSubtotalCents - discountCents),
     );
     // The platform keeps shipping + fulfillment + tax (USA Errands remits the
@@ -161,7 +208,7 @@ export class StorefrontCheckoutService {
       productSubtotalCents - discountCents + shippingCents + fulfillmentFeeCents + taxCents;
 
     // The buyer pays through the vendor's connected account for the chosen rail.
-    const payout = await this.activePayout(store.vendorId, input.processor);
+    const payout = await this.activePayout(store.vendorId, params.processor);
 
     // Reserve stock + persist the order atomically. Payment is opened AFTER the
     // tx commits (network call must not hold a DB transaction); on failure we
@@ -194,11 +241,11 @@ export class StorefrontCheckoutService {
            shipping_speed, shipping_service_token, platform_fee_cents, tax_cents,
            total_cents, currency, processor, status, created_at, updated_at)
         VALUES
-          (${reference}, ${store.vendorId}::uuid, ${input.buyerEmail}, ${input.buyerName ?? null},
-           ${input.buyerPhone ?? null}, ${JSON.stringify(input.shipAddress)}::jsonb,
-           ${itemsJson}::jsonb, ${productSubtotalCents}, ${input.discountCode ?? null},
-           ${discountCents}, ${shippingCents}, ${input.shippingSpeed}, ${chosen.serviceToken},
-           ${platformFeeCents}, ${taxCents}, ${totalCents}, 'USD', ${input.processor},
+          (${reference}, ${store.vendorId}::uuid, ${params.buyerEmail}, ${params.buyerName ?? null},
+           ${params.buyerPhone ?? null}, ${JSON.stringify(params.shipAddress)}::jsonb,
+           ${itemsJson}::jsonb, ${productSubtotalCents}, ${params.discountCode ?? null},
+           ${discountCents}, ${shippingCents}, ${params.shippingSpeed}, ${params.serviceToken},
+           ${platformFeeCents}, ${taxCents}, ${totalCents}, 'USD', ${params.processor},
            'PENDING_PAYMENT', now(), now())
         RETURNING id
       `);
@@ -211,13 +258,13 @@ export class StorefrontCheckoutService {
     let paymentRef: string;
     try {
       const web = loadConfig().WEB_PUBLIC_URL;
-      const res = await this.registry.get(input.processor).createCheckout({
+      const res = await this.registry.get(params.processor).createCheckout({
         reference,
         amountCents: totalCents,
         platformFeeCents,
         currency: "USD",
         vendorExternalAccountId: payout.externalAccountId,
-        buyerEmail: input.buyerEmail,
+        buyerEmail: params.buyerEmail,
         successUrl: `${web}/store/${store.slug}/order/${reference}?paid=1`,
         cancelUrl: `${web}/store/${store.slug}/checkout?cancelled=1`,
         metadata: { storefrontOrderId: orderId, vendorId: store.vendorId },
@@ -248,37 +295,121 @@ export class StorefrontCheckoutService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Create one sub-order per store from a cross-vendor cart. Shared buyer +
-   * address; each group carries its own shipping speed, processor, and optional
-   * discount. Reuses the single-vendor createOrder per group so all the
-   * validation/reservation/split logic is identical. Groups are independent: a
-   * failure in one is reported without rolling back the others (each successful
-   * group already reserved stock + opened a payment).
+   * Quote a cross-vendor cart as ONE consolidated shipment. All items across
+   * every vendor are combined into a single Shippo estimate (same warehouse →
+   * same address = one delivery), so the buyer sees a single Standard/Express
+   * shipping charge for the whole cart — not one per store. Product subtotal and
+   * tax are summed across vendors; the fulfillment fee is charged once.
+   */
+  async quoteCrossVendor(input: CrossVendorQuoteInput): Promise<CheckoutQuote> {
+    const allItems: CheckoutItem[] = [];
+    let productSubtotalCents = 0;
+    let taxCents = 0;
+    for (const group of input.groups) {
+      const store = await this.publicStore.resolveBySlug(group.slug);
+      const items = await this.loadItems(store.vendorId, group.items);
+      const groupSubtotal = items.reduce((s, i) => s + i.unitRetailCents * i.qty, 0);
+      productSubtotalCents += groupSubtotal;
+      // Tax is destination-based and charged per sub-order on that vendor's
+      // goods, so the cart tax is the sum of per-vendor tax (kept in step with
+      // what checkout will actually charge).
+      taxCents += await this.tax.taxFor(input.shipAddress.state, groupSubtotal);
+      allItems.push(...items);
+    }
+    // One shipping estimate for the combined parcel.
+    const options = await this.shippingOptions(allItems, productSubtotalCents, input.shipAddress);
+    return {
+      currency: "USD",
+      productSubtotalCents,
+      fulfillmentFeeCents: STOREFRONT_FULFILLMENT_FEE_CENTS,
+      taxCents,
+      shippingOptions: options.map(({ serviceToken: _t, ...rest }) => rest),
+    };
+  }
+
+  /**
+   * Place a cross-vendor cart. Shared buyer + address + ONE delivery speed for
+   * the whole cart. Shipping is quoted once across all items and charged on a
+   * single leg (the first vendor), with a single fulfillment fee; the remaining
+   * legs carry product + tax only. So the buyer pays one delivery charge for the
+   * whole cart, while each vendor still receives only their own product amount.
+   *
+   * Legs are placed independently: a failure in one is reported without rolling
+   * back the others (each successful leg already reserved stock + opened a
+   * payment). Note: the shipping/fulfillment leg is placed first, so if it is the
+   * one that fails, the buyer is told and no shipping is silently dropped.
    */
   async createCrossVendorOrder(input: CrossVendorCheckoutInput): Promise<{
     results: Array<{ slug: string; reference: string; checkoutUrl: string }>;
     errors: Array<{ slug: string; message: string; code?: string }>;
   }> {
+    // Email is mandatory + must be genuinely deliverable (order updates go here).
+    await assertEmailDeliverable(input.buyerEmail, this.logger);
+
+    // Resolve + validate every leg first, and gather all items so shipping can be
+    // quoted once for the whole cart.
+    const legs: Array<{
+      slug: string;
+      store: { vendorId: string; slug: string };
+      items: CheckoutItem[];
+      processor: ProcessorKey;
+      discountCode?: string;
+    }> = [];
+    const allItems: CheckoutItem[] = [];
+    let productSubtotalCents = 0;
+    for (const group of input.groups) {
+      const store = await this.publicStore.resolveBySlug(group.slug);
+      const items = await this.loadItems(store.vendorId, group.items);
+      productSubtotalCents += items.reduce((s, i) => s + i.unitRetailCents * i.qty, 0);
+      legs.push({
+        slug: group.slug,
+        store: { vendorId: store.vendorId, slug: store.slug },
+        items,
+        processor: group.processor,
+        discountCode: group.discountCode,
+      });
+      allItems.push(...items);
+    }
+
+    // One consolidated shipping estimate for the combined parcel, at the cart's
+    // chosen speed. If it's unavailable the whole cart stops — we never quietly
+    // ship without charging.
+    const options = await this.shippingOptions(allItems, productSubtotalCents, input.shipAddress);
+    const chosen = options.find((o) => o.speed === input.shippingSpeed);
+    if (!chosen) {
+      throw new BadRequestException({
+        message: "That delivery speed isn't available for this address.",
+        code: "shipping_speed_unavailable",
+      });
+    }
+
     const results: Array<{ slug: string; reference: string; checkoutUrl: string }> = [];
     const errors: Array<{ slug: string; message: string; code?: string }> = [];
 
-    for (const group of input.groups) {
+    for (let i = 0; i < legs.length; i++) {
+      const leg = legs[i]!;
+      // Only the first leg carries the (single) shipping + fulfillment for the
+      // whole cart; the rest are product + tax only. All go to USA Errands, so
+      // which leg carries them is bookkeeping — the buyer pays shipping once.
+      const carriesShipping = i === 0;
       try {
-        const res = await this.createOrder(group.slug, {
-          items: group.items,
-          shipAddress: input.shipAddress,
+        const res = await this.placeOrder(leg.store, leg.items, {
           buyerEmail: input.buyerEmail,
           buyerName: input.buyerName,
           buyerPhone: input.buyerPhone,
-          shippingSpeed: group.shippingSpeed,
-          processor: group.processor,
-          discountCode: group.discountCode,
+          shipAddress: input.shipAddress,
+          processor: leg.processor,
+          discountCode: leg.discountCode,
+          shippingSpeed: input.shippingSpeed,
+          shippingCents: carriesShipping ? chosen.costCents : 0,
+          serviceToken: carriesShipping ? chosen.serviceToken : null,
+          fulfillmentFeeCents: carriesShipping ? STOREFRONT_FULFILLMENT_FEE_CENTS : 0,
         });
-        results.push({ slug: group.slug, reference: res.reference, checkoutUrl: res.checkoutUrl });
+        results.push({ slug: leg.slug, reference: res.reference, checkoutUrl: res.checkoutUrl });
       } catch (err) {
         const e = err as { message?: string; response?: { message?: string; code?: string } };
         errors.push({
-          slug: group.slug,
+          slug: leg.slug,
           message: e.response?.message ?? e.message ?? "Checkout failed for this store.",
           code: e.response?.code,
         });
