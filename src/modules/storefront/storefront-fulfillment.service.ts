@@ -52,6 +52,7 @@ interface StorefrontOrderFull {
   shipping_speed: string;
   shipping_cents: number;
   total_cents: number;
+  cart_group_id: string | null;
   fulfillment_order_id: string | null;
 }
 
@@ -69,7 +70,7 @@ export class StorefrontFulfillmentService {
     const rows = await this.prisma.$queryRaw<StorefrontOrderFull[]>(Prisma.sql`
       SELECT id, reference, vendor_id, buyer_email, buyer_name, buyer_phone,
              ship_address, items, shipping_speed, shipping_cents, total_cents,
-             fulfillment_order_id
+             cart_group_id, fulfillment_order_id
       FROM storefront_orders WHERE id = ${storefrontOrderId}::uuid
     `);
     const so = rows[0];
@@ -122,10 +123,25 @@ export class StorefrontFulfillmentService {
             paidTotalCents: so.total_cents,
             shippingSpeed: so.shipping_speed,
             shippingEstimateCents: so.shipping_cents,
+            // Cross-vendor cart linkage: when set, this order ships together with
+            // the other orders sharing this cartGroupId (one physical delivery).
+            // The warehouse groups by this id; buyer paid shipping once (on the
+            // leg where shippingEstimateCents > 0).
+            ...(so.cart_group_id ? { cartGroupId: so.cart_group_id, shipsTogether: true } : {}),
           } as Prisma.InputJsonValue,
         } as unknown as Prisma.OrderCreateInput,
         select: { id: true },
       });
+
+      // Promote the cart-group link onto the fulfillment order so the warehouse
+      // can query/pack the group as one shipment (raw UPDATE keeps this working
+      // even before the Prisma client is regenerated with the new column).
+      if (so.cart_group_id) {
+        await tx.$executeRaw(Prisma.sql`
+          UPDATE orders SET cart_group_id = ${so.cart_group_id}::uuid
+          WHERE id = ${created.id}::uuid
+        `);
+      }
 
       for (const it of so.items) {
         for (const alloc of it.allocations) {

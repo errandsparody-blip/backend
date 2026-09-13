@@ -21,6 +21,7 @@ import {
   Logger,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
+import { randomUUID } from "crypto";
 
 import { loadConfig } from "../../common/config";
 import { PrismaService } from "../../common/prisma.service";
@@ -177,6 +178,8 @@ export class StorefrontCheckoutService {
       shippingCents: number;
       serviceToken: string | null;
       fulfillmentFeeCents: number;
+      /** Links the sub-orders of one cross-vendor cart; null for single-store. */
+      cartGroupId?: string | null;
     },
   ): Promise<{ reference: string; checkoutUrl: string }> {
     const productSubtotalCents = items.reduce((s, i) => s + i.unitRetailCents * i.qty, 0);
@@ -239,14 +242,14 @@ export class StorefrontCheckoutService {
           (reference, vendor_id, buyer_email, buyer_name, buyer_phone, ship_address,
            items, product_subtotal_cents, discount_code, discount_cents, shipping_cents,
            shipping_speed, shipping_service_token, platform_fee_cents, tax_cents,
-           total_cents, currency, processor, status, created_at, updated_at)
+           total_cents, currency, processor, cart_group_id, status, created_at, updated_at)
         VALUES
           (${reference}, ${store.vendorId}::uuid, ${params.buyerEmail}, ${params.buyerName ?? null},
            ${params.buyerPhone ?? null}, ${JSON.stringify(params.shipAddress)}::jsonb,
            ${itemsJson}::jsonb, ${productSubtotalCents}, ${params.discountCode ?? null},
            ${discountCents}, ${shippingCents}, ${params.shippingSpeed}, ${params.serviceToken},
            ${platformFeeCents}, ${taxCents}, ${totalCents}, 'USD', ${params.processor},
-           'PENDING_PAYMENT', now(), now())
+           ${params.cartGroupId ?? null}::uuid, 'PENDING_PAYMENT', now(), now())
         RETURNING id
       `);
       if (discountCodeId) await this.discounts.redeem(tx, discountCodeId);
@@ -386,6 +389,10 @@ export class StorefrontCheckoutService {
     const results: Array<{ slug: string; reference: string; checkoutUrl: string }> = [];
     const errors: Array<{ slug: string; message: string; code?: string }> = [];
 
+    // One id links every sub-order of this cart so the warehouse can see they
+    // ship together (and, next step, pack them into one physical shipment).
+    const cartGroupId = legs.length > 1 ? randomUUID() : null;
+
     for (let i = 0; i < legs.length; i++) {
       const leg = legs[i]!;
       // Only the first leg carries the (single) shipping + fulfillment for the
@@ -404,6 +411,7 @@ export class StorefrontCheckoutService {
           shippingCents: carriesShipping ? chosen.costCents : 0,
           serviceToken: carriesShipping ? chosen.serviceToken : null,
           fulfillmentFeeCents: carriesShipping ? STOREFRONT_FULFILLMENT_FEE_CENTS : 0,
+          cartGroupId,
         });
         results.push({ slug: leg.slug, reference: res.reference, checkoutUrl: res.checkoutUrl });
       } catch (err) {

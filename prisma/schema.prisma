@@ -1249,6 +1249,18 @@ model Order {
   // two flows can coexist while old orders finish under old rules.
   workflowVersion          Int             @default(1) @map("workflow_version")
 
+  // Cross-vendor cart consolidation (Migration 0065). When a storefront order
+  // belongs to a multi-vendor cart, its fulfillment order carries the shared
+  // cartGroupId so the warehouse can pack the group into ONE shipment: the
+  // primary carries the physical label, secondaries point at it via
+  // consolidatedIntoOrderId and ship on the same tracking number. All NULL/false
+  // for ordinary (non-consolidated) orders. The consolidation LOGIC that uses
+  // these columns is built + tested separately (see docs/proposals/
+  // cross-vendor-consolidated-shipment.md); these columns are the foundation.
+  cartGroupId              String?         @map("cart_group_id") @db.Uuid
+  consolidatedIntoOrderId  String?         @map("consolidated_into_order_id") @db.Uuid
+  isConsolidatedPrimary    Boolean         @default(false) @map("is_consolidated_primary")
+
   // Vendor's external order id (their Shopify/WooCommerce/etc. number). Indexed
   // for lookup; uniqueness scoped to vendor so two vendors can share an id.
   // Optional informational field — the PRIMARY identifier shown to vendors is
@@ -1420,6 +1432,8 @@ model Order {
   // Migration 0038 — admin "storefront orders" + held-orders queues filter on
   // these, e.g. WHERE source = 'API' AND status = 'ON_HOLD'.
   @@index([source, status, createdAt])
+  // Migration 0065 — group a cross-vendor cart's fulfillment orders.
+  @@index([cartGroupId])
   @@map("orders")
 }
 
@@ -1868,6 +1882,10 @@ model StorefrontOrder {
   status              String   @default("PENDING_PAYMENT")
   // PENDING_PAYMENT | PAID | FULFILLING | SHIPPED | DELIVERED | CANCELLED | REFUNDED
 
+  // Links the per-vendor sub-orders of one cross-vendor cart (one delivery).
+  // NULL for single-store orders.
+  cartGroupId         String?  @map("cart_group_id") @db.Uuid
+
   // Link to the fulfillment order once payment confirms.
   fulfillmentOrderId  String?  @unique @map("fulfillment_order_id") @db.Uuid
 
@@ -1883,6 +1901,7 @@ model StorefrontOrder {
   @@index([vendorId, status])
   @@index([status, createdAt])
   @@index([paymentRef])
+  @@index([cartGroupId])
   @@map("storefront_orders")
 }
 
