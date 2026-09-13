@@ -221,6 +221,7 @@ export class StorefrontService {
       optionColor: string | null;
       variantGroupId: string | null;
       imageUrl: string | null;
+      imageUrls: string[];
     }>
   > {
     const rows = await this.prisma.$queryRaw<
@@ -236,10 +237,11 @@ export class StorefrontService {
         option_color: string | null;
         variant_group_id: string | null;
         image_url: string | null;
+        image_urls: string[];
       }>
     >(Prisma.sql`
       SELECT id, code, name, status, listed, retail_price_cents, category,
-             option_size, option_color, variant_group_id, image_url
+             option_size, option_color, variant_group_id, image_url, image_urls
       FROM products
       WHERE vendor_id = ${vendorId}::uuid AND status = 'ACTIVE'
       ORDER BY created_at DESC
@@ -257,6 +259,8 @@ export class StorefrontService {
       optionColor: r.option_color,
       variantGroupId: r.variant_group_id,
       imageUrl: r.image_url,
+      // Fall back to the single primary image for products predating the gallery.
+      imageUrls: r.image_urls?.length ? r.image_urls : r.image_url ? [r.image_url] : [],
     }));
   }
 
