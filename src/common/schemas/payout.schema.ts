@@ -12,6 +12,8 @@ export type ProcessorParam = z.infer<typeof processorParamSchema>;
 // Flutterwave needs the vendor's bank details to create a payout subaccount.
 export const connectFlutterwaveSchema = z.object({
   businessName: z.string().trim().min(1, "Required.").max(120),
+  // Flutterwave requires an email on the subaccount.
+  businessEmail: z.string().trim().toLowerCase().email("Enter a valid email.").max(254),
   /** Flutterwave bank code (from GET /payments/flutterwave/banks). */
   accountBank: z
     .string()

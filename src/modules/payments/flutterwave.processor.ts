@@ -36,6 +36,8 @@ const FLW_BASE = "https://api.flutterwave.com/v3";
 
 export interface CreateSubaccountArgs {
   businessName: string;
+  /** Required by Flutterwave for subaccount creation. */
+  businessEmail: string;
   /** Flutterwave bank code (from listBanks). */
   accountBank: string;
   accountNumber: string;
@@ -97,6 +99,7 @@ export class FlutterwaveProcessor extends PaymentProcessor {
       account_bank: args.accountBank,
       account_number: args.accountNumber,
       business_name: args.businessName,
+      business_email: args.businessEmail,
       business_mobile: args.businessMobile ?? "",
       country: args.country,
       // Defaults; the real split is set per-transaction as a flat commission in

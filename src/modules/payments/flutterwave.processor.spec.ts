@@ -89,6 +89,7 @@ describe("FlutterwaveProcessor.createSubaccount / listBanks", () => {
     const proc = new FlutterwaveProcessor(SECRET, HASH, fetchMock as never);
     const { externalAccountId } = await proc.createSubaccount({
       businessName: "Acme",
+      businessEmail: "acme@example.com",
       accountBank: "044",
       accountNumber: "0690000031",
       country: "NG",
@@ -98,6 +99,7 @@ describe("FlutterwaveProcessor.createSubaccount / listBanks", () => {
     const body = JSON.parse((opts as { body: string }).body);
     expect(body.account_bank).toBe("044");
     expect(body.account_number).toBe("0690000031");
+    expect(body.business_email).toBe("acme@example.com");
     expect(body.country).toBe("NG");
   });
 

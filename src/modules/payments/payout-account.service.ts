@@ -5,7 +5,7 @@
  *
  * Raw SQL throughout so it works before the Prisma client is regenerated.
  */
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
@@ -93,13 +93,27 @@ export class PayoutAccountService {
     vendorId: string,
     args: {
       businessName: string;
+      businessEmail: string;
       accountBank: string;
       accountNumber: string;
       country: string;
       businessMobile?: string;
     },
   ): Promise<PayoutAccountRow> {
-    const { externalAccountId } = await this.flutterwave.createSubaccount(args);
+    let externalAccountId: string;
+    try {
+      ({ externalAccountId } = await this.flutterwave.createSubaccount(args));
+    } catch (err) {
+      // Surface Flutterwave's own validation message (e.g. bad account number,
+      // unsupported bank) as a 400 the vendor can act on, not a generic 500.
+      throw new BadRequestException({
+        message:
+          err instanceof Error
+            ? err.message.replace(/^Flutterwave [A-Z]+ \/subaccounts failed: /, "")
+            : "Could not connect your Flutterwave payout account.",
+        code: "flutterwave_connect_failed",
+      });
+    }
     const snap = await this.flutterwave.getAccountStatus(externalAccountId);
     await this.upsert(vendorId, "FLUTTERWAVE", {
       externalAccountId: snap.externalAccountId,
