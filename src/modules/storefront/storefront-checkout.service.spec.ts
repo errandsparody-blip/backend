@@ -48,6 +48,15 @@ function makeDeps(opts: { rates: unknown[]; twoSpeeds?: boolean }) {
 
   const executed: string[] = [];
   const prisma = {
+    // Fee schedule for fulfillment math (base + per-additional-unit, capped).
+    configuration: {
+      findUnique: jest.fn().mockResolvedValue({
+        value: {
+          fulfillment: { baseCents: 300, perAdditionalUnitCents: 150, maxCents: 100_000 },
+          shippingMarkupBps: 1000,
+        },
+      }),
+    },
     $queryRaw: jest.fn(async (q: never) => {
       const t = sqlText(q);
       if (t.includes("FROM products")) return [productRow()];
@@ -148,11 +157,11 @@ describe("StorefrontCheckoutService.createCrossVendorOrder", () => {
     expect(res.results.map((r) => r.slug)).toEqual(["acme", "beta"]);
     // One consolidated shipping estimate for the cart.
     expect(shippo.getRates).toHaveBeenCalledTimes(1);
-    // Shipping (800) is charged once, on one leg; fulfillment (300) is per
-    // vendor, so BOTH legs carry it. Leg with shipping: 800+300=1100; the other:
-    // just 300. Buyer pays delivery once, fulfillment per store.
+    // Shipping (800) is charged once, on one leg. Fulfillment is per vendor and
+    // scales with units: acme (1 unit) = base 300; beta (2 units) = 300 + 150 =
+    // 450. So the shipping leg = 800 + 300 = 1100; the other = 450.
     const fees = createCheckout.mock.calls.map((c) => (c[0] as { platformFeeCents: number }).platformFeeCents).sort((a, b) => a - b);
-    expect(fees).toEqual([300, 1100]);
+    expect(fees).toEqual([450, 1100]);
   });
 
   it("reports a leg whose payment fails without dropping the others", async () => {

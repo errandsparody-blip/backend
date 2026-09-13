@@ -24,6 +24,11 @@ import { Prisma } from "@prisma/client";
 import { randomUUID } from "crypto";
 
 import { loadConfig } from "../../common/config";
+import {
+  DEFAULT_FULFILLMENT_MAX_CENTS,
+  loadFeeSchedule,
+  type FeeSchedule,
+} from "../../common/fees";
 import { PrismaService } from "../../common/prisma.service";
 import type {
   CheckoutInput,
@@ -42,8 +47,26 @@ import { bucketRates, type BuyerShippingOption } from "./shipping-options";
 import { StorefrontPublicService } from "./storefront-public.service";
 import { StorefrontTaxService } from "./storefront-tax.service";
 
-/** Flat platform fulfillment fee added on top of shipping (config later). */
-export const STOREFRONT_FULFILLMENT_FEE_CENTS = 300;
+/**
+ * Fulfillment fee for one vendor's order = the SAME schedule normal (vendor /
+ * integration) orders use: a base for the first unit + a per-additional-unit
+ * charge, capped. So a vendor with 3 items pays base + 2×perUnit — not a flat
+ * fee. Each vendor in a cross-vendor cart is billed for their own units (their
+ * goods are picked + packed separately); only shipping is one charge for the
+ * whole cart.
+ */
+function fulfillmentFeeForUnits(units: number, schedule: FeeSchedule): number {
+  const { baseCents, perAdditionalUnitCents } = schedule.fulfillment;
+  const additional = Math.max(0, units - 1);
+  const uncapped = baseCents + additional * perAdditionalUnitCents;
+  const maxCents =
+    typeof schedule.fulfillment.maxCents === "number" && schedule.fulfillment.maxCents > 0
+      ? schedule.fulfillment.maxCents
+      : DEFAULT_FULFILLMENT_MAX_CENTS;
+  return Math.min(uncapped, maxCents);
+}
+
+const unitsOf = (items: CheckoutItem[]): number => items.reduce((s, i) => s + i.qty, 0);
 
 interface CheckoutItem {
   productId: string;
@@ -100,10 +123,11 @@ export class StorefrontCheckoutService {
     const productSubtotalCents = items.reduce((s, i) => s + i.unitRetailCents * i.qty, 0);
     const options = await this.shippingOptions(items, productSubtotalCents, input.shipAddress);
     const taxCents = await this.tax.taxFor(input.shipAddress.state, productSubtotalCents);
+    const schedule = await loadFeeSchedule(this.prisma);
     return {
       currency: "USD",
       productSubtotalCents,
-      fulfillmentFeeCents: STOREFRONT_FULFILLMENT_FEE_CENTS,
+      fulfillmentFeeCents: fulfillmentFeeForUnits(unitsOf(items), schedule),
       taxCents,
       // Never expose the internal service token to the buyer.
       shippingOptions: options.map(({ serviceToken: _t, ...rest }) => rest),
@@ -136,6 +160,7 @@ export class StorefrontCheckoutService {
       });
     }
 
+    const schedule = await loadFeeSchedule(this.prisma);
     return this.placeOrder(store, items, {
       buyerEmail: input.buyerEmail,
       buyerName: input.buyerName,
@@ -145,10 +170,10 @@ export class StorefrontCheckoutService {
       discountCode: input.discountCode,
       shippingSpeed: input.shippingSpeed,
       // Single-store: this order is the whole shipment, so it carries the full
-      // shipping + fulfillment.
+      // shipping; fulfillment scales with this order's unit count.
       shippingCents: chosen.costCents,
       serviceToken: chosen.serviceToken,
-      fulfillmentFeeCents: STOREFRONT_FULFILLMENT_FEE_CENTS,
+      fulfillmentFeeCents: fulfillmentFeeForUnits(unitsOf(items), schedule),
     });
   }
 
@@ -305,9 +330,11 @@ export class StorefrontCheckoutService {
    * tax are summed across vendors; the fulfillment fee is charged once.
    */
   async quoteCrossVendor(input: CrossVendorQuoteInput): Promise<CheckoutQuote> {
+    const schedule = await loadFeeSchedule(this.prisma);
     const allItems: CheckoutItem[] = [];
     let productSubtotalCents = 0;
     let taxCents = 0;
+    let fulfillmentFeeCents = 0;
     for (const group of input.groups) {
       const store = await this.publicStore.resolveBySlug(group.slug);
       const items = await this.loadItems(store.vendorId, group.items);
@@ -317,6 +344,8 @@ export class StorefrontCheckoutService {
       // goods, so the cart tax is the sum of per-vendor tax (kept in step with
       // what checkout will actually charge).
       taxCents += await this.tax.taxFor(input.shipAddress.state, groupSubtotal);
+      // Fulfillment is per vendor and scales with that vendor's unit count.
+      fulfillmentFeeCents += fulfillmentFeeForUnits(unitsOf(items), schedule);
       allItems.push(...items);
     }
     // One shipping estimate for the combined parcel.
@@ -324,9 +353,9 @@ export class StorefrontCheckoutService {
     return {
       currency: "USD",
       productSubtotalCents,
-      // Shipping is ONE delivery for the whole cart, but each vendor's goods are
-      // picked + packed separately, so the fulfillment fee is per vendor.
-      fulfillmentFeeCents: STOREFRONT_FULFILLMENT_FEE_CENTS * input.groups.length,
+      // Shipping is ONE delivery for the whole cart; fulfillment is summed per
+      // vendor (each store's goods are picked + packed separately).
+      fulfillmentFeeCents,
       taxCents,
       shippingOptions: options.map(({ serviceToken: _t, ...rest }) => rest),
     };
@@ -391,6 +420,10 @@ export class StorefrontCheckoutService {
     const results: Array<{ slug: string; reference: string; checkoutUrl: string }> = [];
     const errors: Array<{ slug: string; message: string; code?: string }> = [];
 
+    // Fee schedule for the per-vendor fulfillment fee (same model as normal
+    // orders: base + per-additional-unit, capped).
+    const schedule = await loadFeeSchedule(this.prisma);
+
     // One id links every sub-order of this cart so the warehouse can see they
     // ship together (and, next step, pack them into one physical shipment).
     const cartGroupId = legs.length > 1 ? randomUUID() : null;
@@ -413,7 +446,7 @@ export class StorefrontCheckoutService {
           shippingSpeed: input.shippingSpeed,
           shippingCents: carriesShipping ? chosen.costCents : 0,
           serviceToken: carriesShipping ? chosen.serviceToken : null,
-          fulfillmentFeeCents: STOREFRONT_FULFILLMENT_FEE_CENTS,
+          fulfillmentFeeCents: fulfillmentFeeForUnits(unitsOf(leg.items), schedule),
           cartGroupId,
         });
         results.push({ slug: leg.slug, reference: res.reference, checkoutUrl: res.checkoutUrl });
@@ -566,10 +599,28 @@ export class StorefrontCheckoutService {
   ): Promise<BuyerShippingOption[]> {
     const cfg = loadConfig();
     const weightOz = items.reduce((s, i) => s + i.weightOz * i.qty, 0) || 1;
-    const lengthIn = Math.max(1, ...items.map((i) => i.lengthIn ?? 0));
-    const widthIn = Math.max(1, ...items.map((i) => i.widthIn ?? 0));
-    const heightIn =
-      items.reduce((s, i) => s + (i.heightIn ?? 0) * i.qty, 0) || 1;
+
+    // Estimate one combined parcel. The old heuristic summed EVERY item's full
+    // height, which turns a few small items into an implausible tower and makes
+    // the carrier's dimensional-weight rate explode. Instead, keep the footprint
+    // at the largest item's length × width and grow height only by the volume
+    // that doesn't fit that footprint — a realistic "packed box" estimate.
+    // Dimensions are clamped to a carrier-sane max so one bad product dimension
+    // can't produce an absurd quote. The real box is measured at pack time.
+    const MAX_DIM_IN = 108; // common carrier max length/girth guardrail
+    const maxLen = Math.max(1, ...items.map((i) => i.lengthIn ?? 0));
+    const maxWid = Math.max(1, ...items.map((i) => i.widthIn ?? 0));
+    const totalVolumeIn3 = items.reduce(
+      (s, i) => s + (i.lengthIn ?? 0) * (i.widthIn ?? 0) * (i.heightIn ?? 0) * i.qty,
+      0,
+    );
+    const lengthIn = Math.min(MAX_DIM_IN, Math.ceil(maxLen));
+    const widthIn = Math.min(MAX_DIM_IN, Math.ceil(maxWid));
+    const footprintIn2 = Math.max(1, lengthIn * widthIn);
+    const heightIn = Math.min(
+      MAX_DIM_IN,
+      Math.max(1, Math.ceil(totalVolumeIn3 / footprintIn2)),
+    );
 
     const res = await this.shippo.getRates({
       fromAddress: {
