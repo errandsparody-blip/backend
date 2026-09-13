@@ -536,6 +536,19 @@ model Product {
   category        String?
   tags            String[] @default([])
 
+  // Marketplace variants (Migration 0066). A listing can offer several variants
+  // (size × colour). Each variant stays its OWN product row, so it keeps its own
+  // stock/SKUs, price (retailPriceCents), and images — nothing about receiving,
+  // packing, or checkout changes. variantGroupId links the rows into ONE
+  // storefront listing; optionSize / optionColor are the selectable axes;
+  // imageUrls is the per-variant gallery (imageUrl remains the primary/first for
+  // backward compatibility). All NULL / empty for existing single products — no
+  // backfill, so current listings are unaffected.
+  variantGroupId  String?  @map("variant_group_id") @db.Uuid
+  optionSize      String?  @map("option_size")
+  optionColor     String?  @map("option_color")
+  imageUrls       String[] @default([]) @map("image_urls")
+
   status          String   @default("ACTIVE")  // ACTIVE | ARCHIVED
 
   createdAt       DateTime @default(now()) @map("created_at")
@@ -553,6 +566,8 @@ model Product {
   // the marketplace category feed.
   @@index([vendorId, listed, status])
   @@index([listed, category])
+  // Migration 0066 — collapse a listing's size × colour variants into one card.
+  @@index([variantGroupId])
   @@map("products")
 }
 
