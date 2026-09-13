@@ -324,7 +324,9 @@ export class StorefrontCheckoutService {
     return {
       currency: "USD",
       productSubtotalCents,
-      fulfillmentFeeCents: STOREFRONT_FULFILLMENT_FEE_CENTS,
+      // Shipping is ONE delivery for the whole cart, but each vendor's goods are
+      // picked + packed separately, so the fulfillment fee is per vendor.
+      fulfillmentFeeCents: STOREFRONT_FULFILLMENT_FEE_CENTS * input.groups.length,
       taxCents,
       shippingOptions: options.map(({ serviceToken: _t, ...rest }) => rest),
     };
@@ -395,9 +397,10 @@ export class StorefrontCheckoutService {
 
     for (let i = 0; i < legs.length; i++) {
       const leg = legs[i]!;
-      // Only the first leg carries the (single) shipping + fulfillment for the
-      // whole cart; the rest are product + tax only. All go to USA Errands, so
-      // which leg carries them is bookkeeping — the buyer pays shipping once.
+      // Shipping is ONE delivery for the whole cart, so only the first leg
+      // carries the (single) shipping charge; the rest carry no shipping. But
+      // the fulfillment fee is PER VENDOR (each vendor's goods are picked +
+      // packed separately), so every leg carries its own fulfillment fee.
       const carriesShipping = i === 0;
       try {
         const res = await this.placeOrder(leg.store, leg.items, {
@@ -410,7 +413,7 @@ export class StorefrontCheckoutService {
           shippingSpeed: input.shippingSpeed,
           shippingCents: carriesShipping ? chosen.costCents : 0,
           serviceToken: carriesShipping ? chosen.serviceToken : null,
-          fulfillmentFeeCents: carriesShipping ? STOREFRONT_FULFILLMENT_FEE_CENTS : 0,
+          fulfillmentFeeCents: STOREFRONT_FULFILLMENT_FEE_CENTS,
           cartGroupId,
         });
         results.push({ slug: leg.slug, reference: res.reference, checkoutUrl: res.checkoutUrl });

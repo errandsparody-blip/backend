@@ -148,10 +148,11 @@ describe("StorefrontCheckoutService.createCrossVendorOrder", () => {
     expect(res.results.map((r) => r.slug)).toEqual(["acme", "beta"]);
     // One consolidated shipping estimate for the cart.
     expect(shippo.getRates).toHaveBeenCalledTimes(1);
-    // Exactly one leg carries shipping (800) + fulfillment (300); the other is
-    // product-only (platform fee 0). So the buyer pays delivery once.
+    // Shipping (800) is charged once, on one leg; fulfillment (300) is per
+    // vendor, so BOTH legs carry it. Leg with shipping: 800+300=1100; the other:
+    // just 300. Buyer pays delivery once, fulfillment per store.
     const fees = createCheckout.mock.calls.map((c) => (c[0] as { platformFeeCents: number }).platformFeeCents).sort((a, b) => a - b);
-    expect(fees).toEqual([0, 1100]);
+    expect(fees).toEqual([300, 1100]);
   });
 
   it("reports a leg whose payment fails without dropping the others", async () => {
