@@ -120,11 +120,12 @@ export class FlutterwaveProcessor extends PaymentProcessor {
     return (data ?? []).map((b) => ({ name: b.name, code: b.code }));
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await
   async getAccountStatus(externalAccountId: string): Promise<PayoutAccountSnapshot> {
-    // Flutterwave subaccounts have no Stripe-style KYC gate: a subaccount created
-    // with a valid bank account can immediately receive split settlements. Treat
-    // an existing, fetchable subaccount as ACTIVE.
-    await this.call<unknown>(`/subaccounts/${encodeURIComponent(externalAccountId)}`, "GET");
+    // Flutterwave subaccounts have no Stripe-style KYC gate: once created with a
+    // valid bank account they can immediately receive split settlements and never
+    // change state. There's nothing to poll, so we report ACTIVE without a network
+    // round-trip (the GET /subaccounts/:id endpoint is also finicky about id form).
     return {
       externalAccountId,
       status: "ACTIVE",

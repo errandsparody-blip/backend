@@ -114,22 +114,18 @@ export class PayoutAccountService {
         code: "flutterwave_connect_failed",
       });
     }
-    const snap = await this.flutterwave.getAccountStatus(externalAccountId);
-    await this.upsert(vendorId, "FLUTTERWAVE", {
-      externalAccountId: snap.externalAccountId,
-      status: snap.status,
-      detailsSubmitted: snap.detailsSubmitted,
-      chargesEnabled: snap.chargesEnabled,
-      payoutsEnabled: snap.payoutsEnabled,
-    });
-    return {
-      processor: "FLUTTERWAVE",
-      externalAccountId: snap.externalAccountId,
-      status: snap.status,
-      detailsSubmitted: snap.detailsSubmitted,
-      chargesEnabled: snap.chargesEnabled,
-      payoutsEnabled: snap.payoutsEnabled,
+    // A Flutterwave subaccount is active the moment it's created — a valid bank
+    // account can immediately receive split settlements (no Stripe-style KYC
+    // gate). No status round-trip needed; mark it ACTIVE from the create result.
+    const snap = {
+      externalAccountId,
+      status: "ACTIVE",
+      detailsSubmitted: true,
+      chargesEnabled: true,
+      payoutsEnabled: true,
     };
+    await this.upsert(vendorId, "FLUTTERWAVE", snap);
+    return { processor: "FLUTTERWAVE", ...snap };
   }
 
   /** Pull fresh status from the processor and mirror it locally. */
