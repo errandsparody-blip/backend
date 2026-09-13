@@ -95,20 +95,43 @@ export class FlutterwaveProcessor extends PaymentProcessor {
 
   /** Create a payout subaccount from the vendor's bank details. */
   async createSubaccount(args: CreateSubaccountArgs): Promise<{ externalAccountId: string }> {
-    const data = await this.call<{ subaccount_id: string }>("/subaccounts", "POST", {
-      account_bank: args.accountBank,
-      account_number: args.accountNumber,
-      business_name: args.businessName,
-      business_email: args.businessEmail,
-      business_mobile: args.businessMobile ?? "",
-      country: args.country,
-      // Defaults; the real split is set per-transaction as a flat commission in
-      // createCheckout, so the platform keeps exactly shipping + fulfillment + tax.
-      split_type: "percentage",
-      split_value: 0,
-      ...(args.meta ? { meta: args.meta } : {}),
-    });
-    return { externalAccountId: data.subaccount_id };
+    try {
+      const data = await this.call<{ subaccount_id: string }>("/subaccounts", "POST", {
+        account_bank: args.accountBank,
+        account_number: args.accountNumber,
+        business_name: args.businessName,
+        business_email: args.businessEmail,
+        business_mobile: args.businessMobile ?? "",
+        country: args.country,
+        // Defaults; the real split is set per-transaction as a flat commission in
+        // createCheckout, so the platform keeps exactly shipping + fulfillment + tax.
+        split_type: "percentage",
+        split_value: 0,
+        ...(args.meta ? { meta: args.meta } : {}),
+      });
+      return { externalAccountId: data.subaccount_id };
+    } catch (err) {
+      // Idempotent connect: Flutterwave rejects a duplicate bank+account with
+      // "A subaccount with the account number and bank already exists". That's not
+      // a failure for us — the payout destination is already there, so look it up
+      // and reuse its id instead of surfacing an error to the vendor.
+      if (err instanceof Error && /already exists/i.test(err.message)) {
+        const existing = await this.findSubaccountByAccountNumber(args.accountNumber);
+        if (existing) return { externalAccountId: existing };
+      }
+      throw err;
+    }
+  }
+
+  /** Find an existing subaccount's id by its settlement account number. */
+  private async findSubaccountByAccountNumber(accountNumber: string): Promise<string | null> {
+    const data = await this.call<
+      Array<{ subaccount_id?: string; account_number?: string }>
+    >(`/subaccounts?account_number=${encodeURIComponent(accountNumber)}`, "GET");
+    const list = Array.isArray(data) ? data : [];
+    const match =
+      list.find((s) => s.account_number === accountNumber) ?? list[0];
+    return match?.subaccount_id ?? null;
   }
 
   /** List settlement banks (name + code) for a country's bank picker. */

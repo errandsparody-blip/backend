@@ -103,6 +103,37 @@ describe("FlutterwaveProcessor.createSubaccount / listBanks", () => {
     expect(body.country).toBe("NG");
   });
 
+  it("reuses the existing subaccount when Flutterwave says it already exists", async () => {
+    const fetchMock = jest
+      .fn()
+      // POST /subaccounts → duplicate error
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({
+          status: "error",
+          message: "A subaccount with the account number and bank already exists",
+        }),
+      })
+      // GET /subaccounts?account_number=… → the existing one
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: "success",
+          data: [{ subaccount_id: "RS_EXISTING", account_number: "0690000031" }],
+        }),
+      });
+    const proc = new FlutterwaveProcessor(SECRET, HASH, fetchMock as never);
+    const { externalAccountId } = await proc.createSubaccount({
+      businessName: "Acme",
+      businessEmail: "acme@example.com",
+      accountBank: "044",
+      accountNumber: "0690000031",
+      country: "NG",
+    });
+    expect(externalAccountId).toBe("RS_EXISTING");
+    expect(String(fetchMock.mock.calls[1][0])).toContain("/subaccounts?account_number=0690000031");
+  });
+
   it("maps banks to {name, code}", async () => {
     const fetchMock = okFetch([
       { id: 1, code: "044", name: "Access Bank" },
