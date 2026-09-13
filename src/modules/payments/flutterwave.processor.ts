@@ -27,7 +27,10 @@ import {
   type CreateCheckoutArgs,
   type ParsedPaymentEvent,
   type PayoutAccountSnapshot,
+  type PlatformCheckoutArgs,
   type ProcessorKey,
+  type TransferResult,
+  type VendorTransferArgs,
 } from "./payment-processor.interface";
 
 type FetchFn = typeof fetch;
@@ -184,6 +187,68 @@ export class FlutterwaveProcessor extends PaymentProcessor {
     // numeric transaction id; persist tx_ref as the payment ref.
     return { checkoutUrl: data.link, paymentRef: txRef };
   }
+
+  // ---------------------------------------------------------------------------
+  // Unified cart payment (collect-then-payout) — Flutterwave overrides.
+  //
+  // createPlatformCheckout: one Standard charge with NO `subaccounts` split, so
+  // the funds land on the PLATFORM balance (vs createCheckout, which splits
+  // directly to a vendor subaccount). Vendor payout (transferToVendor) is NOT
+  // implemented here yet: Flutterwave pays out via the Transfers API to a bank
+  // account, which needs the vendor's bank code + account number — we currently
+  // store only the subaccount id. Until that's stored (see design doc), the base
+  // class's throwing default applies, so the flow fails loudly rather than
+  // mis-routing money. (For an all-Flutterwave cart the native multi-subaccount
+  // split on a single charge is the better long-term path.)
+  // ---------------------------------------------------------------------------
+
+  override supportsPlatformCollection(): boolean {
+    return this.isConfigured();
+  }
+
+  override async createPlatformCheckout(args: PlatformCheckoutArgs): Promise<CheckoutResult> {
+    const txRef = `${args.reference}-${Date.now().toString(36)}`;
+    const data = await this.call<{ link: string }>("/payments", "POST", {
+      tx_ref: txRef,
+      amount: args.amountCents / 100, // major unit
+      currency: args.currency,
+      redirect_url: args.successUrl,
+      customer: { email: args.buyerEmail },
+      customizations: { title: "USA Errands" },
+      // No `subaccounts`: the whole amount settles to the platform, to be
+      // distributed to vendors after the webhook confirms.
+      meta: { reference: args.reference, cart: "1", ...(args.metadata ?? {}) },
+    });
+    return { checkoutUrl: data.link, paymentRef: txRef };
+  }
+
+  /**
+   * Pay a vendor via the Transfers API. Needs the vendor's bank code + account
+   * number (a subaccount only receives split settlements at charge time), so the
+   * caller passes the stored bank details. `reference` is unique per sub-order so
+   * Flutterwave dedupes a retry (idempotent payout).
+   */
+  override async transferToVendor(args: VendorTransferArgs): Promise<TransferResult> {
+    if (!args.bankCode || !args.accountNumber) {
+      throw new Error(
+        "Flutterwave payout requires the vendor's bank code + account number.",
+      );
+    }
+    const data = await this.call<{ id: number | string }>("/transfers", "POST", {
+      account_bank: args.bankCode,
+      account_number: args.accountNumber,
+      amount: args.amountCents / 100, // major unit
+      currency: args.currency,
+      debit_currency: args.currency,
+      reference: `payout_${args.reference}`,
+      narration: `USA Errands payout ${args.reference}`,
+      ...(args.recipientName ? { beneficiary_name: args.recipientName } : {}),
+    });
+    return { transferId: String(data.id) };
+  }
+  // Note: reverseTransfer is intentionally NOT overridden — Flutterwave transfers
+  // can't be programmatically reversed once processed; a refund reverses the
+  // platform charge instead (see StorefrontOrderService.refund).
 
   async refund(args: {
     paymentRef: string;

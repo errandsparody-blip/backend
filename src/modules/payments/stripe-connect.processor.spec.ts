@@ -34,6 +34,10 @@ function fakeStripe() {
     paymentIntents: {
       create: jest.fn().mockResolvedValue({ id: "pi_x", status: "succeeded" }),
     },
+    transfers: {
+      create: jest.fn().mockResolvedValue({ id: "tr_1" }),
+      createReversal: jest.fn().mockResolvedValue({ id: "trr_1" }),
+    },
     webhooks: {
       constructEvent: jest.fn(),
     },
@@ -155,6 +159,52 @@ describe("StripeConnectProcessor single-card primitives", () => {
     expect(arg.confirm).toBe(true);
     expect(arg.application_fee_amount).toBe(1100);
     expect(arg.transfer_data.destination).toBe("acct_v");
+  });
+});
+
+describe("StripeConnectProcessor unified cart payment (collect-then-payout)", () => {
+  it("createPlatformCheckout charges the platform (no transfer_data / app fee)", async () => {
+    const stripe = fakeStripe();
+    const proc = new StripeConnectProcessor(stripe as never, "whsec");
+    expect(proc.supportsPlatformCollection()).toBe(true);
+    const res = await proc.createPlatformCheckout({
+      reference: "CART-1",
+      amountCents: 12000,
+      currency: "USD",
+      buyerEmail: "b@example.com",
+      successUrl: "https://s/ok",
+      cancelUrl: "https://s/no",
+    });
+    expect(res.paymentRef).toBe("pi_123");
+    const arg = stripe.checkout.sessions.create.mock.calls[0][0];
+    // Platform charge: funds land on the platform, so NO destination / app fee.
+    expect(arg.payment_intent_data.transfer_data).toBeUndefined();
+    expect(arg.payment_intent_data.application_fee_amount).toBeUndefined();
+    expect(arg.line_items[0].price_data.unit_amount).toBe(12000);
+  });
+
+  it("transferToVendor pays one vendor, idempotency-keyed on the sub-order ref", async () => {
+    const stripe = fakeStripe();
+    const proc = new StripeConnectProcessor(stripe as never, "whsec");
+    const res = await proc.transferToVendor({
+      externalAccountId: "acct_vendor",
+      amountCents: 5000,
+      currency: "USD",
+      reference: "SF-000008",
+    });
+    expect(res.transferId).toBe("tr_1");
+    const [body, opts] = stripe.transfers.create.mock.calls[0];
+    expect(body.amount).toBe(5000);
+    expect(body.destination).toBe("acct_vendor");
+    expect((opts as { idempotencyKey: string }).idempotencyKey).toBe("transfer:SF-000008");
+  });
+
+  it("reverseTransfer reverses a vendor payout", async () => {
+    const stripe = fakeStripe();
+    const proc = new StripeConnectProcessor(stripe as never, "whsec");
+    const res = await proc.reverseTransfer({ transferId: "tr_1", amountCents: 5000 });
+    expect(res.reversalId).toBe("trr_1");
+    expect(stripe.transfers.createReversal.mock.calls[0][0]).toBe("tr_1");
   });
 });
 

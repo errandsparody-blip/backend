@@ -54,6 +54,48 @@ export interface CheckoutResult {
   paymentRef: string;
 }
 
+/**
+ * Unified cart payment (collect-then-payout). The platform takes ONE charge for
+ * a multi-vendor cart, then transfers each vendor's product share out. Distinct
+ * from `createCheckout`, which is a direct destination charge to a single vendor.
+ */
+export interface PlatformCheckoutArgs {
+  /** Cart-group reference echoed back on the webhook. */
+  reference: string;
+  /** The full cart total the buyer pays (all products − discounts + shipping +
+   *  fulfillment + tax), in cents. */
+  amountCents: number;
+  currency: string;
+  buyerEmail: string;
+  successUrl: string;
+  cancelUrl: string;
+  metadata?: Record<string, string>;
+}
+
+/** Move one vendor's product amount from the platform balance to their account. */
+export interface VendorTransferArgs {
+  /** Vendor's connected destination on this rail (Stripe acct_… / FLW subaccount). */
+  externalAccountId: string;
+  amountCents: number;
+  currency: string;
+  /** Sub-order reference — used as the idempotency key so a retry never
+   *  double-pays a vendor. */
+  reference: string;
+  /**
+   * Bank-account details for rails that pay out to a bank rather than a
+   * connected-account id (Flutterwave Transfers API). Ignored by rails that
+   * transfer to a connected account (Stripe uses externalAccountId).
+   */
+  bankCode?: string;
+  accountNumber?: string;
+  recipientName?: string;
+  metadata?: Record<string, string>;
+}
+
+export interface TransferResult {
+  transferId: string;
+}
+
 /** Normalised webhook outcome. `paid` is the only event checkout cares about. */
 export interface ParsedPaymentEvent {
   type: "paid" | "other";
@@ -73,6 +115,40 @@ export abstract class PaymentProcessor {
 
   /** Create a split checkout session; returns the hosted URL + payment ref. */
   abstract createCheckout(args: CreateCheckoutArgs): Promise<CheckoutResult>;
+
+  // ---------------------------------------------------------------------------
+  // Unified cart payment (collect-then-payout) — OPTIONAL capability.
+  //
+  // These are concrete (not abstract) with a default that rejects, so a rail
+  // that doesn't support platform collection (or a future/legacy rail) keeps
+  // compiling and simply reports the capability as unavailable — Open/Closed,
+  // and callers fail loudly rather than silently mis-routing money. Rails that
+  // support it (Stripe, Flutterwave) override.
+  // ---------------------------------------------------------------------------
+
+  /** Whether this rail can act as the single platform collector for a cart. */
+  supportsPlatformCollection(): boolean {
+    return false;
+  }
+
+  /** One charge to the PLATFORM account for the whole cart (no vendor split). */
+  createPlatformCheckout(_args: PlatformCheckoutArgs): Promise<CheckoutResult> {
+    throw new Error(`${this.key} does not support platform (collect-then-payout) checkout.`);
+  }
+
+  /** Pay one vendor their product share out of the platform balance. */
+  transferToVendor(_args: VendorTransferArgs): Promise<TransferResult> {
+    throw new Error(`${this.key} does not support vendor payouts (transfers).`);
+  }
+
+  /** Reverse a vendor payout (used when that vendor's sub-order is refunded). */
+  reverseTransfer(_args: {
+    transferId: string;
+    amountCents?: number;
+    reference?: string;
+  }): Promise<{ reversalId: string }> {
+    throw new Error(`${this.key} does not support transfer reversal.`);
+  }
 
   /** Read the live status of a connected account (mirrored to our DB). */
   abstract getAccountStatus(externalAccountId: string): Promise<PayoutAccountSnapshot>;

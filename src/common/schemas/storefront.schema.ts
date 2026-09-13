@@ -44,12 +44,23 @@ export const setProductListingSchema = z
       .optional(),
     category: z.string().trim().min(1).max(60).optional().nullable(),
     tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+    // Variant options (Migration 0066) — the axes shown as selectors. Nullable to
+    // clear. imageUrls is the per-variant gallery (first = primary).
+    optionSize: z.string().trim().min(1).max(40).optional().nullable(),
+    optionColor: z.string().trim().min(1).max(40).optional().nullable(),
+    imageUrls: z.array(z.string().trim().url().max(500)).max(10).optional(),
   })
   .refine((v) => !v.listed || (v.retailPriceCents ?? 0) > 0, {
     message: "Set a retail price greater than $0 before listing this product.",
     path: ["retailPriceCents"],
   });
 export type SetProductListingInput = z.infer<typeof setProductListingSchema>;
+
+// Group a set of the vendor's products into ONE storefront listing (variants).
+export const variantGroupSchema = z.object({
+  productIds: z.array(z.string().uuid()).min(1).max(50),
+});
+export type VariantGroupInput = z.infer<typeof variantGroupSchema>;
 
 // Storefront presentation (upsert). displayName is the only required field —
 // everything else is optional polish.

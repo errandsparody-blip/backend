@@ -124,7 +124,13 @@ export class PayoutAccountService {
       chargesEnabled: true,
       payoutsEnabled: true,
     };
-    await this.upsert(vendorId, "FLUTTERWAVE", snap);
+    // Store the bank details too, so unified collect-then-payout can transfer
+    // this vendor's share via the Flutterwave Transfers API.
+    await this.upsert(vendorId, "FLUTTERWAVE", {
+      ...snap,
+      bankCode: args.accountBank,
+      accountNumber: args.accountNumber,
+    });
     return { processor: "FLUTTERWAVE", ...snap };
   }
 
@@ -180,17 +186,25 @@ export class PayoutAccountService {
       detailsSubmitted: boolean;
       chargesEnabled: boolean;
       payoutsEnabled: boolean;
+      /** Flutterwave payout bank details (Migration 0068); undefined for Stripe. */
+      bankCode?: string | null;
+      accountNumber?: string | null;
     },
   ): Promise<void> {
     await this.prisma.$executeRaw(Prisma.sql`
       INSERT INTO vendor_payout_accounts
-        (vendor_id, processor, external_account_id, status, details_submitted,
-         charges_enabled, payouts_enabled, created_at, updated_at)
+        (vendor_id, processor, external_account_id, bank_code, account_number, status,
+         details_submitted, charges_enabled, payouts_enabled, created_at, updated_at)
       VALUES
-        (${vendorId}::uuid, ${processor}, ${snap.externalAccountId}, ${snap.status},
-         ${snap.detailsSubmitted}, ${snap.chargesEnabled}, ${snap.payoutsEnabled}, now(), now())
+        (${vendorId}::uuid, ${processor}, ${snap.externalAccountId}, ${snap.bankCode ?? null},
+         ${snap.accountNumber ?? null}, ${snap.status}, ${snap.detailsSubmitted},
+         ${snap.chargesEnabled}, ${snap.payoutsEnabled}, now(), now())
       ON CONFLICT (vendor_id, processor) DO UPDATE SET
         external_account_id = EXCLUDED.external_account_id,
+        -- COALESCE so a status refresh (which doesn't carry bank details) can't
+        -- wipe the stored payout bank details.
+        bank_code           = COALESCE(EXCLUDED.bank_code, vendor_payout_accounts.bank_code),
+        account_number      = COALESCE(EXCLUDED.account_number, vendor_payout_accounts.account_number),
         status              = EXCLUDED.status,
         details_submitted   = EXCLUDED.details_submitted,
         charges_enabled     = EXCLUDED.charges_enabled,

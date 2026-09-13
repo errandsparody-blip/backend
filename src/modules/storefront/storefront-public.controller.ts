@@ -4,6 +4,7 @@
  *   GET  /v1/public/storefront/:slug                   — resolve store header
  *   GET  /v1/public/storefront/:slug/products          — listed, in-stock catalog
  *   GET  /v1/public/storefront/:slug/products/:id      — product detail
+ *   GET  /v1/public/storefront/:slug/listing/:id       — listing + size×colour variants
  *   GET  /v1/public/storefront/:slug/categories        — category list
  *   POST /v1/public/storefront/:slug/quote             — price cart + shipping
  *   POST /v1/public/storefront/:slug/checkout          — create order + open payment
@@ -89,6 +90,19 @@ export class StorefrontPublicController {
   ) {
     const store = await this.publicStore.resolveBySlug(slug);
     return this.publicStore.getProduct(store.vendorId, id);
+  }
+
+  // Full listing with size×colour variants. `:id` may be a product id OR a
+  // variant_group_id. The product page uses this to render selectors + gallery.
+  @Public()
+  @Get(":slug/listing/:id")
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  async listing(
+    @Param("slug") slug: string,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    const store = await this.publicStore.resolveBySlug(slug);
+    return this.publicStore.getListing(store.vendorId, id);
   }
 
   @Public()

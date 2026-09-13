@@ -149,6 +149,61 @@ describe("FlutterwaveProcessor.createSubaccount / listBanks", () => {
   });
 });
 
+describe("FlutterwaveProcessor unified cart payment (collect-then-payout)", () => {
+  it("createPlatformCheckout charges the platform with NO subaccount split", async () => {
+    const fetchMock = okFetch({ link: "https://checkout.flutterwave.com/pay/cart" });
+    const proc = new FlutterwaveProcessor(SECRET, HASH, fetchMock as never);
+    expect(proc.supportsPlatformCollection()).toBe(true);
+    const res = await proc.createPlatformCheckout({
+      reference: "CART-1",
+      amountCents: 12000,
+      currency: "USD",
+      buyerEmail: "b@example.com",
+      successUrl: "https://s/ok",
+      cancelUrl: "https://s/no",
+    });
+    expect(res.checkoutUrl).toContain("flutterwave");
+    const [, opts] = fetchMock.mock.calls[0];
+    const body = JSON.parse((opts as { body: string }).body);
+    expect(body.amount).toBe(120); // major unit
+    expect(body.subaccounts).toBeUndefined(); // funds go to the platform
+    expect(body.meta.reference).toBe("CART-1");
+  });
+
+  it("transferToVendor pays out via the Transfers API using the vendor's bank details", async () => {
+    const fetchMock = okFetch({ id: 909090 });
+    const proc = new FlutterwaveProcessor(SECRET, HASH, fetchMock as never);
+    const res = await proc.transferToVendor({
+      externalAccountId: "RS_1",
+      amountCents: 5000,
+      currency: "USD",
+      reference: "SF-000008",
+      bankCode: "044",
+      accountNumber: "0690000031",
+    });
+    expect(res.transferId).toBe("909090");
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/transfers");
+    const body = JSON.parse((opts as { body: string }).body);
+    expect(body.account_bank).toBe("044");
+    expect(body.account_number).toBe("0690000031");
+    expect(body.amount).toBe(50); // major unit
+    expect(body.reference).toBe("payout_SF-000008"); // idempotent per sub-order
+  });
+
+  it("transferToVendor throws when bank details are missing", async () => {
+    const proc = new FlutterwaveProcessor(SECRET, HASH, jest.fn() as never);
+    await expect(
+      proc.transferToVendor({
+        externalAccountId: "RS_1",
+        amountCents: 1000,
+        currency: "USD",
+        reference: "SF-1",
+      }),
+    ).rejects.toThrow();
+  });
+});
+
 describe("FlutterwaveProcessor.isConfigured", () => {
   it("is false without a secret key", () => {
     expect(new FlutterwaveProcessor("", "", jest.fn() as never).isConfigured()).toBe(false);

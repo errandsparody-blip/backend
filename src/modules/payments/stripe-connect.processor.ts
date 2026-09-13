@@ -20,7 +20,10 @@ import {
   type CreateCheckoutArgs,
   type ParsedPaymentEvent,
   type PayoutAccountSnapshot,
+  type PlatformCheckoutArgs,
   type ProcessorKey,
+  type TransferResult,
+  type VendorTransferArgs,
 } from "./payment-processor.interface";
 
 export interface CreateAccountLinkArgs {
@@ -202,6 +205,79 @@ export class StripeConnectProcessor extends PaymentProcessor {
           ? session.payment_intent
           : session.id,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Unified cart payment (collect-then-payout) — Stripe overrides.
+  //
+  // One Checkout Session to the PLATFORM account (no transfer_data / application
+  // fee), so the whole cart is a single charge. After it settles, the order
+  // service pays each vendor with `transferToVendor` (a Connect transfer keyed on
+  // the sub-order ref for idempotency). USA Errands momentarily holds the product
+  // funds — the trade-off the client accepted for "buyer pays once".
+  // ---------------------------------------------------------------------------
+
+  override supportsPlatformCollection(): boolean {
+    return true;
+  }
+
+  override async createPlatformCheckout(args: PlatformCheckoutArgs): Promise<CheckoutResult> {
+    const stripe = this.client();
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      customer_email: args.buyerEmail,
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency: args.currency.toLowerCase(),
+            unit_amount: args.amountCents,
+            product_data: { name: `USA Errands cart ${args.reference}` },
+          },
+        },
+      ],
+      // No transfer_data / application_fee: the funds land on the PLATFORM
+      // balance, to be distributed per vendor after the webhook confirms.
+      payment_intent_data: {
+        metadata: { reference: args.reference, cart: "1", ...(args.metadata ?? {}) },
+      },
+      metadata: { reference: args.reference, cart: "1", ...(args.metadata ?? {}) },
+      success_url: args.successUrl,
+      cancel_url: args.cancelUrl,
+    });
+    return {
+      checkoutUrl: session.url ?? "",
+      paymentRef:
+        typeof session.payment_intent === "string" ? session.payment_intent : session.id,
+    };
+  }
+
+  override async transferToVendor(args: VendorTransferArgs): Promise<TransferResult> {
+    // Idempotency-keyed on the sub-order ref so a webhook retry can never
+    // double-pay a vendor.
+    const transfer = await this.client().transfers.create(
+      {
+        amount: args.amountCents,
+        currency: args.currency.toLowerCase(),
+        destination: args.externalAccountId,
+        metadata: { reference: args.reference, ...(args.metadata ?? {}) },
+      },
+      { idempotencyKey: `transfer:${args.reference}` },
+    );
+    return { transferId: transfer.id };
+  }
+
+  override async reverseTransfer(args: {
+    transferId: string;
+    amountCents?: number;
+    reference?: string;
+  }): Promise<{ reversalId: string }> {
+    const reversal = await this.client().transfers.createReversal(args.transferId, {
+      ...(args.amountCents != null ? { amount: args.amountCents } : {}),
+      ...(args.reference ? { metadata: { reference: args.reference } } : {}),
+    });
+    return { reversalId: reversal.id };
   }
 
   // ---------------------------------------------------------------------------

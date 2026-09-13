@@ -38,11 +38,13 @@ import {
   setProductListingSchema,
   setSlugSchema,
   upsertStorefrontSettingsSchema,
+  variantGroupSchema,
   type AddDomainInput,
   type SetFeaturedInput,
   type SetProductListingInput,
   type SetSlugInput,
   type UpsertStorefrontSettingsInput,
+  type VariantGroupInput,
 } from "../../common/schemas/storefront.schema";
 
 import { StorefrontOrderService } from "./storefront-order.service";
@@ -163,5 +165,25 @@ export class StorefrontController {
     @Body(new ZodValidationPipe(setProductListingSchema)) body: SetProductListingInput,
   ) {
     return this.storefront.setProductListing(user.vendorId!, id, body);
+  }
+
+  // Group a set of the vendor's products into ONE listing (size×colour variants).
+  @Post("products/variant-group")
+  @HttpCode(HttpStatus.OK)
+  groupVariants(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body(new ZodValidationPipe(variantGroupSchema)) body: VariantGroupInput,
+  ) {
+    return this.storefront.groupProductsAsVariants(user.vendorId!, body.productIds);
+  }
+
+  // Remove one product from its variant group (becomes a standalone listing).
+  @Post("products/:id/ungroup")
+  @HttpCode(HttpStatus.OK)
+  ungroupVariant(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.storefront.ungroupProduct(user.vendorId!, id);
   }
 }

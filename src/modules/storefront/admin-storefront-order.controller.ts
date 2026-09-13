@@ -3,7 +3,9 @@
  * all vendors, plus admin-initiated refunds.
  *
  *   GET  /v1/admin/storefront/orders?status=PAID
- *   POST /v1/admin/storefront/orders/:reference/refund   { amountCents? }
+ *   POST /v1/admin/storefront/orders/:reference/refund      { amountCents? }
+ *   GET  /v1/admin/storefront/orders/payouts/failed         — unified-cart payout failures
+ *   POST /v1/admin/storefront/orders/:reference/payout/retry
  */
 import {
   Body,
@@ -38,6 +40,20 @@ export class AdminStorefrontOrderController {
   @Get()
   list(@Query("status") status?: string) {
     return this.orders.adminList({ status: status?.trim() || undefined });
+  }
+
+  /** Unified-cart sub-orders whose vendor payout failed — for admin follow-up. */
+  @Get("payouts/failed")
+  failedPayouts() {
+    return this.orders.listFailedPayouts();
+  }
+
+  /** Retry a failed vendor payout (finance-gated — it moves money). */
+  @Post(":reference/payout/retry")
+  @Roles(Role.SUPER_ADMIN, Role.FINANCE_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  retryPayout(@Param("reference") reference: string) {
+    return this.orders.retryPayout(reference);
   }
 
   // Refunds are finance-gated (warehouse operators can view but not refund).

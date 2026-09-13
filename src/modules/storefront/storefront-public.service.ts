@@ -34,6 +34,72 @@ export interface PublicProductCard {
   retailPriceCents: number;
   imageUrl: string | null;
   available: number;
+  /** Set when this card represents a size×colour variant group (Migration 0066);
+   *  the product page loads the full variant set via getListing. */
+  variantGroupId?: string | null;
+  /** True when the group's variants aren't all the same price (card shows "from $X"). */
+  priceVaries?: boolean;
+}
+
+/** One selectable variant within a listing. */
+export interface ListingVariant {
+  productId: string;
+  optionSize: string | null;
+  optionColor: string | null;
+  retailPriceCents: number;
+  imageUrl: string | null;
+  imageUrls: string[];
+  available: number;
+}
+
+/** A storefront listing = one product, or a group of size×colour variants. */
+export interface PublicListing {
+  name: string;
+  category: string | null;
+  tags: string[];
+  variantGroupId: string | null;
+  /** Distinct option axes for the selectors (empty when the listing is single). */
+  sizes: string[];
+  colors: string[];
+  variants: ListingVariant[];
+}
+
+/** Collapse rows sharing a variant_group_id into ONE card (representative =
+ *  cheapest in-stock variant); availability is summed and price shows "from". */
+interface VariantRow {
+  id: string;
+  name: string;
+  category: string | null;
+  tags: string[];
+  retail_price_cents: number;
+  image_url: string | null;
+  available: number | bigint;
+  variant_group_id: string | null;
+}
+function collapseVariantRows<T extends VariantRow>(rows: T[]): Array<T & { card: PublicProductCard }> {
+  const byGroup = new Map<string, T[]>();
+  for (const r of rows) {
+    const key = r.variant_group_id ?? r.id;
+    const g = byGroup.get(key);
+    if (g) g.push(r);
+    else byGroup.set(key, [r]);
+  }
+  return [...byGroup.values()].map((group) => {
+    const rep = group.reduce((a, b) => (b.retail_price_cents < a.retail_price_cents ? b : a));
+    const prices = group.map((g) => g.retail_price_cents);
+    const card: PublicProductCard = {
+      id: rep.id,
+      name: rep.name,
+      category: rep.category,
+      tags: rep.tags,
+      retailPriceCents: Math.min(...prices),
+      imageUrl: rep.image_url,
+      available: group.reduce((s, g) => s + Number(g.available), 0),
+      variantGroupId: rep.variant_group_id,
+      priceVaries: new Set(prices).size > 1,
+    };
+    return { ...rep, card };
+  });
 }
 
 @Injectable()
@@ -129,10 +195,11 @@ export class StorefrontPublicService {
         retail_price_cents: number;
         image_url: string | null;
         available: number | bigint;
+        variant_group_id: string | null;
       }>
     >(Prisma.sql`
       SELECT p.id, p.name, p.category, p.tags, p.retail_price_cents, p.image_url,
-             COALESCE(s.avail, 0) AS available
+             COALESCE(s.avail, 0) AS available, p.variant_group_id
       FROM products p
       LEFT JOIN (
         SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
@@ -145,17 +212,10 @@ export class StorefrontPublicService {
         AND COALESCE(s.avail, 0) > 0
         ${opts.category ? Prisma.sql`AND p.category = ${opts.category}` : Prisma.empty}
       ORDER BY p.created_at DESC
-      LIMIT 120
+      LIMIT 240
     `);
-    return rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      category: r.category,
-      tags: r.tags,
-      retailPriceCents: r.retail_price_cents,
-      imageUrl: r.image_url,
-      available: Number(r.available),
-    }));
+    // Collapse size×colour variants into one card per listing.
+    return collapseVariantRows(rows).map((g) => g.card);
   }
 
   /** Single product detail for a live store (must be listed + in stock). */
@@ -199,6 +259,88 @@ export class StorefrontPublicService {
     };
   }
 
+  /**
+   * A listing with all its size×colour variants (Migration 0066). The path param
+   * may be a product id OR a variant_group_id. Includes out-of-stock variants so
+   * the product page can show every size/colour and disable the sold-out combos.
+   * A lone product returns a single-variant listing so the page has one code path.
+   */
+  async getListing(vendorId: string, idOrGroup: string): Promise<PublicListing> {
+    const match = await this.prisma.$queryRaw<
+      Array<{ id: string; variant_group_id: string | null }>
+    >(Prisma.sql`
+      SELECT id, variant_group_id FROM products
+      WHERE (id = ${idOrGroup}::uuid OR variant_group_id = ${idOrGroup}::uuid)
+        AND vendor_id = ${vendorId}::uuid AND listed = true AND status = 'ACTIVE'
+        AND retail_price_cents IS NOT NULL
+      LIMIT 1
+    `);
+    const m = match[0];
+    if (!m) {
+      throw new NotFoundException({ message: "Product not found.", code: "product_not_found" });
+    }
+    const groupFilter = m.variant_group_id
+      ? Prisma.sql`p.variant_group_id = ${m.variant_group_id}::uuid`
+      : Prisma.sql`p.id = ${m.id}::uuid`;
+
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        id: string;
+        name: string;
+        category: string | null;
+        tags: string[];
+        option_size: string | null;
+        option_color: string | null;
+        retail_price_cents: number;
+        image_url: string | null;
+        image_urls: string[];
+        available: number | bigint;
+      }>
+    >(Prisma.sql`
+      SELECT p.id, p.name, p.category, p.tags, p.option_size, p.option_color,
+             p.retail_price_cents, p.image_url, p.image_urls,
+             COALESCE(s.avail, 0) AS available
+      FROM products p
+      LEFT JOIN (
+        SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
+        FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
+      ) s ON s.product_id = p.id
+      WHERE ${groupFilter}
+        AND p.vendor_id = ${vendorId}::uuid AND p.listed = true AND p.status = 'ACTIVE'
+        AND p.retail_price_cents IS NOT NULL
+      ORDER BY p.option_color ASC NULLS FIRST, p.option_size ASC NULLS FIRST, p.created_at ASC
+    `);
+    if (rows.length === 0) {
+      throw new NotFoundException({ message: "Product not found.", code: "product_not_found" });
+    }
+
+    const variants: ListingVariant[] = rows.map((r) => ({
+      productId: r.id,
+      optionSize: r.option_size,
+      optionColor: r.option_color,
+      retailPriceCents: r.retail_price_cents,
+      imageUrl: r.image_url,
+      imageUrls:
+        r.image_urls && r.image_urls.length > 0
+          ? r.image_urls
+          : r.image_url
+            ? [r.image_url]
+            : [],
+      available: Number(r.available),
+    }));
+    const uniq = (xs: Array<string | null>): string[] =>
+      [...new Set(xs.filter((x): x is string => !!x))];
+    return {
+      name: rows[0]!.name,
+      category: rows[0]!.category,
+      tags: rows[0]!.tags,
+      variantGroupId: m.variant_group_id,
+      sizes: uniq(variants.map((v) => v.optionSize)),
+      colors: uniq(variants.map((v) => v.optionColor)),
+      variants,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Multi-vendor marketplace feed (Phase 2) — across storefront-enabled AND
   // marketplace-featured vendors only.
@@ -219,12 +361,13 @@ export class StorefrontPublicService {
         retail_price_cents: number;
         image_url: string | null;
         available: number | bigint;
+        variant_group_id: string | null;
         vendor_slug: string;
         store_name: string;
       }>
     >(Prisma.sql`
       SELECT p.id, p.name, p.category, p.tags, p.retail_price_cents, p.image_url,
-             COALESCE(st.avail, 0) AS available,
+             COALESCE(st.avail, 0) AS available, p.variant_group_id,
              v.slug AS vendor_slug,
              COALESCE(vs.display_name, v.business_name) AS store_name
       FROM products p
@@ -239,18 +382,13 @@ export class StorefrontPublicService {
         AND COALESCE(st.avail, 0) > 0
         ${opts.category ? Prisma.sql`AND p.category = ${opts.category}` : Prisma.empty}
       ORDER BY random()
-      LIMIT 120
+      LIMIT 240
     `);
-    return rows.map((r) => ({
-      id: r.id,
-      name: r.name,
-      category: r.category,
-      tags: r.tags,
-      retailPriceCents: r.retail_price_cents,
-      imageUrl: r.image_url,
-      available: Number(r.available),
-      vendorSlug: r.vendor_slug,
-      storeName: r.store_name,
+    // Collapse size×colour variants into one card, carrying the store fields.
+    return collapseVariantRows(rows).map((g) => ({
+      ...g.card,
+      vendorSlug: g.vendor_slug,
+      storeName: g.store_name,
     }));
   }
 

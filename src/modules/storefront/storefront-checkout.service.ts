@@ -41,7 +41,7 @@ import { DiscountService } from "../discounts/discount.service";
 import { ShippoService } from "../integrations/shippo/shippo.service";
 import { assertEmailDeliverable } from "../shopper/email-deliverability.util";
 
-import type { ProcessorKey } from "../payments/payment-processor.interface";
+import type { PaymentProcessor, ProcessorKey } from "../payments/payment-processor.interface";
 import { PaymentProcessorRegistry } from "../payments/payment-processor.registry";
 import { bucketRates, type BuyerShippingOption } from "./shipping-options";
 import { StorefrontPublicService } from "./storefront-public.service";
@@ -98,11 +98,27 @@ export interface CheckoutQuote {
   /** Destination sales tax on the goods (0 unless configured for the ship state). */
   taxCents: number;
   shippingOptions: Array<Omit<BuyerShippingOption, "serviceToken">>;
+  /**
+   * The combined parcel the shipping estimate was priced on. Surfaced for
+   * diagnostics: a very large weightOz here means a product's weight data is
+   * wrong (carriers bill on max(actual, dimensional) weight, so weight drives
+   * the price). Inspect this in the quote response when a rate looks too high.
+   */
+  parcel?: { weightOz: number; lengthIn: number; widthIn: number; heightIn: number };
 }
 
 @Injectable()
 export class StorefrontCheckoutService {
   private readonly logger = new Logger(StorefrontCheckoutService.name);
+  /**
+   * Unified cart payment: buyer pays ONE platform charge for a multi-vendor
+   * cart; the platform then pays out each vendor (collect-then-payout). OFF by
+   * default — verify in staging before enabling (it moves real money through the
+   * platform balance). When off, a multi-vendor cart uses the per-store direct
+   * charges. Single-vendor carts are always a direct charge regardless.
+   */
+  private readonly unifiedCartPayment =
+    (process.env.STOREFRONT_UNIFIED_CART_PAYMENT ?? "").toLowerCase() === "true";
 
   constructor(
     private readonly prisma: PrismaService,
@@ -131,6 +147,7 @@ export class StorefrontCheckoutService {
       taxCents,
       // Never expose the internal service token to the buyer.
       shippingOptions: options.map(({ serviceToken: _t, ...rest }) => rest),
+      parcel: this.buildParcel(items),
     };
   }
 
@@ -207,10 +224,88 @@ export class StorefrontCheckoutService {
       cartGroupId?: string | null;
     },
   ): Promise<{ reference: string; checkoutUrl: string }> {
+    // Persist the sub-order (reserve stock + insert) with no collector — this is
+    // a direct-charge order (buyer → vendor).
+    const persisted = await this.persistSubOrder(store, items, params, {
+      collectorProcessor: null,
+    });
+
+    // Open the per-vendor hosted checkout (direct destination charge). Opened
+    // AFTER the persist tx commits (a network call must not hold a DB
+    // transaction); on failure we compensate by releasing the reservation.
+    let checkoutUrl: string;
+    let paymentRef: string;
+    try {
+      const web = loadConfig().WEB_PUBLIC_URL;
+      const res = await this.registry.get(params.processor).createCheckout({
+        reference: persisted.reference,
+        amountCents: persisted.totalCents,
+        platformFeeCents: persisted.platformFeeCents,
+        currency: "USD",
+        vendorExternalAccountId: persisted.vendorExternalAccountId,
+        buyerEmail: params.buyerEmail,
+        successUrl: `${web}/store/${store.slug}/order/${persisted.reference}?paid=1`,
+        cancelUrl: `${web}/store/${store.slug}/checkout?cancelled=1`,
+        metadata: { storefrontOrderId: persisted.orderId, vendorId: store.vendorId },
+      });
+      checkoutUrl = res.checkoutUrl;
+      paymentRef = res.paymentRef;
+    } catch (err) {
+      await this.compensate(persisted.orderId, items);
+      this.logger.error(
+        { err: `${err}`, reference: persisted.reference },
+        "storefront.checkout.payment_open_failed",
+      );
+      throw new BadRequestException({
+        message: "We couldn't start checkout. Please try again.",
+        code: "storefront_checkout_failed",
+      });
+    }
+
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE storefront_orders
+      SET payment_ref = ${paymentRef}, payment_intent_id = ${paymentRef}, updated_at = now()
+      WHERE id = ${persisted.orderId}::uuid
+    `);
+
+    return { reference: persisted.reference, checkoutUrl };
+  }
+
+  /**
+   * Reserve stock + insert ONE storefront sub-order (PENDING_PAYMENT). Shared by
+   * the direct-charge path (placeOrder) and the unified collect-then-payout path.
+   * Does NOT open any payment — the caller opens either a per-vendor charge or a
+   * single platform charge. Validates the vendor has an ACTIVE payout account up
+   * front, so an unpayable vendor is rejected before any charge is opened.
+   * `collectorProcessor` set ⇒ this is a leg of a unified cart (payout pending);
+   * null ⇒ direct charge (no vendor transfer needed).
+   */
+  private async persistSubOrder(
+    store: { vendorId: string; slug: string },
+    items: CheckoutItem[],
+    params: {
+      buyerEmail: string;
+      buyerName?: string;
+      buyerPhone?: string;
+      shipAddress: StorefrontShipAddress;
+      processor: ProcessorKey;
+      discountCode?: string;
+      shippingSpeed: string;
+      shippingCents: number;
+      serviceToken: string | null;
+      fulfillmentFeeCents: number;
+      cartGroupId?: string | null;
+    },
+    opts: { collectorProcessor: ProcessorKey | null },
+  ): Promise<{
+    orderId: string;
+    reference: string;
+    totalCents: number;
+    platformFeeCents: number;
+    vendorExternalAccountId: string;
+  }> {
     const productSubtotalCents = items.reduce((s, i) => s + i.unitRetailCents * i.qty, 0);
 
-    // Apply a discount code if supplied (vendor-owned or a marketplace code that
-    // targets this vendor). A bad code stops the order so the buyer knows.
     let discountCents = 0;
     let discountCodeId: string | null = null;
     if (params.discountCode) {
@@ -224,23 +319,22 @@ export class StorefrontCheckoutService {
     }
     const shippingCents = params.shippingCents;
     const fulfillmentFeeCents = params.fulfillmentFeeCents;
-    // Destination sales tax on the (discounted) goods — $0 unless configured.
     const taxCents = await this.tax.taxFor(
       params.shipAddress.state,
       Math.max(0, productSubtotalCents - discountCents),
     );
-    // The platform keeps shipping + fulfillment + tax (USA Errands remits the
-    // tax as facilitator); the vendor still receives the discounted goods only.
+    // Platform keeps shipping + fulfillment + tax; the vendor receives the
+    // discounted product amount (= totalCents − platformFeeCents).
     const platformFeeCents = shippingCents + fulfillmentFeeCents + taxCents;
     const totalCents =
       productSubtotalCents - discountCents + shippingCents + fulfillmentFeeCents + taxCents;
 
-    // The buyer pays through the vendor's connected account for the chosen rail.
+    // The vendor must have an ACTIVE payout account (direct charge destination,
+    // or the transfer target under unified payout). Reject up front otherwise.
     const payout = await this.activePayout(store.vendorId, params.processor);
 
-    // Reserve stock + persist the order atomically. Payment is opened AFTER the
-    // tx commits (network call must not hold a DB transaction); on failure we
-    // compensate by releasing the reservation and cancelling the order.
+    const payoutStatus = opts.collectorProcessor ? "PENDING" : "NONE";
+
     const { orderId, reference } = await this.prisma.$transaction(async (tx) => {
       const reserved = await this.reserveStock(tx, items);
       const allocByProduct = new Map(reserved.map((r) => [r.productId, r.allocations]));
@@ -248,8 +342,6 @@ export class StorefrontCheckoutService {
         Prisma.sql`SELECT nextval('storefront_order_ref_seq') AS n`,
       );
       const reference = `SF-${String(Number(refRow[0]!.n)).padStart(6, "0")}`;
-      // Persist the per-SKU allocation + line snapshot the webhook needs to
-      // build the fulfillment OrderLines without re-touching stock.
       const itemsJson = JSON.stringify(
         items.map((i) => ({
           productId: i.productId,
@@ -267,55 +359,29 @@ export class StorefrontCheckoutService {
           (reference, vendor_id, buyer_email, buyer_name, buyer_phone, ship_address,
            items, product_subtotal_cents, discount_code, discount_cents, shipping_cents,
            shipping_speed, shipping_service_token, platform_fee_cents, tax_cents,
-           total_cents, currency, processor, cart_group_id, status, created_at, updated_at)
+           total_cents, currency, processor, cart_group_id, collector_processor,
+           payout_status, status, created_at, updated_at)
         VALUES
           (${reference}, ${store.vendorId}::uuid, ${params.buyerEmail}, ${params.buyerName ?? null},
            ${params.buyerPhone ?? null}, ${JSON.stringify(params.shipAddress)}::jsonb,
            ${itemsJson}::jsonb, ${productSubtotalCents}, ${params.discountCode ?? null},
            ${discountCents}, ${shippingCents}, ${params.shippingSpeed}, ${params.serviceToken},
            ${platformFeeCents}, ${taxCents}, ${totalCents}, 'USD', ${params.processor},
-           ${params.cartGroupId ?? null}::uuid, 'PENDING_PAYMENT', now(), now())
+           ${params.cartGroupId ?? null}::uuid, ${opts.collectorProcessor},
+           ${payoutStatus}, 'PENDING_PAYMENT', now(), now())
         RETURNING id
       `);
       if (discountCodeId) await this.discounts.redeem(tx, discountCodeId);
       return { orderId: rows[0]!.id, reference };
     });
 
-    // Open the hosted checkout on the processor.
-    let checkoutUrl: string;
-    let paymentRef: string;
-    try {
-      const web = loadConfig().WEB_PUBLIC_URL;
-      const res = await this.registry.get(params.processor).createCheckout({
-        reference,
-        amountCents: totalCents,
-        platformFeeCents,
-        currency: "USD",
-        vendorExternalAccountId: payout.externalAccountId,
-        buyerEmail: params.buyerEmail,
-        successUrl: `${web}/store/${store.slug}/order/${reference}?paid=1`,
-        cancelUrl: `${web}/store/${store.slug}/checkout?cancelled=1`,
-        metadata: { storefrontOrderId: orderId, vendorId: store.vendorId },
-      });
-      checkoutUrl = res.checkoutUrl;
-      paymentRef = res.paymentRef;
-    } catch (err) {
-      // Compensate: free the reservation + cancel the order so stock isn't stuck.
-      await this.compensate(orderId, items);
-      this.logger.error({ err: `${err}`, reference }, "storefront.checkout.payment_open_failed");
-      throw new BadRequestException({
-        message: "We couldn't start checkout. Please try again.",
-        code: "storefront_checkout_failed",
-      });
-    }
-
-    await this.prisma.$executeRaw(Prisma.sql`
-      UPDATE storefront_orders
-      SET payment_ref = ${paymentRef}, payment_intent_id = ${paymentRef}, updated_at = now()
-      WHERE id = ${orderId}::uuid
-    `);
-
-    return { reference, checkoutUrl };
+    return {
+      orderId,
+      reference,
+      totalCents,
+      platformFeeCents,
+      vendorExternalAccountId: payout.externalAccountId,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -358,6 +424,7 @@ export class StorefrontCheckoutService {
       fulfillmentFeeCents,
       taxCents,
       shippingOptions: options.map(({ serviceToken: _t, ...rest }) => rest),
+      parcel: this.buildParcel(allItems),
     };
   }
 
@@ -428,6 +495,13 @@ export class StorefrontCheckoutService {
     // ship together (and, next step, pack them into one physical shipment).
     const cartGroupId = legs.length > 1 ? randomUUID() : null;
 
+    // Unified payment (flag on) — a MULTI-vendor cart is ONE platform charge; the
+    // platform pays out each vendor after it confirms. Single-vendor carts stay a
+    // direct charge (money straight to the vendor, no platform holding).
+    if (this.unifiedCartPayment && legs.length > 1 && cartGroupId) {
+      return this.openUnifiedCart(legs, input, chosen, schedule, cartGroupId);
+    }
+
     for (let i = 0; i < legs.length; i++) {
       const leg = legs[i]!;
       // Shipping is ONE delivery for the whole cart, so only the first leg
@@ -460,6 +534,143 @@ export class StorefrontCheckoutService {
       }
     }
     return { results, errors };
+  }
+
+  /**
+   * Pick the platform's collection rail for a unified cart — the account that
+   * takes the single buyer charge. Prefers Stripe, falls back to Flutterwave;
+   * both must be configured AND support platform collection. Throws a clear 400
+   * when neither is available so the cart fails loudly rather than mis-routing.
+   */
+  private platformCollector(): { key: ProcessorKey; processor: PaymentProcessor } {
+    for (const key of ["STRIPE", "FLUTTERWAVE"] as ProcessorKey[]) {
+      let proc: PaymentProcessor;
+      try {
+        proc = this.registry.get(key);
+      } catch {
+        continue; // not registered
+      }
+      if (proc.isConfigured() && proc.supportsPlatformCollection()) {
+        return { key, processor: proc };
+      }
+    }
+    throw new BadRequestException({
+      message: "One-payment checkout isn't available right now.",
+      code: "no_platform_collector",
+    });
+  }
+
+  /**
+   * Unified cart: persist every vendor sub-order (PENDING_PAYMENT, no per-vendor
+   * charge), then open ONE platform charge for the whole cart. When it confirms,
+   * the webhook marks all sub-orders paid and pays each vendor their share
+   * (StorefrontOrderService.distributeCartPayment). If persisting any leg or
+   * opening the charge fails, every already-persisted leg is compensated
+   * (reservation released, order cancelled) so no stock is stranded and the buyer
+   * is never charged for a partial cart.
+   */
+  private async openUnifiedCart(
+    legs: Array<{
+      slug: string;
+      store: { vendorId: string; slug: string };
+      items: CheckoutItem[];
+      processor: ProcessorKey;
+      discountCode?: string;
+    }>,
+    input: CrossVendorCheckoutInput,
+    chosen: BuyerShippingOption,
+    schedule: FeeSchedule,
+    cartGroupId: string,
+  ): Promise<{
+    results: Array<{ slug: string; reference: string; checkoutUrl: string }>;
+    errors: Array<{ slug: string; message: string; code?: string }>;
+  }> {
+    const collector = this.platformCollector();
+
+    const persisted: Array<{ orderId: string; totalCents: number; items: CheckoutItem[] }> = [];
+    try {
+      for (let i = 0; i < legs.length; i++) {
+        const leg = legs[i]!;
+        const carriesShipping = i === 0; // shipping charged once for the cart
+        const p = await this.persistSubOrder(
+          leg.store,
+          leg.items,
+          {
+            buyerEmail: input.buyerEmail,
+            buyerName: input.buyerName,
+            buyerPhone: input.buyerPhone,
+            shipAddress: input.shipAddress,
+            processor: leg.processor,
+            discountCode: leg.discountCode,
+            shippingSpeed: input.shippingSpeed,
+            shippingCents: carriesShipping ? chosen.costCents : 0,
+            serviceToken: carriesShipping ? chosen.serviceToken : null,
+            fulfillmentFeeCents: fulfillmentFeeForUnits(unitsOf(leg.items), schedule),
+            cartGroupId,
+          },
+          { collectorProcessor: collector.key },
+        );
+        persisted.push({ orderId: p.orderId, totalCents: p.totalCents, items: leg.items });
+      }
+    } catch (err) {
+      for (const p of persisted) await this.compensate(p.orderId, p.items);
+      const e = err as { message?: string; response?: { message?: string; code?: string } };
+      return {
+        results: [],
+        errors: [
+          {
+            slug: "cart",
+            message: e.response?.message ?? e.message ?? "We couldn't start checkout.",
+            code: e.response?.code ?? "storefront_checkout_failed",
+          },
+        ],
+      };
+    }
+
+    const cartTotalCents = persisted.reduce((s, p) => s + p.totalCents, 0);
+    let checkoutUrl: string;
+    let paymentRef: string;
+    try {
+      const web = loadConfig().WEB_PUBLIC_URL;
+      const res = await collector.processor.createPlatformCheckout({
+        reference: `CART-${cartGroupId}`,
+        amountCents: cartTotalCents,
+        currency: "USD",
+        buyerEmail: input.buyerEmail,
+        successUrl: `${web}/marketplace/checkout?paid=1`,
+        cancelUrl: `${web}/marketplace/checkout?cancelled=1`,
+        metadata: { cartGroupId },
+      });
+      checkoutUrl = res.checkoutUrl;
+      paymentRef = res.paymentRef;
+    } catch (err) {
+      for (const p of persisted) await this.compensate(p.orderId, p.items);
+      this.logger.error({ err: `${err}`, cartGroupId }, "storefront.checkout.platform_open_failed");
+      return {
+        results: [],
+        errors: [
+          {
+            slug: "cart",
+            message: "We couldn't start checkout. Please try again.",
+            code: "storefront_checkout_failed",
+          },
+        ],
+      };
+    }
+
+    // Stamp the single platform payment ref on every sub-order so the webhook +
+    // refunds resolve the whole cart from one charge.
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE storefront_orders
+      SET payment_ref = ${paymentRef}, payment_intent_id = ${paymentRef}, updated_at = now()
+      WHERE cart_group_id = ${cartGroupId}::uuid
+    `);
+
+    // ONE result → the web shows a single "Complete payment" button.
+    return {
+      results: [{ slug: "cart", reference: `CART-${cartGroupId}`, checkoutUrl }],
+      errors: [],
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -591,23 +802,24 @@ export class StorefrontCheckoutService {
     return out;
   }
 
-  /** Live Shippo estimate, collapsed to Standard/Express buyer options. */
-  private async shippingOptions(
-    items: CheckoutItem[],
-    declaredValueCents: number,
-    addr: StorefrontShipAddress,
-  ): Promise<BuyerShippingOption[]> {
-    const cfg = loadConfig();
-    const weightOz = items.reduce((s, i) => s + i.weightOz * i.qty, 0) || 1;
-
-    // Estimate one combined parcel. The old heuristic summed EVERY item's full
-    // height, which turns a few small items into an implausible tower and makes
-    // the carrier's dimensional-weight rate explode. Instead, keep the footprint
-    // at the largest item's length × width and grow height only by the volume
-    // that doesn't fit that footprint — a realistic "packed box" estimate.
-    // Dimensions are clamped to a carrier-sane max so one bad product dimension
-    // can't produce an absurd quote. The real box is measured at pack time.
+  /**
+   * Estimate ONE combined parcel from the cart. Weight is summed across items;
+   * the box footprint is the largest item's length × width and height grows only
+   * by the leftover volume (a realistic "packed box", not a tower of stacked
+   * heights). Dimensions are clamped to a carrier-sane max so one bad product
+   * dimension can't blow up the quote. NOTE: this is only an estimate — the real
+   * box is measured at pack time. If a rate looks absurd, inspect this parcel:
+   * a huge weightOz means a product's weight data is wrong (carriers bill on
+   * max(actual weight, dimensional weight), so weight dominates the price).
+   */
+  private buildParcel(items: CheckoutItem[]): {
+    weightOz: number;
+    lengthIn: number;
+    widthIn: number;
+    heightIn: number;
+  } {
     const MAX_DIM_IN = 108; // common carrier max length/girth guardrail
+    const weightOz = items.reduce((s, i) => s + i.weightOz * i.qty, 0) || 1;
     const maxLen = Math.max(1, ...items.map((i) => i.lengthIn ?? 0));
     const maxWid = Math.max(1, ...items.map((i) => i.widthIn ?? 0));
     const totalVolumeIn3 = items.reduce(
@@ -617,10 +829,18 @@ export class StorefrontCheckoutService {
     const lengthIn = Math.min(MAX_DIM_IN, Math.ceil(maxLen));
     const widthIn = Math.min(MAX_DIM_IN, Math.ceil(maxWid));
     const footprintIn2 = Math.max(1, lengthIn * widthIn);
-    const heightIn = Math.min(
-      MAX_DIM_IN,
-      Math.max(1, Math.ceil(totalVolumeIn3 / footprintIn2)),
-    );
+    const heightIn = Math.min(MAX_DIM_IN, Math.max(1, Math.ceil(totalVolumeIn3 / footprintIn2)));
+    return { weightOz: Math.ceil(weightOz), lengthIn, widthIn, heightIn };
+  }
+
+  /** Live Shippo estimate, collapsed to Standard/Express buyer options. */
+  private async shippingOptions(
+    items: CheckoutItem[],
+    declaredValueCents: number,
+    addr: StorefrontShipAddress,
+  ): Promise<BuyerShippingOption[]> {
+    const cfg = loadConfig();
+    const parcel = this.buildParcel(items);
 
     const res = await this.shippo.getRates({
       fromAddress: {
@@ -638,7 +858,7 @@ export class StorefrontCheckoutService {
         country: addr.country,
         phone: addr.phone,
       },
-      parcel: { weightOz, lengthIn, widthIn, heightIn },
+      parcel,
       declaredValueCents,
       insuranceRequested: false,
     });

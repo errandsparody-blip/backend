@@ -21,6 +21,7 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
+import { randomUUID } from "crypto";
 
 import { PrismaService } from "../../common/prisma.service";
 import type {
@@ -97,9 +98,13 @@ export class StorefrontService {
         retail_price_cents: number | null;
         category: string | null;
         tags: string[];
+        option_size: string | null;
+        option_color: string | null;
+        image_url: string | null;
       }>
     >(Prisma.sql`
-      SELECT id, status, listed, retail_price_cents, category, tags
+      SELECT id, status, listed, retail_price_cents, category, tags,
+             option_size, option_color, image_url
       FROM products
       WHERE id = ${productId}::uuid AND vendor_id = ${vendorId}::uuid
     `);
@@ -133,6 +138,14 @@ export class StorefrontService {
     const nextCategory =
       input.category === undefined ? product.category : input.category;
     const nextTags = input.tags === undefined ? product.tags : input.tags;
+    // Variant fields: undefined = keep, null = clear.
+    const nextSize = input.optionSize === undefined ? product.option_size : input.optionSize;
+    const nextColor = input.optionColor === undefined ? product.option_color : input.optionColor;
+    // Gallery: when provided, set image_urls and keep image_url (primary) in sync
+    // with the first image; when omitted, leave both untouched.
+    const setImages = input.imageUrls !== undefined;
+    const nextImageUrls = setImages ? input.imageUrls! : null;
+    const nextPrimary = setImages ? input.imageUrls![0] ?? null : product.image_url;
 
     await this.prisma.$executeRaw(Prisma.sql`
       UPDATE products
@@ -140,6 +153,9 @@ export class StorefrontService {
           retail_price_cents = ${nextRetail},
           category = ${nextCategory},
           tags = ${nextTags}::text[],
+          option_size = ${nextSize},
+          option_color = ${nextColor},
+          ${setImages ? Prisma.sql`image_urls = ${nextImageUrls}::text[], image_url = ${nextPrimary},` : Prisma.empty}
           updated_at = now()
       WHERE id = ${productId}::uuid AND vendor_id = ${vendorId}::uuid
     `);
@@ -154,6 +170,43 @@ export class StorefrontService {
     };
   }
 
+  /**
+   * Group a set of the vendor's products into ONE storefront listing (variants).
+   * Assigns them a shared variant_group_id. All must belong to the vendor. Reuses
+   * an existing group id if any selected product already has one (so adding to a
+   * group works); otherwise mints a new id. Returns the group id.
+   */
+  async groupProductsAsVariants(vendorId: string, productIds: string[]): Promise<{ variantGroupId: string }> {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; variant_group_id: string | null }>>(
+      Prisma.sql`
+        SELECT id, variant_group_id FROM products
+        WHERE vendor_id = ${vendorId}::uuid AND id IN (${Prisma.join(productIds.map((id) => Prisma.sql`${id}::uuid`))})
+      `,
+    );
+    if (rows.length !== productIds.length) {
+      throw new BadRequestException({
+        message: "One or more products weren't found for your account.",
+        code: "product_not_found",
+      });
+    }
+    const existing = rows.find((r) => r.variant_group_id)?.variant_group_id;
+    const groupId = existing ?? randomUUID();
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE products SET variant_group_id = ${groupId}::uuid, updated_at = now()
+      WHERE vendor_id = ${vendorId}::uuid
+        AND id IN (${Prisma.join(productIds.map((id) => Prisma.sql`${id}::uuid`))})
+    `);
+    return { variantGroupId: groupId };
+  }
+
+  /** Remove one product from its variant group (it becomes a standalone listing). */
+  async ungroupProduct(vendorId: string, productId: string): Promise<void> {
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE products SET variant_group_id = NULL, updated_at = now()
+      WHERE id = ${productId}::uuid AND vendor_id = ${vendorId}::uuid
+    `);
+  }
+
   /** Vendor's products with their storefront listing state (for management UI). */
   async listVendorProducts(vendorId: string): Promise<
     Array<{
@@ -164,6 +217,10 @@ export class StorefrontService {
       listed: boolean;
       retailPriceCents: number | null;
       category: string | null;
+      optionSize: string | null;
+      optionColor: string | null;
+      variantGroupId: string | null;
+      imageUrl: string | null;
     }>
   > {
     const rows = await this.prisma.$queryRaw<
@@ -175,9 +232,14 @@ export class StorefrontService {
         listed: boolean;
         retail_price_cents: number | null;
         category: string | null;
+        option_size: string | null;
+        option_color: string | null;
+        variant_group_id: string | null;
+        image_url: string | null;
       }>
     >(Prisma.sql`
-      SELECT id, code, name, status, listed, retail_price_cents, category
+      SELECT id, code, name, status, listed, retail_price_cents, category,
+             option_size, option_color, variant_group_id, image_url
       FROM products
       WHERE vendor_id = ${vendorId}::uuid AND status = 'ACTIVE'
       ORDER BY created_at DESC
@@ -191,6 +253,10 @@ export class StorefrontService {
       listed: r.listed,
       retailPriceCents: r.retail_price_cents,
       category: r.category,
+      optionSize: r.option_size,
+      optionColor: r.option_color,
+      variantGroupId: r.variant_group_id,
+      imageUrl: r.image_url,
     }));
   }
 

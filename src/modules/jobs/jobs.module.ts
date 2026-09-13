@@ -11,6 +11,7 @@ import { ReassessmentJob } from "./reassessment.job";
 import { LedgerReconciliationJob } from "./reconcile.job";
 import { StorageBillingJob } from "./storage-billing.job";
 import { StorefrontAbandonedSweepJob } from "./storefront-abandoned-sweep.job";
+import { StorefrontPayoutRetryJob } from "./storefront-payout-retry.job";
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { StorefrontAbandonedSweepJob } from "./storefront-abandoned-sweep.job";
     ReassessmentJob,
     HeldOrderSweepJob,
     StorefrontAbandonedSweepJob,
+    StorefrontPayoutRetryJob,
   ],
 })
 export class JobsModule {}

@@ -44,7 +44,17 @@ function makeDeps(opts: { rates: unknown[]; twoSpeeds?: boolean }) {
   const createCheckout = jest
     .fn()
     .mockResolvedValue({ checkoutUrl: "https://pay/x", paymentRef: "pi_1" });
-  const registry = { get: jest.fn().mockReturnValue({ createCheckout }) };
+  const createPlatformCheckout = jest
+    .fn()
+    .mockResolvedValue({ checkoutUrl: "https://pay/platform", paymentRef: "pi_cart" });
+  const registry = {
+    get: jest.fn().mockReturnValue({
+      createCheckout,
+      createPlatformCheckout,
+      isConfigured: () => true,
+      supportsPlatformCollection: () => true,
+    }),
+  };
 
   const executed: string[] = [];
   const prisma = {
@@ -95,7 +105,7 @@ function makeDeps(opts: { rates: unknown[]; twoSpeeds?: boolean }) {
     discounts as never,
     tax as never,
   );
-  return { service, createCheckout, executed, prisma, discounts, tax, shippo };
+  return { service, createCheckout, createPlatformCheckout, executed, prisma, discounts, tax, shippo };
 }
 
 const STD_ONLY = [
@@ -162,6 +172,28 @@ describe("StorefrontCheckoutService.createCrossVendorOrder", () => {
     // 450. So the shipping leg = 800 + 300 = 1100; the other = 450.
     const fees = createCheckout.mock.calls.map((c) => (c[0] as { platformFeeCents: number }).platformFeeCents).sort((a, b) => a - b);
     expect(fees).toEqual([450, 1100]);
+  });
+
+  it("unified mode: opens ONE platform charge and returns a single cart result", async () => {
+    const OLD = process.env.STOREFRONT_UNIFIED_CART_PAYMENT;
+    process.env.STOREFRONT_UNIFIED_CART_PAYMENT = "true";
+    try {
+      const { service, createPlatformCheckout, createCheckout } = makeDeps({ rates: TWO });
+      const res = await service.createCrossVendorOrder(shared);
+      expect(res.errors).toHaveLength(0);
+      // One result for the whole cart (single "Complete payment" button).
+      expect(res.results).toHaveLength(1);
+      expect(res.results[0]!.slug).toBe("cart");
+      expect(res.results[0]!.reference).toMatch(/^CART-/);
+      // Exactly one platform charge; no per-vendor destination charges.
+      expect(createPlatformCheckout).toHaveBeenCalledTimes(1);
+      expect(createCheckout).not.toHaveBeenCalled();
+      // Charge total = Σ sub-order totals: acme 3600 (2500+800+300) + beta 5450
+      // (5000+0+450) = 9050.
+      expect((createPlatformCheckout.mock.calls[0][0] as { amountCents: number }).amountCents).toBe(9050);
+    } finally {
+      process.env.STOREFRONT_UNIFIED_CART_PAYMENT = OLD;
+    }
   });
 
   it("reports a leg whose payment fails without dropping the others", async () => {

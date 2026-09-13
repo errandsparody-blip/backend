@@ -1846,6 +1846,11 @@ model VendorPayoutAccount {
 
   processor         String   // "STRIPE" | "FLUTTERWAVE" (legacy rows may be "PAYSTACK")
   externalAccountId String?  @map("external_account_id") // acct_… | subaccount id
+  // Flutterwave bank details (Migration 0068) — needed to PAY OUT via the
+  // Transfers API under collect-then-payout (a subaccount only receives at
+  // charge-time splits; a transfer targets a bank account). NULL for Stripe.
+  bankCode          String?  @map("bank_code")
+  accountNumber     String?  @map("account_number")
   status            String   @default("PENDING") // PENDING | ACTIVE | RESTRICTED | DISABLED
   detailsSubmitted  Boolean  @default(false) @map("details_submitted")
   chargesEnabled    Boolean  @default(false) @map("charges_enabled")
@@ -1907,6 +1912,15 @@ model StorefrontOrder {
   trackingNumber      String?  @map("tracking_number")
   carrier             String?
   shippedAt           DateTime? @map("shipped_at")
+
+  // Unified cart payment (Migration 0067). When the platform collects ONE charge
+  // for a multi-vendor cart, each sub-order is paid out to its vendor by a
+  // transfer. collectorProcessor = the rail that took the single charge (NULL for
+  // ordinary direct-charge orders); payoutStatus tracks the vendor transfer
+  // (NONE | PENDING | PAID | FAILED); payoutTransferId is the processor id.
+  collectorProcessor  String?  @map("collector_processor")
+  payoutStatus        String   @default("NONE") @map("payout_status")
+  payoutTransferId    String?  @map("payout_transfer_id")
 
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
