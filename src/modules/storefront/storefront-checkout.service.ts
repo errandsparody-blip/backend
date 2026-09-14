@@ -25,7 +25,7 @@ import { randomUUID } from "crypto";
 
 import { loadConfig } from "../../common/config";
 import {
-  DEFAULT_FULFILLMENT_MAX_CENTS,
+  fulfillmentFeeForUnits,
   loadFeeSchedule,
   type FeeSchedule,
 } from "../../common/fees";
@@ -46,25 +46,6 @@ import { PaymentProcessorRegistry } from "../payments/payment-processor.registry
 import { bucketRates, type BuyerShippingOption } from "./shipping-options";
 import { StorefrontPublicService } from "./storefront-public.service";
 import { StorefrontTaxService } from "./storefront-tax.service";
-
-/**
- * Fulfillment fee for one vendor's order = the SAME schedule normal (vendor /
- * integration) orders use: a base for the first unit + a per-additional-unit
- * charge, capped. So a vendor with 3 items pays base + 2×perUnit — not a flat
- * fee. Each vendor in a cross-vendor cart is billed for their own units (their
- * goods are picked + packed separately); only shipping is one charge for the
- * whole cart.
- */
-function fulfillmentFeeForUnits(units: number, schedule: FeeSchedule): number {
-  const { baseCents, perAdditionalUnitCents } = schedule.fulfillment;
-  const additional = Math.max(0, units - 1);
-  const uncapped = baseCents + additional * perAdditionalUnitCents;
-  const maxCents =
-    typeof schedule.fulfillment.maxCents === "number" && schedule.fulfillment.maxCents > 0
-      ? schedule.fulfillment.maxCents
-      : DEFAULT_FULFILLMENT_MAX_CENTS;
-  return Math.min(uncapped, maxCents);
-}
 
 const unitsOf = (items: CheckoutItem[]): number => items.reduce((s, i) => s + i.qty, 0);
 
@@ -318,16 +299,18 @@ export class StorefrontCheckoutService {
       discountCodeId = disc.id;
     }
     const shippingCents = params.shippingCents;
-    const fulfillmentFeeCents = params.fulfillmentFeeCents;
     const taxCents = await this.tax.taxFor(
       params.shipAddress.state,
       Math.max(0, productSubtotalCents - discountCents),
     );
-    // Platform keeps shipping + fulfillment + tax; the vendor receives the
-    // discounted product amount (= totalCents − platformFeeCents).
-    const platformFeeCents = shippingCents + fulfillmentFeeCents + taxCents;
+    // Money model: the buyer pays product + delivery (+ tax) only — NOT
+    // fulfillment. The platform keeps delivery + tax; the vendor receives their
+    // full discounted product amount (= totalCents − platformFeeCents). The
+    // fulfillment fee is charged to the VENDOR's wallet at fulfillment time
+    // (the same pattern as a normal order), not added here.
+    const platformFeeCents = shippingCents + taxCents;
     const totalCents =
-      productSubtotalCents - discountCents + shippingCents + fulfillmentFeeCents + taxCents;
+      productSubtotalCents - discountCents + shippingCents + taxCents;
 
     // The vendor must have an ACTIVE payout account (direct charge destination,
     // or the transfer target under unified payout). Reject up front otherwise.

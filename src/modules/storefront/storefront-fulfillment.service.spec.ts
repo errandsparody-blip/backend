@@ -45,6 +45,15 @@ function storefrontOrder(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// Fee schedule: base 450 + 100/additional unit, cap 1099. 3 units → 450 + 2*100 = 650.
+const FEE_SCHEDULE = {
+  fulfillment: { baseCents: 450, perAdditionalUnitCents: 100, maxCents: 1099 },
+  shippingMarkupBps: 1000,
+  onboarding: {},
+  monthlyStorage: {},
+  returnsHandlingCents: 0,
+};
+
 function makeService(order: Record<string, unknown> | null) {
   const orderCreate = jest.fn().mockResolvedValue({ id: "ord-f" });
   const lineCreate = jest.fn().mockResolvedValue({});
@@ -54,6 +63,8 @@ function makeService(order: Record<string, unknown> | null) {
       if (sqlText(q).includes("FROM storefront_orders")) return order ? [order] : [];
       return [];
     }),
+    configuration: { findUnique: jest.fn(async () => ({ key: "fee_schedule", value: FEE_SCHEDULE })) },
+    vendor: { findUnique: jest.fn(async () => ({ businessName: "Vendor One" })) },
     $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) =>
       cb({
         order: { create: orderCreate },
@@ -63,25 +74,42 @@ function makeService(order: Record<string, unknown> | null) {
       }),
     ),
   };
-  const service = new StorefrontFulfillmentService(prisma as never);
-  return { service, orderCreate, lineCreate, movementCreate };
+  const walletDebit = jest.fn().mockResolvedValue({ entry: {}, balanceAfterCents: 0 });
+  const wallet = { debit: walletDebit };
+  const opsSend = jest.fn().mockResolvedValue(undefined);
+  const opsAlerts = { send: opsSend };
+  const service = new StorefrontFulfillmentService(
+    prisma as never,
+    wallet as never,
+    opsAlerts as never,
+  );
+  return { service, orderCreate, lineCreate, movementCreate, walletDebit, opsSend };
 }
 
 describe("StorefrontFulfillmentService.createForPaidOrder", () => {
-  it("creates a PENDING_PACKING order + a line per SKU allocation (no vendor charge)", async () => {
-    const { service, orderCreate, lineCreate, movementCreate } = makeService(storefrontOrder());
+  it("creates a PENDING_PACKING order, charges the vendor wallet the fulfillment fee, and lines per SKU", async () => {
+    const { service, orderCreate, lineCreate, movementCreate, walletDebit } = makeService(storefrontOrder());
     const id = await service.createForPaidOrder("so1");
     expect(id).toBe("ord-f");
 
     const data = orderCreate.mock.calls[0][0].data;
     expect(data.source).toBe("STOREFRONT");
     expect(data.status).toBe("PENDING_PACKING");
-    expect(data.fulfillmentFeeCents).toBe(0);
-    expect(data.totalChargedCents).toBe(0);
+    // 3 units → base 450 + 2*100 = 650. Buyer never paid it; vendor is charged.
+    expect(data.fulfillmentFeeCents).toBe(650);
+    expect(data.totalChargedCents).toBe(650);
+    expect(data.shippingFeeCents).toBe(0); // buyer funded delivery
     expect(data.itemsDeclaredValueCents).toBe(3000); // 1000 * (2 + 1)
     expect(data.estimatedShippingMinCents).toBe(800);
     expect(data.sourcePayload.paidTotalCents).toBe(3800);
     expect(data.sourcePayload.shippingSpeed).toBe("STANDARD");
+
+    // Vendor wallet debited the fulfillment fee (same rail as a normal order).
+    expect(walletDebit).toHaveBeenCalledTimes(1);
+    const debitArgs = walletDebit.mock.calls[0][0];
+    expect(debitArgs.vendorId).toBe("v1");
+    expect(debitArgs.amountCents).toBe(650);
+    expect(debitArgs.type).toBe("FULFILLMENT");
 
     // Two allocations → two lines + two RESERVE movements.
     expect(lineCreate).toHaveBeenCalledTimes(2);

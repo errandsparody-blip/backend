@@ -77,6 +77,22 @@ export const DEFAULT_SHIPPING_MARKUP_BPS = 1000; // 10.00%
 /** Default fulfillment-fee cap when the config row predates the field. */
 export const DEFAULT_FULFILLMENT_MAX_CENTS = 1099; // $10.99
 
+/**
+ * Fulfillment fee for one order given its unit count = base for the first unit +
+ * per-additional-unit, capped. Shared so every path (normal orders, storefront
+ * fulfillment) charges the vendor the SAME amount for the same units.
+ */
+export function fulfillmentFeeForUnits(units: number, schedule: FeeSchedule): number {
+  const { baseCents, perAdditionalUnitCents } = schedule.fulfillment;
+  const additional = Math.max(0, units - 1);
+  const uncapped = baseCents + additional * perAdditionalUnitCents;
+  const maxCents =
+    typeof schedule.fulfillment.maxCents === "number" && schedule.fulfillment.maxCents > 0
+      ? schedule.fulfillment.maxCents
+      : DEFAULT_FULFILLMENT_MAX_CENTS;
+  return Math.min(uncapped, maxCents);
+}
+
 export type DeclaredBoxCounts = Partial<Record<StorageTier, number>>;
 
 /**

@@ -1341,6 +1341,51 @@ export function storefrontRefundTemplate(args: {
 }
 
 /**
+ * Buyer order confirmation + receipt (marketplace). Sent when payment is
+ * confirmed. Lists each store's sub-order and the amount paid — the buyer's
+ * proof of purchase. A cart may have several sub-orders (one per store); a
+ * single-store order passes one.
+ */
+export function storefrontOrderConfirmedTemplate(args: {
+  buyerName?: string | null;
+  orders: Array<{ reference: string; storeName?: string | null; totalCents: number }>;
+  grandTotalCents: number;
+}): RenderedEmail {
+  const hi = args.buyerName ? `Hi ${escape(args.buyerName)},` : "Hi there,";
+  const money = (c: number) => `$${(c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const rows = args.orders
+    .map(
+      (o) =>
+        `<tr><td style="padding:6px 0;color:#3A3A3A;">${escape(o.storeName ?? "Order")} · <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#777270;">${escape(o.reference)}</span></td>` +
+        `<td style="padding:6px 0;text-align:right;color:#0A0A0A;">${money(o.totalCents)}</td></tr>`,
+    )
+    .join("");
+  const refList = args.orders.map((o) => o.reference).join(", ");
+  return {
+    subject: `Your USA Errands order is confirmed (${refList})`,
+    html: shell({
+      eyebrow: "  Order confirmed",
+      title: "Thanks — your payment went through",
+      bodyHtml:
+        `<p style="margin:0 0 12px 0;">${hi}</p>` +
+        `<p style="margin:0 0 12px 0;">We've received your payment and your order is confirmed. Here's your receipt:</p>` +
+        `<table style="width:100%;border-collapse:collapse;margin:8px 0 4px 0;">${rows}` +
+        `<tr><td style="padding:10px 0 0 0;border-top:1px solid #E2DFD7;font-weight:600;color:#0A0A0A;">Total paid</td>` +
+        `<td style="padding:10px 0 0 0;border-top:1px solid #E2DFD7;text-align:right;font-weight:600;color:#0A0A0A;">${money(args.grandTotalCents)}</td></tr></table>` +
+        `<p style="margin:16px 0 12px 0;">Your delivery is included. We'll email you tracking as soon as it ships.</p>` +
+        `<p style="margin:16px 0 0 0;color:#9C9892;font-size:13px;">— The USA Errands team</p>`,
+    }),
+    text:
+      `${args.buyerName ? `Hi ${args.buyerName},` : "Hi there,"}\n\n` +
+      `We've received your payment and your order is confirmed. Receipt:\n\n` +
+      args.orders.map((o) => `  ${o.storeName ?? "Order"} · ${o.reference}: ${money(o.totalCents)}`).join("\n") +
+      `\n\nTotal paid: ${money(args.grandTotalCents)}\n\n` +
+      `Your delivery is included. We'll email you tracking as soon as it ships.\n\n` +
+      `— The USA Errands team`,
+  };
+}
+
+/**
  * Buyer account — passwordless sign-in link (Migration 0060).
  */
 export function buyerLoginTemplate(args: { link: string }): RenderedEmail {

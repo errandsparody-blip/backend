@@ -19,7 +19,7 @@ import { Prisma } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
 import { EmailService } from "../email/email.service";
-import { storefrontRefundTemplate } from "../email/email-templates";
+import { storefrontOrderConfirmedTemplate, storefrontRefundTemplate } from "../email/email-templates";
 
 import type { ParsedPaymentEvent, ProcessorKey } from "../payments/payment-processor.interface";
 import { PaymentProcessorRegistry } from "../payments/payment-processor.registry";
@@ -32,6 +32,9 @@ interface OrderRow {
   total_cents: number;
   currency: string;
   items: Array<{ productId: string; qty: number }>;
+  buyer_email: string;
+  buyer_name: string | null;
+  store_name: string | null;
 }
 
 export interface MarkPaidResult {
@@ -282,6 +285,23 @@ export class StorefrontOrderService {
 
     this.logger.log({ reference: order.reference }, "storefront.order.paid");
 
+    // Buyer confirmation + receipt (best-effort; idempotent per order).
+    const confirm = storefrontOrderConfirmedTemplate({
+      buyerName: order.buyer_name,
+      orders: [{ reference: order.reference, storeName: order.store_name, totalCents: order.total_cents }],
+      grandTotalCents: order.total_cents,
+    });
+    await this.email
+      .send({
+        to: order.buyer_email,
+        subject: confirm.subject,
+        html: confirm.html,
+        text: confirm.text,
+        type: "storefront.order_confirmed",
+        idempotencyKey: `storefront_confirmed:${order.reference}`,
+      })
+      .catch(() => undefined);
+
     // Bridge into the fulfillment pipeline (its own transaction; idempotent).
     try {
       await this.fulfillment.createForPaidOrder(order.id);
@@ -321,13 +341,20 @@ export class StorefrontOrderService {
         vendor_id: string;
         processor: string;
         payout_status: string;
+        buyer_email: string;
+        buyer_name: string | null;
+        store_name: string | null;
       }>
     >(Prisma.sql`
-      SELECT id, reference, status, total_cents, platform_fee_cents, currency,
-             vendor_id, processor, payout_status
-      FROM storefront_orders
-      WHERE cart_group_id = ${cartGroupId}::uuid
-      ORDER BY created_at ASC
+      SELECT so.id, so.reference, so.status, so.total_cents, so.platform_fee_cents, so.currency,
+             so.vendor_id, so.processor, so.payout_status,
+             so.buyer_email, so.buyer_name,
+             COALESCE(vs.display_name, v.business_name) AS store_name
+      FROM storefront_orders so
+      JOIN vendors v ON v.id = so.vendor_id
+      LEFT JOIN vendor_storefronts vs ON vs.vendor_id = so.vendor_id
+      WHERE so.cart_group_id = ${cartGroupId}::uuid
+      ORDER BY so.created_at ASC
     `);
     if (subs.length === 0) {
       this.logger.warn({ cartGroupId }, "storefront.webhook.cart_not_found");
@@ -373,6 +400,25 @@ export class StorefrontOrderService {
         this.logger.error({ err: `${err}`, reference: o.reference }, "storefront.cart.payout_failed"),
       );
     }
+
+    // One buyer confirmation + receipt for the whole cart (best-effort;
+    // idempotent per cart group).
+    const grandTotalCents = subs.reduce((s, o) => s + o.total_cents, 0);
+    const confirm = storefrontOrderConfirmedTemplate({
+      buyerName: subs[0]!.buyer_name,
+      orders: subs.map((o) => ({ reference: o.reference, storeName: o.store_name, totalCents: o.total_cents })),
+      grandTotalCents,
+    });
+    await this.email
+      .send({
+        to: subs[0]!.buyer_email,
+        subject: confirm.subject,
+        html: confirm.html,
+        text: confirm.text,
+        type: "storefront.order_confirmed",
+        idempotencyKey: `storefront_confirmed:CART-${cartGroupId}`,
+      })
+      .catch(() => undefined);
 
     this.logger.log({ cartGroupId, subOrders: subs.length }, "storefront.cart.paid_distributed");
     return { handled: true, reference: `CART-${cartGroupId}` };
@@ -585,11 +631,15 @@ export class StorefrontOrderService {
   private async findOrder(event: ParsedPaymentEvent): Promise<OrderRow | null> {
     // Prefer the processor payment ref; fall back to the SF order reference.
     const rows = await this.prisma.$queryRaw<OrderRow[]>(Prisma.sql`
-      SELECT id, reference, status, total_cents, currency, items
-      FROM storefront_orders
-      WHERE (${event.paymentRef}::text IS NOT NULL AND payment_ref = ${event.paymentRef})
-         OR (${event.reference}::text IS NOT NULL AND reference = ${event.reference})
-      ORDER BY created_at DESC
+      SELECT so.id, so.reference, so.status, so.total_cents, so.currency, so.items,
+             so.buyer_email, so.buyer_name,
+             COALESCE(vs.display_name, v.business_name) AS store_name
+      FROM storefront_orders so
+      JOIN vendors v ON v.id = so.vendor_id
+      LEFT JOIN vendor_storefronts vs ON vs.vendor_id = so.vendor_id
+      WHERE (${event.paymentRef}::text IS NOT NULL AND so.payment_ref = ${event.paymentRef})
+         OR (${event.reference}::text IS NOT NULL AND so.reference = ${event.reference})
+      ORDER BY so.created_at DESC
       LIMIT 1
     `);
     return rows[0] ?? null;
