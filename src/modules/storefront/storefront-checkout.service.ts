@@ -538,12 +538,13 @@ export class StorefrontCheckoutService {
 
   /**
    * Pick the platform's collection rail for a unified cart — the account that
-   * takes the single buyer charge. Prefers Stripe, falls back to Flutterwave;
+   * takes the single buyer charge. Prefers Flutterwave (this marketplace's
+   * primary rail — local cards, mobile money, etc.), falling back to Stripe;
    * both must be configured AND support platform collection. Throws a clear 400
    * when neither is available so the cart fails loudly rather than mis-routing.
    */
   private platformCollector(): { key: ProcessorKey; processor: PaymentProcessor } {
-    for (const key of ["STRIPE", "FLUTTERWAVE"] as ProcessorKey[]) {
+    for (const key of ["FLUTTERWAVE", "STRIPE"] as ProcessorKey[]) {
       let proc: PaymentProcessor;
       try {
         proc = this.registry.get(key);
