@@ -6,6 +6,7 @@
  *   POST /v1/admin/storefront/orders/:reference/refund      { amountCents? }
  *   GET  /v1/admin/storefront/orders/payouts/failed         — unified-cart payout failures
  *   POST /v1/admin/storefront/orders/:reference/payout/retry
+ *   POST /v1/admin/storefront/orders/reservations/sweep      { maxAgeMinutes? } — release abandoned-cart stock now
  */
 import {
   Body,
@@ -25,6 +26,7 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 
+import { StorefrontCheckoutService } from "./storefront-checkout.service";
 import { StorefrontOrderService } from "./storefront-order.service";
 
 const refundSchema = z.object({
@@ -32,10 +34,21 @@ const refundSchema = z.object({
 });
 type RefundInput = z.infer<typeof refundSchema>;
 
+// Manual abandoned-cart sweep. The floor of 5 minutes stops an operator from
+// releasing stock out from under a buyer who is mid-payment on the hosted
+// checkout page (a redirect that legitimately takes a couple of minutes).
+const sweepSchema = z.object({
+  maxAgeMinutes: z.number().int().min(5).max(1440).optional(),
+});
+type SweepInput = z.infer<typeof sweepSchema>;
+
 @Controller({ path: "admin/storefront/orders", version: "1" })
 @Roles(Role.SUPER_ADMIN, Role.FINANCE_ADMIN, Role.WAREHOUSE_OPERATOR)
 export class AdminStorefrontOrderController {
-  constructor(private readonly orders: StorefrontOrderService) {}
+  constructor(
+    private readonly orders: StorefrontOrderService,
+    private readonly checkout: StorefrontCheckoutService,
+  ) {}
 
   @Get()
   list(@Query("status") status?: string) {
@@ -46,6 +59,21 @@ export class AdminStorefrontOrderController {
   @Get("payouts/failed")
   failedPayouts() {
     return this.orders.listFailedPayouts();
+  }
+
+  /**
+   * Release stock held by abandoned (still-unpaid) checkouts right now, instead
+   * of waiting for the 5-minute background sweep. Handy after a burst of test
+   * checkouts leaves a product hidden from the storefront (available − reserved
+   * hit zero). Returns how many orders were released.
+   */
+  @Post("reservations/sweep")
+  @HttpCode(HttpStatus.OK)
+  async sweepReservations(
+    @Body(new ZodValidationPipe(sweepSchema)) body: SweepInput,
+  ): Promise<{ released: number }> {
+    const released = await this.checkout.sweepAbandonedReservations(body.maxAgeMinutes ?? 20);
+    return { released };
   }
 
   /** Retry a failed vendor payout (finance-gated — it moves money). */
