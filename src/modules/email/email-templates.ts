@@ -1386,6 +1386,33 @@ export function storefrontOrderConfirmedTemplate(args: {
 }
 
 /**
+ * Vendor "you made a sale" — sent to the vendor's active users when a paid
+ * marketplace/storefront order lands in their fulfillment queue.
+ */
+export function storefrontVendorSaleTemplate(args: {
+  businessName: string;
+  orderRef: string;
+  orderId: string;
+  units: number;
+}): RenderedEmail {
+  const items = `${args.units} item${args.units === 1 ? "" : "s"}`;
+  return {
+    subject: `New sale — order ${args.orderRef}`,
+    html: shell({
+      eyebrow: "  New sale",
+      title: "You made a sale 🎉",
+      bodyHtml:
+        `<p style="margin:0 0 12px 0;">Hi ${escape(args.businessName)}, you have a new order <strong>${escape(args.orderRef)}</strong> for <strong>${items}</strong>.</p>` +
+        `<p style="margin:0 0 12px 0;">It's in your fulfillment queue now — open your dashboard to pack and ship it. Your payout is handled automatically once it's confirmed.</p>`,
+      cta: { label: "View order", href: `${cfg.WEB_PUBLIC_URL}/orders/${encodeURIComponent(args.orderId)}` },
+    }),
+    text:
+      `You made a sale — order ${args.orderRef} for ${items}.\n\n` +
+      `It's in your fulfillment queue. View: ${cfg.WEB_PUBLIC_URL}/orders/${args.orderId}`,
+  };
+}
+
+/**
  * Buyer account — passwordless sign-in link (Migration 0060).
  */
 export function buyerLoginTemplate(args: { link: string }): RenderedEmail {

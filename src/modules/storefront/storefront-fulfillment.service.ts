@@ -27,7 +27,8 @@ import type { OrderStatus } from "@prisma/client";
 
 import { fulfillmentFeeForUnits, loadFeeSchedule } from "../../common/fees";
 import { PrismaService } from "../../common/prisma.service";
-import { opsNewOrderTemplate } from "../email/email-templates";
+import { opsNewOrderTemplate, storefrontVendorSaleTemplate } from "../email/email-templates";
+import { NotificationService } from "../notifications/notification.service";
 import { OpsAlertService } from "../notifications/ops-alert.service";
 import { WalletService } from "../wallet/wallet.service";
 
@@ -74,6 +75,7 @@ export class StorefrontFulfillmentService {
     private readonly prisma: PrismaService,
     private readonly wallet: WalletService,
     private readonly opsAlerts: OpsAlertService,
+    private readonly notifications: NotificationService,
   ) {}
 
   /**
@@ -253,6 +255,23 @@ export class StorefrontFulfillmentService {
           text: tpl.text,
           idempotencyKey: `ops:order:new:${orderId}`,
           href: `/admin/orders/${orderId}`,
+        });
+
+        // Notify the VENDOR they made a sale — in-app notification + email to
+        // their active users (best-effort; never blocks the order).
+        const sale = storefrontVendorSaleTemplate({
+          businessName: vendor?.businessName ?? "there",
+          orderRef: so.reference,
+          orderId,
+          units,
+        });
+        await this.notifications.emit({
+          vendorId: so.vendor_id,
+          type: "storefront.sale",
+          title: "You made a sale",
+          body: `Order ${so.reference} — ${units} item${units === 1 ? "" : "s"} to fulfil.`,
+          href: `/orders/${orderId}`,
+          email: { subject: sale.subject, html: sale.html, text: sale.text },
         });
       } catch {
         /* fire-and-forget */

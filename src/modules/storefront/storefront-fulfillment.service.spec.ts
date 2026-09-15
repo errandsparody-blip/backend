@@ -78,12 +78,15 @@ function makeService(order: Record<string, unknown> | null) {
   const wallet = { debit: walletDebit };
   const opsSend = jest.fn().mockResolvedValue(undefined);
   const opsAlerts = { send: opsSend };
+  const notifyEmit = jest.fn().mockResolvedValue(undefined);
+  const notifications = { emit: notifyEmit };
   const service = new StorefrontFulfillmentService(
     prisma as never,
     wallet as never,
     opsAlerts as never,
+    notifications as never,
   );
-  return { service, orderCreate, lineCreate, movementCreate, walletDebit, opsSend };
+  return { service, orderCreate, lineCreate, movementCreate, walletDebit, opsSend, notifyEmit };
 }
 
 describe("StorefrontFulfillmentService.createForPaidOrder", () => {
