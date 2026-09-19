@@ -1,9 +1,10 @@
 /**
  * Vendor discount codes (Migration 0059, Layer 8).
  *
- *   POST   /v1/storefront/discounts        — create a code (this vendor's goods)
- *   GET    /v1/storefront/discounts        — list this vendor's codes
- *   DELETE /v1/storefront/discounts/:id    — deactivate a code
+ *   POST   /v1/storefront/discounts            — create a code (this vendor's goods)
+ *   GET    /v1/storefront/discounts            — list this vendor's codes
+ *   PATCH  /v1/storefront/discounts/:id/active — activate / deactivate a code
+ *   DELETE /v1/storefront/discounts/:id        — permanently delete a code
  */
 import {
   Body,
@@ -14,6 +15,7 @@ import {
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   UseGuards,
 } from "@nestjs/common";
@@ -26,7 +28,9 @@ import { TenantGuard } from "../../common/guards/tenant.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import {
   createVendorDiscountSchema,
+  setDiscountActiveSchema,
   type CreateVendorDiscountInput,
+  type SetDiscountActiveInput,
 } from "../../common/schemas/discount.schema";
 
 import { DiscountService } from "./discount.service";
@@ -51,13 +55,24 @@ export class DiscountController {
     return this.discounts.listVendorCodes(user.vendorId!);
   }
 
+  @Patch(":id/active")
+  @HttpCode(HttpStatus.OK)
+  async setActive(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(setDiscountActiveSchema)) body: SetDiscountActiveInput,
+  ) {
+    await this.discounts.setVendorCodeActive(user.vendorId!, id, body.active);
+    return { ok: true };
+  }
+
   @Delete(":id")
   @HttpCode(HttpStatus.OK)
-  async deactivate(
+  async remove(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id", new ParseUUIDPipe()) id: string,
   ) {
-    await this.discounts.deactivateVendorCode(user.vendorId!, id);
+    await this.discounts.deleteVendorCode(user.vendorId!, id);
     return { ok: true };
   }
 }

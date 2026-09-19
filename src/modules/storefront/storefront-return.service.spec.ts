@@ -8,7 +8,16 @@ function sqlText(q: { strings?: readonly string[]; sql?: string }): string {
 }
 
 function make(opts: {
-  order?: { id: string; status: string; buyer_name: string | null; store_name: string | null; business_name: string } | null;
+  order?: {
+    id: string;
+    status: string;
+    buyer_name: string | null;
+    store_name: string | null;
+    business_name: string;
+    shipped_at?: Date | null;
+    returns_allowed?: boolean | null;
+    return_window_days?: number | null;
+  } | null;
   request?: {
     status: string;
     reference: string;
@@ -67,6 +76,44 @@ describe("StorefrontReturnService.requestReturn", () => {
   it("404s an order that isn't the buyer's", async () => {
     const { service } = make({ order: null });
     await expect(service.requestReturn("b@x.com", "SF-1", "x")).rejects.toBeTruthy();
+  });
+
+  it("rejects a return when the store doesn't accept returns", async () => {
+    const { service } = make({
+      order: {
+        id: "o1", status: "SHIPPED", buyer_name: "B", store_name: "Acme", business_name: "Acme LLC",
+        returns_allowed: false,
+      },
+    });
+    await expect(service.requestReturn("b@x.com", "SF-1", "x")).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
+
+  it("rejects a return past the vendor's window", async () => {
+    const shippedLongAgo = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+    const { service } = make({
+      order: {
+        id: "o1", status: "SHIPPED", buyer_name: "B", store_name: "Acme", business_name: "Acme LLC",
+        returns_allowed: true, return_window_days: 30, shipped_at: shippedLongAgo,
+      },
+    });
+    await expect(service.requestReturn("b@x.com", "SF-1", "x")).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
+
+  it("allows a return inside the vendor's window", async () => {
+    const shippedRecently = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const { service, executed } = make({
+      order: {
+        id: "o1", status: "SHIPPED", buyer_name: "B", store_name: "Acme", business_name: "Acme LLC",
+        returns_allowed: true, return_window_days: 30, shipped_at: shippedRecently,
+      },
+    });
+    const res = await service.requestReturn("b@x.com", "SF-000001", "Wrong size");
+    expect(res.status).toBe("REQUESTED");
+    expect(executed.some((s) => s.includes("INSERT INTO storefront_return_requests"))).toBe(true);
   });
 });
 

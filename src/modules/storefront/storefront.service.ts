@@ -53,6 +53,8 @@ export interface StorefrontSettings {
   accentColor: string | null;
   about: string | null;
   currency: string;
+  returnsAllowed: boolean;
+  returnWindowDays: number;
   hasActivePayoutAccount: boolean;
 }
 
@@ -293,9 +295,12 @@ export class StorefrontService {
         accent_color: string | null;
         about: string | null;
         currency: string;
+        returns_allowed: boolean | null;
+        return_window_days: number | null;
       }>
     >(Prisma.sql`
-      SELECT display_name, logo_url, banner_url, accent_color, about, currency
+      SELECT display_name, logo_url, banner_url, accent_color, about, currency,
+             returns_allowed, return_window_days
       FROM vendor_storefronts WHERE vendor_id = ${vendorId}::uuid
     `);
     const sf = sfRows[0];
@@ -311,6 +316,8 @@ export class StorefrontService {
       accentColor: sf?.accent_color ?? null,
       about: sf?.about ?? null,
       currency: sf?.currency ?? "USD",
+      returnsAllowed: sf?.returns_allowed ?? true,
+      returnWindowDays: sf?.return_window_days ?? 30,
       hasActivePayoutAccount: await this.hasActivePayoutAccount(vendorId),
     };
   }
@@ -319,20 +326,28 @@ export class StorefrontService {
     vendorId: string,
     input: UpsertStorefrontSettingsInput,
   ): Promise<StorefrontSettings> {
+    // Returns policy: when a field is omitted, keep the existing value (or the
+    // column default of true / 30 for a brand-new row) rather than resetting it.
+    const returnsAllowed = input.returnsAllowed ?? null;
+    const returnWindowDays = input.returnWindowDays ?? null;
     await this.prisma.$executeRaw(Prisma.sql`
       INSERT INTO vendor_storefronts
-        (vendor_id, display_name, logo_url, banner_url, accent_color, about, currency, created_at, updated_at)
+        (vendor_id, display_name, logo_url, banner_url, accent_color, about, currency,
+         returns_allowed, return_window_days, created_at, updated_at)
       VALUES
         (${vendorId}::uuid, ${input.displayName}, ${input.logoUrl ?? null},
          ${input.bannerUrl ?? null}, ${input.accentColor ?? null}, ${input.about ?? null},
-         'USD', now(), now())
+         'USD', COALESCE(${returnsAllowed}::boolean, true),
+         COALESCE(${returnWindowDays}::int, 30), now(), now())
       ON CONFLICT (vendor_id) DO UPDATE SET
-        display_name = EXCLUDED.display_name,
-        logo_url     = EXCLUDED.logo_url,
-        banner_url   = EXCLUDED.banner_url,
-        accent_color = EXCLUDED.accent_color,
-        about        = EXCLUDED.about,
-        updated_at   = now()
+        display_name       = EXCLUDED.display_name,
+        logo_url           = EXCLUDED.logo_url,
+        banner_url         = EXCLUDED.banner_url,
+        accent_color       = EXCLUDED.accent_color,
+        about              = EXCLUDED.about,
+        returns_allowed    = COALESCE(${returnsAllowed}::boolean, vendor_storefronts.returns_allowed),
+        return_window_days = COALESCE(${returnWindowDays}::int, vendor_storefronts.return_window_days),
+        updated_at         = now()
     `);
     return this.getSettings(vendorId);
   }

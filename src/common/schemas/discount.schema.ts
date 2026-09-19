@@ -52,6 +52,9 @@ export const createMarketplaceDiscountSchema = z.intersection(
 );
 export type CreateMarketplaceDiscountInput = z.infer<typeof createMarketplaceDiscountSchema>;
 
+export const setDiscountActiveSchema = z.object({ active: z.boolean() });
+export type SetDiscountActiveInput = z.infer<typeof setDiscountActiveSchema>;
+
 export const validateDiscountSchema = z.object({
   code: codeField,
   subtotalCents: z.number().int().positive().max(100_000_000),

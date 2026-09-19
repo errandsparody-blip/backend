@@ -1829,6 +1829,11 @@ model VendorStorefront {
   about       String?  @db.Text
   currency    String   @default("USD")         // USD everywhere for launch
 
+  // Vendor-declared returns policy. When returnsAllowed is false, buyers can't
+  // open a return; when true, returnWindowDays caps how long after shipment.
+  returnsAllowed   Boolean @default(true) @map("returns_allowed")
+  returnWindowDays Int     @default(30)   @map("return_window_days")
+
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 

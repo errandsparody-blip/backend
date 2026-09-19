@@ -46,12 +46,17 @@ export class StorefrontReturnService {
       Array<{
         id: string;
         status: string;
+        shipped_at: Date | null;
         buyer_name: string | null;
         store_name: string | null;
         business_name: string;
+        returns_allowed: boolean | null;
+        return_window_days: number | null;
       }>
     >(Prisma.sql`
-      SELECT so.id, so.status, so.buyer_name, vs.display_name AS store_name, v.business_name
+      SELECT so.id, so.status, so.shipped_at, so.buyer_name,
+             vs.display_name AS store_name, v.business_name,
+             vs.returns_allowed, vs.return_window_days
       FROM storefront_orders so
       JOIN vendors v ON v.id = so.vendor_id
       LEFT JOIN vendor_storefronts vs ON vs.vendor_id = so.vendor_id
@@ -68,6 +73,28 @@ export class StorefrontReturnService {
         code: "order_not_returnable",
         status: order.status,
       });
+    }
+
+    // Vendor-declared returns policy. Defaults (allowed, 30 days) apply when the
+    // storefront row predates the policy columns.
+    const returnsAllowed = order.returns_allowed ?? true;
+    if (!returnsAllowed) {
+      throw new BadRequestException({
+        message: "This store doesn't accept returns.",
+        code: "returns_not_accepted",
+      });
+    }
+    const windowDays = order.return_window_days ?? 30;
+    // Count the window from shipment (fall back to now if unset, i.e. no bar yet).
+    if (order.shipped_at) {
+      const deadline = new Date(order.shipped_at).getTime() + windowDays * 24 * 60 * 60 * 1000;
+      if (Date.now() > deadline) {
+        throw new BadRequestException({
+          message: `The ${windowDays}-day return window for this order has passed.`,
+          code: "return_window_expired",
+          windowDays,
+        });
+      }
     }
 
     let reference: string;

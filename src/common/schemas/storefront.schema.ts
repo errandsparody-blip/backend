@@ -70,6 +70,15 @@ export const upsertStorefrontSettingsSchema = z.object({
   bannerUrl: z.string().url().max(2048).optional().nullable(),
   accentColor: hexColor.optional().nullable(),
   about: z.string().trim().max(2000).optional().nullable(),
+  // Returns policy. When returnsAllowed is false the window is ignored; when
+  // true, returnWindowDays (1–365) caps how long after shipment a buyer may ask.
+  returnsAllowed: z.boolean().optional(),
+  returnWindowDays: z
+    .number()
+    .int("Whole days only.")
+    .min(1, "At least 1 day.")
+    .max(365, "At most 365 days.")
+    .optional(),
 });
 export type UpsertStorefrontSettingsInput = z.infer<typeof upsertStorefrontSettingsSchema>;
 

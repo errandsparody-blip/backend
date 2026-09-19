@@ -86,8 +86,25 @@ export class DiscountService {
   }
 
   async deactivateVendorCode(vendorId: string, id: string): Promise<void> {
+    await this.setVendorCodeActive(vendorId, id, false);
+  }
+
+  /** Flip a vendor code active on/off. Scoped so a vendor can only touch its own. */
+  async setVendorCodeActive(vendorId: string, id: string, active: boolean): Promise<void> {
     await this.prisma.$executeRaw(Prisma.sql`
-      UPDATE discount_codes SET active = false, updated_at = now()
+      UPDATE discount_codes SET active = ${active}, updated_at = now()
+      WHERE id = ${id}::uuid AND scope = 'VENDOR' AND vendor_id = ${vendorId}::uuid
+    `);
+  }
+
+  /**
+   * Permanently remove a vendor code. Safe: nothing references discount_codes
+   * except discount_code_vendors (ON DELETE CASCADE); orders store the discount
+   * as cents, not a foreign key, so past orders are untouched.
+   */
+  async deleteVendorCode(vendorId: string, id: string): Promise<void> {
+    await this.prisma.$executeRaw(Prisma.sql`
+      DELETE FROM discount_codes
       WHERE id = ${id}::uuid AND scope = 'VENDOR' AND vendor_id = ${vendorId}::uuid
     `);
   }
