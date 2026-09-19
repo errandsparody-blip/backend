@@ -224,6 +224,7 @@ export class StorefrontService {
       variantGroupId: string | null;
       imageUrl: string | null;
       imageUrls: string[];
+      availableStock: number;
     }>
   > {
     const rows = await this.prisma.$queryRaw<
@@ -240,13 +241,19 @@ export class StorefrontService {
         variant_group_id: string | null;
         image_url: string | null;
         image_urls: string[];
+        available_stock: number | null;
       }>
     >(Prisma.sql`
-      SELECT id, code, name, status, listed, retail_price_cents, category,
-             option_size, option_color, variant_group_id, image_url, image_urls
-      FROM products
-      WHERE vendor_id = ${vendorId}::uuid AND status = 'ACTIVE'
-      ORDER BY created_at DESC
+      SELECT p.id, p.code, p.name, p.status, p.listed, p.retail_price_cents, p.category,
+             p.option_size, p.option_color, p.variant_group_id, p.image_url, p.image_urls,
+             COALESCE(s.avail, 0) AS available_stock
+      FROM products p
+      LEFT JOIN (
+        SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
+        FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
+      ) s ON s.product_id = p.id
+      WHERE p.vendor_id = ${vendorId}::uuid AND p.status = 'ACTIVE'
+      ORDER BY p.created_at DESC
       LIMIT 500
     `);
     return rows.map((r) => ({
@@ -263,6 +270,8 @@ export class StorefrontService {
       imageUrl: r.image_url,
       // Fall back to the single primary image for products predating the gallery.
       imageUrls: r.image_urls?.length ? r.image_urls : r.image_url ? [r.image_url] : [],
+      // Sellable units = available − reserved across active SKUs (never negative).
+      availableStock: Math.max(0, Number(r.available_stock ?? 0)),
     }));
   }
 
