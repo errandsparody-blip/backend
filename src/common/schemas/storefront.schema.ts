@@ -56,11 +56,12 @@ export const setProductListingSchema = z
     material: z.string().trim().max(120).optional().nullable(),
     careInstructions: z.string().trim().max(300).optional().nullable(),
     brand: z.string().trim().max(80).optional().nullable(),
-  })
-  .refine((v) => !v.listed || (v.retailPriceCents ?? 0) > 0, {
-    message: "Set a retail price greater than $0 before listing this product.",
-    path: ["retailPriceCents"],
   });
+// NOTE: the "must have a retail price before listing" rule is enforced in
+// StorefrontService.setProductListing against the *effective* price (the value
+// submitted OR the product's existing price). It can't live here as a refine,
+// because partial updates (e.g. the details editor) legitimately omit
+// retailPriceCents on an already-listed product.
 export type SetProductListingInput = z.infer<typeof setProductListingSchema>;
 
 // Group a set of the vendor's products into ONE storefront listing (variants).
