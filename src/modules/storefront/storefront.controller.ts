@@ -121,6 +121,14 @@ export class StorefrontController {
     return this.storefront.listVendorProducts(user.vendorId!);
   }
 
+  @Get("products/:id")
+  getProduct(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.storefront.getVendorProduct(user.vendorId!, id);
+  }
+
   @Put("settings")
   upsertSettings(
     @CurrentUser() user: AuthenticatedUser,

@@ -17,6 +17,9 @@ interface State {
     retail_price_cents: number | null;
     category: string | null;
     tags: string[];
+    variant?: string;
+    option_color?: string | null;
+    image_url?: string | null;
   } | null;
   vendor: {
     slug: string | null;
@@ -71,6 +74,9 @@ function baseState(overrides: Partial<State> = {}): State {
       retail_price_cents: null,
       category: null,
       tags: [],
+      variant: "STD",
+      option_color: null,
+      image_url: null,
     },
     vendor: {
       slug: "acme",

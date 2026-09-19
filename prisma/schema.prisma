@@ -549,6 +549,17 @@ model Product {
   optionColor     String?  @map("option_color")
   imageUrls       String[] @default([]) @map("image_urls")
 
+  // Migration 0070 — vendor-authored storefront details (ASOS-style), shown in
+  // the "Product details" section on the public product page. All optional.
+  // Size is never stored here; it derives from `variant` (the listing).
+  description       String? @db.Text
+  fit               String?
+  gender            String?
+  material          String?
+  careInstructions  String? @map("care_instructions")
+  brand             String?
+  shipsFrom         String? @map("ships_from")
+
   status          String   @default("ACTIVE")  // ACTIVE | ARCHIVED
 
   createdAt       DateTime @default(now()) @map("created_at")

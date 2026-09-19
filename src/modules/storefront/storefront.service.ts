@@ -115,13 +115,13 @@ export class StorefrontService {
         retail_price_cents: number | null;
         category: string | null;
         tags: string[];
-        option_size: string | null;
+        variant: string;
         option_color: string | null;
         image_url: string | null;
       }>
     >(Prisma.sql`
       SELECT id, status, listed, retail_price_cents, category, tags,
-             option_size, option_color, image_url
+             variant, option_color, image_url
       FROM products
       WHERE id = ${productId}::uuid AND vendor_id = ${vendorId}::uuid
     `);
@@ -157,9 +157,15 @@ export class StorefrontService {
     const nextCategory =
       input.category === undefined ? product.category : normalizeCategory(input.category);
     const nextTags = input.tags === undefined ? product.tags : input.tags;
-    // Variant fields: undefined = keep, null = clear.
-    const nextSize = input.optionSize === undefined ? product.option_size : input.optionSize;
+    // Size is NOT typed on the storefront: it derives from the product's own
+    // `variant` (the inventory listing). "STD" (the default no-variant marker)
+    // means "no size", so a plain product shows no size chip on the marketplace.
+    const nextSize =
+      product.variant && product.variant.toUpperCase() !== "STD" ? product.variant : null;
+    // Colour axis: undefined = keep, null = clear.
     const nextColor = input.optionColor === undefined ? product.option_color : input.optionColor;
+    // Detail fields (Migration 0070) are set per-field below: undefined = keep
+    // (column omitted from the UPDATE), null = clear, value = set.
     // Gallery: when provided, set image_urls and keep image_url (primary) in sync
     // with the first image; when omitted, leave both untouched.
     const setImages = input.imageUrls !== undefined;
@@ -174,6 +180,13 @@ export class StorefrontService {
           tags = ${nextTags}::text[],
           option_size = ${nextSize},
           option_color = ${nextColor},
+          ${input.description !== undefined ? Prisma.sql`description = ${input.description},` : Prisma.empty}
+          ${input.fit !== undefined ? Prisma.sql`fit = ${input.fit},` : Prisma.empty}
+          ${input.gender !== undefined ? Prisma.sql`gender = ${input.gender},` : Prisma.empty}
+          ${input.material !== undefined ? Prisma.sql`material = ${input.material},` : Prisma.empty}
+          ${input.careInstructions !== undefined ? Prisma.sql`care_instructions = ${input.careInstructions},` : Prisma.empty}
+          ${input.brand !== undefined ? Prisma.sql`brand = ${input.brand},` : Prisma.empty}
+          ${input.shipsFrom !== undefined ? Prisma.sql`ships_from = ${input.shipsFrom},` : Prisma.empty}
           ${setImages ? Prisma.sql`image_urls = ${nextImageUrls}::text[], image_url = ${nextPrimary},` : Prisma.empty}
           updated_at = now()
       WHERE id = ${productId}::uuid AND vendor_id = ${vendorId}::uuid
@@ -236,6 +249,7 @@ export class StorefrontService {
       listed: boolean;
       retailPriceCents: number | null;
       category: string | null;
+      variant: string;
       optionSize: string | null;
       optionColor: string | null;
       variantGroupId: string | null;
@@ -253,6 +267,7 @@ export class StorefrontService {
         listed: boolean;
         retail_price_cents: number | null;
         category: string | null;
+        variant: string;
         option_size: string | null;
         option_color: string | null;
         variant_group_id: string | null;
@@ -262,7 +277,7 @@ export class StorefrontService {
       }>
     >(Prisma.sql`
       SELECT p.id, p.code, p.name, p.status, p.listed, p.retail_price_cents, p.category,
-             p.option_size, p.option_color, p.variant_group_id, p.image_url, p.image_urls,
+             p.variant, p.option_size, p.option_color, p.variant_group_id, p.image_url, p.image_urls,
              COALESCE(s.avail, 0) AS available_stock
       FROM products p
       LEFT JOIN (
@@ -281,6 +296,8 @@ export class StorefrontService {
       listed: r.listed,
       retailPriceCents: r.retail_price_cents,
       category: r.category,
+      // The product's inventory variant — the source of truth for its size.
+      variant: r.variant,
       optionSize: r.option_size,
       optionColor: r.option_color,
       variantGroupId: r.variant_group_id,
@@ -290,6 +307,88 @@ export class StorefrontService {
       // Sellable units = available − reserved across active SKUs (never negative).
       availableStock: Math.max(0, Number(r.available_stock ?? 0)),
     }));
+  }
+
+  /** One vendor product with all storefront-editable detail fields (edit page). */
+  async getVendorProduct(
+    vendorId: string,
+    productId: string,
+  ): Promise<{
+    id: string;
+    code: string;
+    name: string;
+    variant: string;
+    listed: boolean;
+    retailPriceCents: number | null;
+    category: string | null;
+    optionColor: string | null;
+    imageUrls: string[];
+    availableStock: number;
+    description: string | null;
+    fit: string | null;
+    gender: string | null;
+    material: string | null;
+    careInstructions: string | null;
+    brand: string | null;
+    shipsFrom: string | null;
+  }> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        id: string;
+        code: string;
+        name: string;
+        variant: string;
+        listed: boolean;
+        retail_price_cents: number | null;
+        category: string | null;
+        option_color: string | null;
+        image_url: string | null;
+        image_urls: string[];
+        available_stock: number | null;
+        description: string | null;
+        fit: string | null;
+        gender: string | null;
+        material: string | null;
+        care_instructions: string | null;
+        brand: string | null;
+        ships_from: string | null;
+      }>
+    >(Prisma.sql`
+      SELECT p.id, p.code, p.name, p.variant, p.listed, p.retail_price_cents, p.category,
+             p.option_color, p.image_url, p.image_urls,
+             COALESCE(s.avail, 0) AS available_stock,
+             p.description, p.fit, p.gender, p.material, p.care_instructions, p.brand, p.ships_from
+      FROM products p
+      LEFT JOIN (
+        SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
+        FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
+      ) s ON s.product_id = p.id
+      WHERE p.id = ${productId}::uuid AND p.vendor_id = ${vendorId}::uuid AND p.status = 'ACTIVE'
+      LIMIT 1
+    `);
+    const r = rows[0];
+    if (!r) {
+      throw new NotFoundException({ message: "Product not found.", code: "product_not_found" });
+    }
+    return {
+      id: r.id,
+      code: r.code,
+      name: r.name,
+      variant: r.variant,
+      listed: r.listed,
+      retailPriceCents: r.retail_price_cents,
+      category: r.category,
+      optionColor: r.option_color,
+      imageUrls: r.image_urls?.length ? r.image_urls : r.image_url ? [r.image_url] : [],
+      availableStock: Math.max(0, Number(r.available_stock ?? 0)),
+      description: r.description,
+      fit: r.fit,
+      gender: r.gender,
+      material: r.material,
+      careInstructions: r.care_instructions,
+      brand: r.brand,
+      shipsFrom: r.ships_from,
+    };
   }
 
   // ---------------------------------------------------------------------------

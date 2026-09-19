@@ -44,11 +44,19 @@ export const setProductListingSchema = z
       .optional(),
     category: z.string().trim().min(1).max(60).optional().nullable(),
     tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
-    // Variant options (Migration 0066) — the axes shown as selectors. Nullable to
-    // clear. imageUrls is the per-variant gallery (first = primary).
-    optionSize: z.string().trim().min(1).max(40).optional().nullable(),
+    // Colour axis (Migration 0066). Size is NOT accepted here — it derives from
+    // the product's own `variant` (its inventory listing), never re-typed.
     optionColor: z.string().trim().min(1).max(40).optional().nullable(),
     imageUrls: z.array(z.string().trim().url().max(500)).max(10).optional(),
+    // Storefront product details (Migration 0070) — ASOS-style. All optional,
+    // nullable to clear.
+    description: z.string().trim().max(4000).optional().nullable(),
+    fit: z.string().trim().max(60).optional().nullable(),
+    gender: z.string().trim().max(30).optional().nullable(),
+    material: z.string().trim().max(120).optional().nullable(),
+    careInstructions: z.string().trim().max(300).optional().nullable(),
+    brand: z.string().trim().max(80).optional().nullable(),
+    shipsFrom: z.string().trim().max(80).optional().nullable(),
   })
   .refine((v) => !v.listed || (v.retailPriceCents ?? 0) > 0, {
     message: "Set a retail price greater than $0 before listing this product.",

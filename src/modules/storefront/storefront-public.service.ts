@@ -65,6 +65,14 @@ export interface PublicListing {
   /** Vendor-declared returns policy, for the product page's Returns section. */
   returnsAllowed: boolean;
   returnWindowDays: number;
+  /** Vendor-authored product details (Migration 0070) for the details section. */
+  description: string | null;
+  fit: string | null;
+  gender: string | null;
+  material: string | null;
+  careInstructions: string | null;
+  brand: string | null;
+  shipsFrom: string | null;
 }
 
 /** Collapse rows sharing a variant_group_id into ONE card (representative =
@@ -292,17 +300,25 @@ export class StorefrontPublicService {
         name: string;
         category: string | null;
         tags: string[];
-        option_size: string | null;
+        variant: string;
         option_color: string | null;
         retail_price_cents: number;
         image_url: string | null;
         image_urls: string[];
         available: number | bigint;
+        description: string | null;
+        fit: string | null;
+        gender: string | null;
+        material: string | null;
+        care_instructions: string | null;
+        brand: string | null;
+        ships_from: string | null;
       }>
     >(Prisma.sql`
-      SELECT p.id, p.name, p.category, p.tags, p.option_size, p.option_color,
+      SELECT p.id, p.name, p.category, p.tags, p.variant, p.option_color,
              p.retail_price_cents, p.image_url, p.image_urls,
-             COALESCE(s.avail, 0) AS available
+             COALESCE(s.avail, 0) AS available,
+             p.description, p.fit, p.gender, p.material, p.care_instructions, p.brand, p.ships_from
       FROM products p
       LEFT JOIN (
         SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
@@ -311,15 +327,20 @@ export class StorefrontPublicService {
       WHERE ${groupFilter}
         AND p.vendor_id = ${vendorId}::uuid AND p.listed = true AND p.status = 'ACTIVE'
         AND p.retail_price_cents IS NOT NULL
-      ORDER BY p.option_color ASC NULLS FIRST, p.option_size ASC NULLS FIRST, p.created_at ASC
+      ORDER BY p.option_color ASC NULLS FIRST, p.variant ASC NULLS FIRST, p.created_at ASC
     `);
     if (rows.length === 0) {
       throw new NotFoundException({ message: "Product not found.", code: "product_not_found" });
     }
 
+    // Size comes from each product's `variant` (its inventory listing), never a
+    // separately-typed field. "STD" is the no-variant marker → treat as no size.
+    const sizeOf = (variant: string): string | null =>
+      variant && variant.toUpperCase() !== "STD" ? variant : null;
+
     const variants: ListingVariant[] = rows.map((r) => ({
       productId: r.id,
-      optionSize: r.option_size,
+      optionSize: sizeOf(r.variant),
       optionColor: r.option_color,
       retailPriceCents: r.retail_price_cents,
       imageUrl: r.image_url,
@@ -344,6 +365,12 @@ export class StorefrontPublicService {
     `);
     const policy = policyRows[0];
 
+    // Product details come from the representative row (a listing's variants
+    // share one description/fit/etc.). First row with a value wins, so details
+    // survive even if the primary variant left some blank.
+    const firstOf = (pick: (r: (typeof rows)[number]) => string | null): string | null =>
+      rows.map(pick).find((v) => v != null && v !== "") ?? null;
+
     return {
       name: rows[0]!.name,
       category: rows[0]!.category,
@@ -354,6 +381,13 @@ export class StorefrontPublicService {
       variants,
       returnsAllowed: policy?.returns_allowed ?? true,
       returnWindowDays: policy?.return_window_days ?? 30,
+      description: firstOf((r) => r.description),
+      fit: firstOf((r) => r.fit),
+      gender: firstOf((r) => r.gender),
+      material: firstOf((r) => r.material),
+      careInstructions: firstOf((r) => r.care_instructions),
+      brand: firstOf((r) => r.brand),
+      shipsFrom: firstOf((r) => r.ships_from),
     };
   }
 
