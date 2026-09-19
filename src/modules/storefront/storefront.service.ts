@@ -186,7 +186,6 @@ export class StorefrontService {
           ${input.material !== undefined ? Prisma.sql`material = ${input.material},` : Prisma.empty}
           ${input.careInstructions !== undefined ? Prisma.sql`care_instructions = ${input.careInstructions},` : Prisma.empty}
           ${input.brand !== undefined ? Prisma.sql`brand = ${input.brand},` : Prisma.empty}
-          ${input.shipsFrom !== undefined ? Prisma.sql`ships_from = ${input.shipsFrom},` : Prisma.empty}
           ${setImages ? Prisma.sql`image_urls = ${nextImageUrls}::text[], image_url = ${nextPrimary},` : Prisma.empty}
           updated_at = now()
       WHERE id = ${productId}::uuid AND vendor_id = ${vendorId}::uuid
@@ -330,7 +329,6 @@ export class StorefrontService {
     material: string | null;
     careInstructions: string | null;
     brand: string | null;
-    shipsFrom: string | null;
   }> {
     const rows = await this.prisma.$queryRaw<
       Array<{
@@ -351,13 +349,12 @@ export class StorefrontService {
         material: string | null;
         care_instructions: string | null;
         brand: string | null;
-        ships_from: string | null;
       }>
     >(Prisma.sql`
       SELECT p.id, p.code, p.name, p.variant, p.listed, p.retail_price_cents, p.category,
              p.option_color, p.image_url, p.image_urls,
              COALESCE(s.avail, 0) AS available_stock,
-             p.description, p.fit, p.gender, p.material, p.care_instructions, p.brand, p.ships_from
+             p.description, p.fit, p.gender, p.material, p.care_instructions, p.brand
       FROM products p
       LEFT JOIN (
         SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
@@ -387,7 +384,6 @@ export class StorefrontService {
       material: r.material,
       careInstructions: r.care_instructions,
       brand: r.brand,
-      shipsFrom: r.ships_from,
     };
   }
 

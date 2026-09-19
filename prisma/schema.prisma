@@ -558,7 +558,6 @@ model Product {
   material          String?
   careInstructions  String? @map("care_instructions")
   brand             String?
-  shipsFrom         String? @map("ships_from")
 
   status          String   @default("ACTIVE")  // ACTIVE | ARCHIVED
 

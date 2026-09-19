@@ -72,7 +72,6 @@ export interface PublicListing {
   material: string | null;
   careInstructions: string | null;
   brand: string | null;
-  shipsFrom: string | null;
 }
 
 /** Collapse rows sharing a variant_group_id into ONE card (representative =
@@ -312,13 +311,12 @@ export class StorefrontPublicService {
         material: string | null;
         care_instructions: string | null;
         brand: string | null;
-        ships_from: string | null;
       }>
     >(Prisma.sql`
       SELECT p.id, p.name, p.category, p.tags, p.variant, p.option_color,
              p.retail_price_cents, p.image_url, p.image_urls,
              COALESCE(s.avail, 0) AS available,
-             p.description, p.fit, p.gender, p.material, p.care_instructions, p.brand, p.ships_from
+             p.description, p.fit, p.gender, p.material, p.care_instructions, p.brand
       FROM products p
       LEFT JOIN (
         SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
@@ -387,7 +385,6 @@ export class StorefrontPublicService {
       material: firstOf((r) => r.material),
       careInstructions: firstOf((r) => r.care_instructions),
       brand: firstOf((r) => r.brand),
-      shipsFrom: firstOf((r) => r.ships_from),
     };
   }
 

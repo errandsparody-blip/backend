@@ -12,5 +12,4 @@ ALTER TABLE "products"
   ADD COLUMN IF NOT EXISTS "gender"             VARCHAR(30),
   ADD COLUMN IF NOT EXISTS "material"           VARCHAR(120),
   ADD COLUMN IF NOT EXISTS "care_instructions"  VARCHAR(300),
-  ADD COLUMN IF NOT EXISTS "brand"              VARCHAR(80),
-  ADD COLUMN IF NOT EXISTS "ships_from"         VARCHAR(80);
+  ADD COLUMN IF NOT EXISTS "brand"              VARCHAR(80);

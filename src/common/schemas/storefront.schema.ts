@@ -56,7 +56,6 @@ export const setProductListingSchema = z
     material: z.string().trim().max(120).optional().nullable(),
     careInstructions: z.string().trim().max(300).optional().nullable(),
     brand: z.string().trim().max(80).optional().nullable(),
-    shipsFrom: z.string().trim().max(80).optional().nullable(),
   })
   .refine((v) => !v.listed || (v.retailPriceCents ?? 0) > 0, {
     message: "Set a retail price greater than $0 before listing this product.",
