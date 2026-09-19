@@ -34,6 +34,21 @@ import { WalletService } from "../wallet/wallet.service";
 /** One-time storefront setup fee, in cents ($50). Featuring stays free. */
 export const STOREFRONT_SETUP_FEE_CENTS = 5000;
 
+/**
+ * Canonicalise a category so casing/whitespace never fracture it into duplicates
+ * ("Clothing", "clothing", "  CLOTHING " → "Clothing"). Trims, collapses inner
+ * whitespace, and Title-Cases each word. null/empty passes through as null.
+ */
+export function normalizeCategory(raw: string | null | undefined): string | null {
+  if (raw == null) return null;
+  const cleaned = raw.trim().replace(/\s+/g, " ");
+  if (!cleaned) return null;
+  return cleaned
+    .split(" ")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+    .join(" ");
+}
+
 /** Slugs we never let a vendor take — they collide with app/system routes. */
 const RESERVED_SLUGS = new Set([
   "www", "api", "admin", "app", "store", "stores", "mail", "email", "static",
@@ -137,8 +152,10 @@ export class StorefrontService {
       }
     }
 
+    // Normalise casing/whitespace on write so "Clothing", "clothing" and
+    // "  CLOTHING " don't fracture into separate categories going forward.
     const nextCategory =
-      input.category === undefined ? product.category : input.category;
+      input.category === undefined ? product.category : normalizeCategory(input.category);
     const nextTags = input.tags === undefined ? product.tags : input.tags;
     // Variant fields: undefined = keep, null = clear.
     const nextSize = input.optionSize === undefined ? product.option_size : input.optionSize;

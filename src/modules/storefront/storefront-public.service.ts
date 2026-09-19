@@ -213,7 +213,7 @@ export class StorefrontPublicService {
         AND p.status = 'ACTIVE'
         AND p.retail_price_cents IS NOT NULL
         AND COALESCE(s.avail, 0) > 0
-        ${opts.category ? Prisma.sql`AND p.category = ${opts.category}` : Prisma.empty}
+        ${opts.category ? Prisma.sql`AND LOWER(p.category) = LOWER(${opts.category})` : Prisma.empty}
       ORDER BY p.created_at DESC
       LIMIT 240
     `);
@@ -396,7 +396,7 @@ export class StorefrontPublicService {
       WHERE v.storefront_enabled = true AND v.marketplace_featured = true
         AND p.listed = true AND p.status = 'ACTIVE' AND p.retail_price_cents IS NOT NULL
         AND COALESCE(st.avail, 0) > 0
-        ${opts.category ? Prisma.sql`AND p.category = ${opts.category}` : Prisma.empty}
+        ${opts.category ? Prisma.sql`AND LOWER(p.category) = LOWER(${opts.category})` : Prisma.empty}
       ORDER BY random()
       LIMIT 240
     `);
@@ -410,12 +410,14 @@ export class StorefrontPublicService {
 
   /** Distinct categories across all featured stores. */
   async listMarketplaceCategories(): Promise<string[]> {
+    // DISTINCT ON (LOWER(...)) collapses casing variants ("Clothing"/"clothing")
+    // into one chip, picking a stable representative (first alphabetically).
     const rows = await this.prisma.$queryRaw<Array<{ category: string }>>(Prisma.sql`
-      SELECT DISTINCT p.category
+      SELECT DISTINCT ON (LOWER(p.category)) p.category
       FROM products p JOIN vendors v ON v.id = p.vendor_id
       WHERE v.storefront_enabled = true AND v.marketplace_featured = true
         AND p.listed = true AND p.status = 'ACTIVE' AND p.category IS NOT NULL
-      ORDER BY p.category ASC
+      ORDER BY LOWER(p.category) ASC, p.category ASC
     `);
     return rows.map((r) => r.category);
   }
@@ -444,11 +446,12 @@ export class StorefrontPublicService {
 
   /** Distinct non-null categories across a store's listed products. */
   async listCategories(vendorId: string): Promise<string[]> {
+    // Collapse casing variants into one entry (see listMarketplaceCategories).
     const rows = await this.prisma.$queryRaw<Array<{ category: string }>>(Prisma.sql`
-      SELECT DISTINCT category FROM products
+      SELECT DISTINCT ON (LOWER(category)) category FROM products
       WHERE vendor_id = ${vendorId}::uuid AND listed = true
         AND status = 'ACTIVE' AND category IS NOT NULL
-      ORDER BY category ASC
+      ORDER BY LOWER(category) ASC, category ASC
     `);
     return rows.map((r) => r.category);
   }
