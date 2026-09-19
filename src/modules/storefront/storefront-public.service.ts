@@ -62,6 +62,9 @@ export interface PublicListing {
   sizes: string[];
   colors: string[];
   variants: ListingVariant[];
+  /** Vendor-declared returns policy, for the product page's Returns section. */
+  returnsAllowed: boolean;
+  returnWindowDays: number;
 }
 
 /** Collapse rows sharing a variant_group_id into ONE card (representative =
@@ -330,6 +333,17 @@ export class StorefrontPublicService {
     }));
     const uniq = (xs: Array<string | null>): string[] =>
       [...new Set(xs.filter((x): x is string => !!x))];
+
+    // Vendor's declared returns policy (defaults preserve pre-policy behaviour).
+    const policyRows = await this.prisma.$queryRaw<
+      Array<{ returns_allowed: boolean | null; return_window_days: number | null }>
+    >(Prisma.sql`
+      SELECT returns_allowed, return_window_days
+      FROM vendor_storefronts WHERE vendor_id = ${vendorId}::uuid
+      LIMIT 1
+    `);
+    const policy = policyRows[0];
+
     return {
       name: rows[0]!.name,
       category: rows[0]!.category,
@@ -338,6 +352,8 @@ export class StorefrontPublicService {
       sizes: uniq(variants.map((v) => v.optionSize)),
       colors: uniq(variants.map((v) => v.optionColor)),
       variants,
+      returnsAllowed: policy?.returns_allowed ?? true,
+      returnWindowDays: policy?.return_window_days ?? 30,
     };
   }
 
