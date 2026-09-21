@@ -27,12 +27,20 @@ function make(opts: {
     store_name: string | null;
     business_name: string;
   } | null;
+  // lookupForBuyer support: the anchor row + the per-sub-order rows.
+  anchor?: { cart_group_id: string | null; buyer_name: string | null } | null;
+  lookupRows?: Array<Record<string, unknown>>;
 }) {
   const executed: string[] = [];
   const prisma = {
     $queryRaw: jest.fn(async (q: never) => {
       const t = sqlText(q);
       if (t.includes("FROM storefront_return_requests")) return opts.request ? [opts.request] : [];
+      // lookupForBuyer anchor (cart_group_id + buyer_name).
+      if (t.includes("cart_group_id, buyer_name FROM storefront_orders"))
+        return opts.anchor ? [opts.anchor] : [];
+      // lookupForBuyer sub-order list (carries the open_return sub-select).
+      if (t.includes("open_return")) return opts.lookupRows ?? [];
       if (t.includes("FROM storefront_orders")) return opts.order ? [opts.order] : [];
       if (t.includes("nextval")) return [{ n: 1n }];
       return [];
@@ -44,12 +52,14 @@ function make(opts: {
   };
   const refund = jest.fn().mockResolvedValue({ refundId: "re_1", amountCents: 6100 });
   const email = { send: jest.fn().mockResolvedValue({ ok: true }) };
+  const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
   const service = new StorefrontReturnService(
     prisma as never,
     { refund } as never,
     email as never,
+    notifications as never,
   );
-  return { service, executed, refund, email };
+  return { service, executed, refund, email, notifications };
 }
 
 describe("StorefrontReturnService.requestReturn", () => {

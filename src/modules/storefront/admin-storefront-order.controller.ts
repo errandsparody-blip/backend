@@ -6,6 +6,7 @@
  *   POST /v1/admin/storefront/orders/:reference/refund      { amountCents? }
  *   GET  /v1/admin/storefront/orders/payouts/failed         — unified-cart payout failures
  *   POST /v1/admin/storefront/orders/:reference/payout/retry
+ *   POST /v1/admin/storefront/orders/:reference/payout/release    — release a HELD payout now
  *   POST /v1/admin/storefront/orders/reservations/sweep      { maxAgeMinutes? } — release abandoned-cart stock now
  */
 import {
@@ -82,6 +83,18 @@ export class AdminStorefrontOrderController {
   @HttpCode(HttpStatus.OK)
   retryPayout(@Param("reference") reference: string) {
     return this.orders.retryPayout(reference);
+  }
+
+  /**
+   * Release a HELD vendor payout now, ignoring the return-window timer
+   * (finance-gated — it moves money). Lets admins pay a vendor early, and makes
+   * the hold → release cycle demonstrable without waiting for the window/sweep.
+   */
+  @Post(":reference/payout/release")
+  @Roles(Role.SUPER_ADMIN, Role.FINANCE_ADMIN)
+  @HttpCode(HttpStatus.OK)
+  releasePayout(@Param("reference") reference: string) {
+    return this.orders.releaseHeldPayout(reference);
   }
 
   // Refunds are finance-gated (warehouse operators can view but not refund).

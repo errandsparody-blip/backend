@@ -133,10 +133,21 @@ export class StorefrontOrderService {
       reason: "requested_by_customer",
     });
 
-    // Unified: also claw back the vendor's payout (their product share) so the
-    // refund doesn't come out of USA Errands' pocket. Best-effort — a rail that
-    // can't reverse (e.g. Flutterwave) is logged for manual clawback; the buyer
-    // refund above already succeeded.
+    // Unified + still HELD: the vendor was never paid (their share is held on the
+    // platform balance), so a refund just cancels the hold — no clawback at all.
+    // This is the fast path the return window is designed for.
+    if (isUnified && (o.payout_status === "HELD" || o.payout_status === "PENDING")) {
+      await this.prisma.$executeRaw(Prisma.sql`
+        UPDATE storefront_orders SET payout_status = 'CANCELLED', payout_release_at = NULL, updated_at = now()
+        WHERE id = ${o.id}::uuid AND payout_status IN ('HELD', 'PENDING')
+      `);
+    }
+
+    // Unified + already PAID: claw back the vendor's payout (their product share)
+    // so the refund doesn't come out of USA Errands' pocket. Best-effort — a rail
+    // that can't reverse (e.g. Flutterwave) is logged for manual clawback; the
+    // buyer refund above already succeeded. This only happens for returns that
+    // land after the hold window has released the payout.
     if (isUnified && o.payout_transfer_id && o.payout_status === "PAID") {
       const vendorShare = Math.max(0, o.total_cents - o.platform_fee_cents);
       const reverseCents = Math.min(amount, vendorShare);
@@ -344,12 +355,15 @@ export class StorefrontOrderService {
         buyer_email: string;
         buyer_name: string | null;
         store_name: string | null;
+        returns_allowed: boolean | null;
+        return_window_days: number | null;
       }>
     >(Prisma.sql`
       SELECT so.id, so.reference, so.status, so.total_cents, so.platform_fee_cents, so.currency,
              so.vendor_id, so.processor, so.payout_status,
              so.buyer_email, so.buyer_name,
-             COALESCE(vs.display_name, v.business_name) AS store_name
+             COALESCE(vs.display_name, v.business_name) AS store_name,
+             vs.returns_allowed, vs.return_window_days
       FROM storefront_orders so
       JOIN vendors v ON v.id = so.vendor_id
       LEFT JOIN vendor_storefronts vs ON vs.vendor_id = so.vendor_id
@@ -393,10 +407,12 @@ export class StorefrontOrderService {
           );
         }
       }
-      // Pay the vendor their share — best-effort; a payout hiccup must not fail
-      // the webhook (the buyer has paid). Failed payouts are marked FAILED for a
-      // later retry/admin action.
-      await this.payoutVendor(o).catch((err) =>
+      // Hold the vendor's share for their return window (so refunds during the
+      // window are instant and clawback-free), or pay now when the vendor takes
+      // no returns. Best-effort; a hiccup must not fail the webhook (buyer paid).
+      const holdDays =
+        (o.returns_allowed ?? true) ? Math.max(0, o.return_window_days ?? 30) : 0;
+      await this.holdOrPayVendor(o, holdDays).catch((err) =>
         this.logger.error({ err: `${err}`, reference: o.reference }, "storefront.cart.payout_failed"),
       );
     }
@@ -422,6 +438,41 @@ export class StorefrontOrderService {
 
     this.logger.log({ cartGroupId, subOrders: subs.length }, "storefront.cart.paid_distributed");
     return { handled: true, reference: `CART-${cartGroupId}` };
+  }
+
+  /**
+   * At payment time, either HOLD the vendor's share for `holdDays` (their return
+   * window) or pay it now. Holding sets payout_status = 'HELD' + payout_release_at
+   * so the release sweep pays it once the window passes with no open return; a
+   * refund during the window just cancels the hold — no clawback. holdDays = 0
+   * (vendor takes no returns) pays immediately via payoutVendor. Only acts on a
+   * PENDING row, so a duplicate webhook never re-holds or double-pays.
+   */
+  private async holdOrPayVendor(
+    o: {
+      id: string;
+      reference: string;
+      total_cents: number;
+      platform_fee_cents: number;
+      currency: string;
+      vendor_id: string;
+      processor: string;
+      payout_status: string;
+    },
+    holdDays: number,
+  ): Promise<void> {
+    if (o.payout_status !== "PENDING") return;
+    if (holdDays <= 0) {
+      await this.payoutVendor(o);
+      return;
+    }
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE storefront_orders
+      SET payout_status = 'HELD',
+          payout_release_at = now() + (${holdDays} * interval '1 day'),
+          updated_at = now()
+      WHERE id = ${o.id}::uuid AND payout_status = 'PENDING'
+    `);
   }
 
   /**
@@ -502,7 +553,8 @@ export class StorefrontOrderService {
     return this.prisma.$queryRaw(Prisma.sql`
       SELECT reference, buyer_email, buyer_name, status, processor,
              product_subtotal_cents, discount_cents, shipping_cents, shipping_speed,
-             total_cents, tracking_number, carrier, created_at, paid_at, shipped_at
+             total_cents, tracking_number, carrier, payout_status, payout_release_at,
+             created_at, paid_at, shipped_at
       FROM storefront_orders
       WHERE vendor_id = ${vendorId}::uuid
       ORDER BY created_at DESC
@@ -529,7 +581,8 @@ export class StorefrontOrderService {
     return this.prisma.$queryRaw(Prisma.sql`
       SELECT so.reference, so.vendor_id, v.business_name, so.buyer_email, so.status,
              so.processor, so.total_cents, so.shipping_speed, so.shipping_cents,
-             so.tracking_number, so.carrier, so.created_at, so.paid_at, so.shipped_at
+             so.tracking_number, so.carrier, so.payout_status, so.payout_release_at,
+             so.created_at, so.paid_at, so.shipped_at
       FROM storefront_orders so
       JOIN vendors v ON v.id = so.vendor_id
       ${opts.status ? Prisma.sql`WHERE so.status = ${opts.status}` : Prisma.empty}
@@ -626,6 +679,115 @@ export class StorefrontOrderService {
     }
     if (attempted > 0) this.logger.log({ attempted }, "storefront.cart.payout_sweep");
     return attempted;
+  }
+
+  /**
+   * Release ONE held vendor payout immediately, ignoring the window (admin/demo
+   * action — it moves money). Flips HELD → PENDING then pays via payoutVendor.
+   */
+  async releaseHeldPayout(reference: string): Promise<{ reference: string; payoutStatus: string }> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        id: string;
+        reference: string;
+        total_cents: number;
+        platform_fee_cents: number;
+        currency: string;
+        vendor_id: string;
+        processor: string;
+        payout_status: string;
+      }>
+    >(Prisma.sql`
+      SELECT id, reference, total_cents, platform_fee_cents, currency, vendor_id,
+             processor, payout_status
+      FROM storefront_orders WHERE reference = ${reference} LIMIT 1
+    `);
+    const o = rows[0];
+    if (!o) {
+      throw new NotFoundException({ message: "Order not found.", code: "storefront_order_not_found" });
+    }
+    if (o.payout_status !== "HELD") {
+      throw new BadRequestException({
+        message: `Payout is '${o.payout_status}', not HELD — nothing to release.`,
+        code: "payout_not_held",
+      });
+    }
+    const claimed = await this.prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      UPDATE storefront_orders SET payout_status = 'PENDING', updated_at = now()
+      WHERE id = ${o.id}::uuid AND payout_status = 'HELD'
+      RETURNING id
+    `);
+    if (claimed.length === 0) {
+      // Lost the race (another release/refund got there first).
+      const after = await this.prisma.$queryRaw<Array<{ payout_status: string }>>(
+        Prisma.sql`SELECT payout_status FROM storefront_orders WHERE id = ${o.id}::uuid`,
+      );
+      return { reference, payoutStatus: after[0]?.payout_status ?? "UNKNOWN" };
+    }
+    try {
+      await this.payoutVendor({ ...o, payout_status: "PENDING" });
+    } catch (err) {
+      this.logger.error({ err: `${err}`, reference }, "storefront.cart.release_now_failed");
+    }
+    const after = await this.prisma.$queryRaw<Array<{ payout_status: string }>>(
+      Prisma.sql`SELECT payout_status FROM storefront_orders WHERE id = ${o.id}::uuid`,
+    );
+    return { reference, payoutStatus: after[0]?.payout_status ?? "UNKNOWN" };
+  }
+
+  /**
+   * Release vendor payouts whose HOLD window has elapsed (Migration 0071).
+   * Pays HELD sub-orders where payout_release_at has passed, the order is still
+   * in a paid/fulfilling/shipped/delivered state, and there's no open return
+   * request. Flips HELD → PENDING then pays (idempotent via payoutVendor + the
+   * per-reference transfer key). Bounded per run. Returns how many were released.
+   */
+  async releaseHeldPayouts(limit = 100): Promise<number> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        id: string;
+        reference: string;
+        total_cents: number;
+        platform_fee_cents: number;
+        currency: string;
+        vendor_id: string;
+        processor: string;
+      }>
+    >(Prisma.sql`
+      SELECT so.id, so.reference, so.total_cents, so.platform_fee_cents, so.currency,
+             so.vendor_id, so.processor
+      FROM storefront_orders so
+      WHERE so.payout_status = 'HELD'
+        AND so.payout_release_at IS NOT NULL
+        AND so.payout_release_at <= now()
+        AND so.status IN ('PAID', 'FULFILLING', 'SHIPPED', 'DELIVERED')
+        AND NOT EXISTS (
+          SELECT 1 FROM storefront_return_requests rr
+          WHERE rr.storefront_order_id = so.id AND rr.status = 'REQUESTED'
+        )
+      ORDER BY so.payout_release_at ASC
+      LIMIT ${limit}
+    `);
+    let released = 0;
+    for (const o of rows) {
+      // Flip HELD → PENDING, then pay. The conditional UPDATE means only one
+      // worker/run can claim a given held row.
+      const claimed = await this.prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        UPDATE storefront_orders SET payout_status = 'PENDING', updated_at = now()
+        WHERE id = ${o.id}::uuid AND payout_status = 'HELD'
+        RETURNING id
+      `);
+      if (claimed.length === 0) continue;
+      try {
+        await this.payoutVendor({ ...o, payout_status: "PENDING" });
+        released++;
+      } catch (err) {
+        // payoutVendor already flipped the row to FAILED; the retry sweep handles it.
+        this.logger.warn({ err: `${err}`, reference: o.reference }, "storefront.cart.release_failed");
+      }
+    }
+    if (released > 0) this.logger.log({ released }, "storefront.cart.payout_released");
+    return released;
   }
 
   private async findOrder(event: ParsedPaymentEvent): Promise<OrderRow | null> {

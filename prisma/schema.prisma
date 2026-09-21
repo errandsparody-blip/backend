@@ -1932,10 +1932,14 @@ model StorefrontOrder {
   // for a multi-vendor cart, each sub-order is paid out to its vendor by a
   // transfer. collectorProcessor = the rail that took the single charge (NULL for
   // ordinary direct-charge orders); payoutStatus tracks the vendor transfer
-  // (NONE | PENDING | PAID | FAILED); payoutTransferId is the processor id.
-  collectorProcessor  String?  @map("collector_processor")
-  payoutStatus        String   @default("NONE") @map("payout_status")
-  payoutTransferId    String?  @map("payout_transfer_id")
+  // (NONE | HELD | PENDING | PAID | FAILED | CANCELLED); payoutTransferId is the
+  // processor id. payoutReleaseAt = when a HELD share may be released (Migration
+  // 0071) — the vendor's return window from payment, so refunds during the window
+  // are instant and clawback-free.
+  collectorProcessor  String?   @map("collector_processor")
+  payoutStatus        String    @default("NONE") @map("payout_status")
+  payoutTransferId    String?   @map("payout_transfer_id")
+  payoutReleaseAt     DateTime? @map("payout_release_at")
 
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
@@ -2029,6 +2033,11 @@ model StorefrontReturnRequest {
   resolutionNote   String?  @map("resolution_note")
   refundId         String?  @map("refund_id")
   refundedCents    Int?     @map("refunded_cents")
+  // Self-service returns (Migration 0072): the parcel the buyer shipped back,
+  // and the warehouse receipt gate before an admin approves the refund.
+  returnTrackingNumber String? @map("return_tracking_number")
+  receivedAt       DateTime? @map("received_at")
+  receivedById     String?  @map("received_by") @db.Uuid
   resolvedById     String?  @map("resolved_by") @db.Uuid
   resolvedAt       DateTime? @map("resolved_at")
   createdAt        DateTime @default(now()) @map("created_at")

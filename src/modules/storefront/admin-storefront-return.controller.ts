@@ -2,6 +2,7 @@
  * Admin storefront returns queue (Migration 0061).
  *
  *   GET  /v1/admin/storefront/returns?status=REQUESTED
+ *   POST /v1/admin/storefront/returns/:id/received                    → warehouse got the parcel
  *   POST /v1/admin/storefront/returns/:id/approve   { amountCents? }  → refund
  *   POST /v1/admin/storefront/returns/:id/reject    { note? }
  */
@@ -37,6 +38,16 @@ export class AdminStorefrontReturnController {
   @Get()
   list(@Query("status") status?: string) {
     return this.returns.adminList({ status: status?.trim() || undefined });
+  }
+
+  /** Warehouse confirms the returned parcel arrived (gate before approval). */
+  @Post(":id/received")
+  @HttpCode(HttpStatus.OK)
+  markReceived(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.returns.markReceived(id, user.sub);
   }
 
   @Post(":id/approve")

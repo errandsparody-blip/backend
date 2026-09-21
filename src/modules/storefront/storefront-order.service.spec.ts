@@ -15,6 +15,8 @@ interface SubRow {
   vendor_id: string;
   processor: string;
   payout_status: string;
+  returns_allowed?: boolean | null;
+  return_window_days?: number | null;
 }
 
 function makeSvc(subs: SubRow[]) {
@@ -46,9 +48,10 @@ function makeSvc(subs: SubRow[]) {
   return { svc, transferToVendor, fulfillment, prisma, executed };
 }
 
+// Default: vendors take no returns → paid out immediately (window = 0).
 const SUBS: SubRow[] = [
-  { id: "o1", reference: "SF-000001", status: "PENDING_PAYMENT", total_cents: 3600, platform_fee_cents: 1100, currency: "USD", vendor_id: "v1", processor: "STRIPE", payout_status: "PENDING" },
-  { id: "o2", reference: "SF-000002", status: "PENDING_PAYMENT", total_cents: 5450, platform_fee_cents: 450, currency: "USD", vendor_id: "v2", processor: "STRIPE", payout_status: "PENDING" },
+  { id: "o1", reference: "SF-000001", status: "PENDING_PAYMENT", total_cents: 3600, platform_fee_cents: 1100, currency: "USD", vendor_id: "v1", processor: "STRIPE", payout_status: "PENDING", returns_allowed: false, return_window_days: 0 },
+  { id: "o2", reference: "SF-000002", status: "PENDING_PAYMENT", total_cents: 5450, platform_fee_cents: 450, currency: "USD", vendor_id: "v2", processor: "STRIPE", payout_status: "PENDING", returns_allowed: false, return_window_days: 0 },
 ];
 
 describe("StorefrontOrderService.distributeCartPayment (unified cart)", () => {
@@ -89,5 +92,15 @@ describe("StorefrontOrderService.distributeCartPayment (unified cart)", () => {
     const { svc, transferToVendor } = makeSvc(paidOut);
     await svc.markPaidFromEvent(cartEvent as never);
     expect(transferToVendor).not.toHaveBeenCalled();
+  });
+
+  it("HOLDS the vendor share (no immediate payout) when the vendor accepts returns", async () => {
+    const held = SUBS.map((s) => ({ ...s, returns_allowed: true, return_window_days: 30 }));
+    const { svc, transferToVendor, executed } = makeSvc(held);
+    const res = await svc.markPaidFromEvent(cartEvent as never);
+    expect(res.handled).toBe(true);
+    // No transfer at payment time — the share is held for the return window.
+    expect(transferToVendor).not.toHaveBeenCalled();
+    expect(executed.some((s) => s.includes("payout_status = 'HELD'"))).toBe(true);
   });
 });
