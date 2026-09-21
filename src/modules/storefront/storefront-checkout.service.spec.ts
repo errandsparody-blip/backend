@@ -167,11 +167,11 @@ describe("StorefrontCheckoutService.createCrossVendorOrder", () => {
     expect(res.results.map((r) => r.slug)).toEqual(["acme", "beta"]);
     // One consolidated shipping estimate for the cart.
     expect(shippo.getRates).toHaveBeenCalledTimes(1);
-    // Shipping (800) is charged once, on one leg. Fulfillment is per vendor and
-    // scales with units: acme (1 unit) = base 300; beta (2 units) = 300 + 150 =
-    // 450. So the shipping leg = 800 + 300 = 1100; the other = 450.
+    // Buyer pays product + delivery only — fulfillment is charged to the vendor's
+    // wallet, NOT the buyer. So platform fee = shipping (+ tax). Shipping (800) is
+    // charged once on one leg; the other leg has no shipping and no tax → 0.
     const fees = createCheckout.mock.calls.map((c) => (c[0] as { platformFeeCents: number }).platformFeeCents).sort((a, b) => a - b);
-    expect(fees).toEqual([450, 1100]);
+    expect(fees).toEqual([0, 800]);
   });
 
   it("unified mode: opens ONE platform charge and returns a single cart result", async () => {
@@ -188,9 +188,10 @@ describe("StorefrontCheckoutService.createCrossVendorOrder", () => {
       // Exactly one platform charge; no per-vendor destination charges.
       expect(createPlatformCheckout).toHaveBeenCalledTimes(1);
       expect(createCheckout).not.toHaveBeenCalled();
-      // Charge total = Σ sub-order totals: acme 3600 (2500+800+300) + beta 5450
-      // (5000+0+450) = 9050.
-      expect((createPlatformCheckout.mock.calls[0][0] as { amountCents: number }).amountCents).toBe(9050);
+      // Charge total = Σ sub-order totals (product + shipping only; fulfillment is
+      // billed to vendor wallets, not the buyer): acme 3300 (2500+800) + beta 5000
+      // (5000+0) = 8300.
+      expect((createPlatformCheckout.mock.calls[0][0] as { amountCents: number }).amountCents).toBe(8300);
     } finally {
       process.env.STOREFRONT_UNIFIED_CART_PAYMENT = OLD;
     }
@@ -287,10 +288,11 @@ describe("StorefrontCheckoutService.createOrder", () => {
     });
     expect(res.reference).toBe("SF-000001");
     expect(res.checkoutUrl).toBe("https://pay/x");
-    // total = product(5000) + shipping(800) + fulfillment(300) = 6100;
-    // platform fee = shipping(800) + fulfillment(300) = 1100.
+    // Buyer pays product + delivery only (fulfillment is charged to the vendor
+    // wallet, not the buyer): total = product(5000) + shipping(800) = 5800;
+    // platform fee = shipping(800).
     expect(createCheckout).toHaveBeenCalledWith(
-      expect.objectContaining({ amountCents: 6100, platformFeeCents: 1100, currency: "USD" }),
+      expect.objectContaining({ amountCents: 5800, platformFeeCents: 800, currency: "USD" }),
     );
   });
 });

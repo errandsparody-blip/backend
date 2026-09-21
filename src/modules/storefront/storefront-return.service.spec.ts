@@ -35,12 +35,12 @@ function make(opts: {
   const prisma = {
     $queryRaw: jest.fn(async (q: never) => {
       const t = sqlText(q);
-      if (t.includes("FROM storefront_return_requests")) return opts.request ? [opts.request] : [];
-      // lookupForBuyer anchor (cart_group_id + buyer_name).
+      // Order matters: the lookup sub-order list contains a storefront_return_requests
+      // sub-select, so match its distinctive columns FIRST.
       if (t.includes("cart_group_id, buyer_name FROM storefront_orders"))
         return opts.anchor ? [opts.anchor] : [];
-      // lookupForBuyer sub-order list (carries the open_return sub-select).
       if (t.includes("open_return")) return opts.lookupRows ?? [];
+      if (t.includes("FROM storefront_return_requests")) return opts.request ? [opts.request] : [];
       if (t.includes("FROM storefront_orders")) return opts.order ? [opts.order] : [];
       if (t.includes("nextval")) return [{ n: 1n }];
       return [];
@@ -124,6 +124,76 @@ describe("StorefrontReturnService.requestReturn", () => {
     const res = await service.requestReturn("b@x.com", "SF-000001", "Wrong size");
     expect(res.status).toBe("REQUESTED");
     expect(executed.some((s) => s.includes("INSERT INTO storefront_return_requests"))).toBe(true);
+  });
+});
+
+describe("StorefrontReturnService.lookupForBuyer", () => {
+  it("maps sub-orders with per-order returnability + reasons", async () => {
+    const recent = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const { service } = make({
+      anchor: { cart_group_id: "cg1", buyer_name: "B" },
+      lookupRows: [
+        {
+          reference: "SF-1", status: "SHIPPED", shipped_at: recent, items: [{ name: "Tee", qty: 1 }],
+          store_name: "Acme", business_name: "Acme LLC", returns_allowed: true, return_window_days: 30,
+          open_return: null, resolved_return: null,
+        },
+        {
+          reference: "SF-2", status: "PAID", shipped_at: null, items: [{ name: "Mug", qty: 2 }],
+          store_name: "Bravo", business_name: "Bravo LLC", returns_allowed: true, return_window_days: 30,
+          open_return: null, resolved_return: null,
+        },
+      ],
+    });
+    const res = await service.lookupForBuyer("SF-1", "b@x.com");
+    expect(res.buyerName).toBe("B");
+    expect(res.subOrders).toHaveLength(2);
+    expect(res.subOrders[0]).toMatchObject({ reference: "SF-1", returnable: true, reason: null });
+    expect(res.subOrders[1]).toMatchObject({ reference: "SF-2", returnable: false });
+    expect(res.subOrders[1]!.reason).toMatch(/not shipped/i);
+  });
+
+  it("404s an order that isn't the buyer's", async () => {
+    const { service } = make({ anchor: null });
+    await expect(service.lookupForBuyer("SF-1", "b@x.com")).rejects.toBeTruthy();
+  });
+});
+
+describe("StorefrontReturnService.requestCartReturn", () => {
+  it("opens a return per selected order, stamping the tracking number", async () => {
+    const recent = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const { service, executed } = make({
+      order: {
+        id: "o1", status: "SHIPPED", buyer_name: "B", store_name: "Acme", business_name: "Acme LLC",
+        returns_allowed: true, return_window_days: 30, shipped_at: recent,
+      },
+    });
+    const res = await service.requestCartReturn("b@x.com", ["SF-1", "SF-2"], "Wrong size", "1Z-TRACK");
+    expect(res.created).toHaveLength(2);
+    expect(res.skipped).toHaveLength(0);
+    // The insert carries the return tracking column.
+    expect(executed.some((s) => s.includes("return_tracking_number"))).toBe(true);
+  });
+
+  it("throws when nothing could be returned", async () => {
+    const { service } = make({ order: null }); // resolveBuyerOrder → null → not found
+    await expect(
+      service.requestCartReturn("b@x.com", ["SF-9"], "x", "1Z-TRACK"),
+    ).rejects.toBeTruthy();
+  });
+});
+
+describe("StorefrontReturnService.markReceived", () => {
+  it("stamps received on an open request", async () => {
+    const { service, executed } = make({
+      request: {
+        status: "REQUESTED", reference: "SR-1", order_reference: "SF-1", buyer_email: "b@x.com",
+        buyer_name: "B", store_name: "Acme", business_name: "Acme LLC",
+      },
+    });
+    const res = await service.markReceived("rr1", "wh-user");
+    expect(res.id).toBe("rr1");
+    expect(executed.some((s) => s.includes("received_at = COALESCE(received_at, now())"))).toBe(true);
   });
 });
 
