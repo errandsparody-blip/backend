@@ -25,6 +25,7 @@ import {
   type ReturnRequestInput,
 } from "../../common/schemas/storefront-return.schema";
 
+import { AddressAutocompleteService } from "./address-autocomplete.service";
 import { StorefrontCheckoutService } from "./storefront-checkout.service";
 import { StorefrontPublicService } from "./storefront-public.service";
 import { StorefrontReturnService } from "./storefront-return.service";
@@ -35,6 +36,7 @@ export class MarketplacePublicController {
     private readonly publicStore: StorefrontPublicService,
     private readonly checkout: StorefrontCheckoutService,
     private readonly returns: StorefrontReturnService,
+    private readonly address: AddressAutocompleteService,
   ) {}
 
   @Public()
@@ -97,5 +99,26 @@ export class MarketplacePublicController {
   @Throttle({ default: { limit: 15, ttl: 60_000 } })
   requestReturn(@Body(new ZodValidationPipe(returnRequestSchema)) body: ReturnRequestInput) {
     return this.returns.requestCartReturn(body.email, body.references, body.reason, body.trackingNumber);
+  }
+
+  // Address autocomplete (Google Places proxy — key stays server-side).
+  @Public()
+  @Get("address/autocomplete")
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  async addressAutocomplete(
+    @Query("q") q?: string,
+    @Query("country") country?: string,
+    @Query("session") session?: string,
+  ) {
+    const predictions = await this.address.suggest((q ?? "").trim(), (country ?? "US").trim(), session);
+    return { predictions };
+  }
+
+  @Public()
+  @Get("address/details")
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  async addressDetails(@Query("placeId") placeId?: string, @Query("session") session?: string) {
+    const address = await this.address.details((placeId ?? "").trim(), session);
+    return { address };
   }
 }

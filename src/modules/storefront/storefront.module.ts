@@ -6,6 +6,7 @@ import { ShippoModule } from "../integrations/shippo/shippo.module";
 import { PaymentsModule } from "../payments/payments.module";
 import { WalletModule } from "../wallet/wallet.module";
 
+import { AddressAutocompleteService } from "./address-autocomplete.service";
 import { AdminMarketplaceConfigController } from "./admin-marketplace-config.controller";
 import { AdminStorefrontOrderController } from "./admin-storefront-order.controller";
 import { AdminStorefrontReturnController } from "./admin-storefront-return.controller";
@@ -44,6 +45,7 @@ import { VendorDomainService } from "./vendor-domain.service";
     StorefrontReturnService,
     StorefrontTaxService,
     VendorDomainService,
+    AddressAutocompleteService,
   ],
   exports: [
     StorefrontService,

@@ -110,6 +110,11 @@ const ConfigSchema = z.object({
   // re-fetch the tracker from Shippo's API on every event to verify state
   // independently of the payload.
   SHIPPO_WEBHOOK_SECRET: z.string().optional(),
+  // Google Places (server-side) — powers checkout address autocomplete via a
+  // backend proxy so the key is never exposed to the browser. When unset, the
+  // autocomplete endpoints return no suggestions and buyers type the address
+  // manually (the fields still work). Enable "Places API" on the key.
+  GOOGLE_PLACES_API_KEY: z.string().optional(),
   // Outbound HTTP timeout for Shippo REST calls. 8s default — Shippo's rate
   // endpoint can take 3–5s while it polls carriers, but anything over 10s
   // indicates a real problem.
