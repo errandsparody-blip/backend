@@ -3,6 +3,15 @@
  */
 import { z } from "zod";
 
+// Phone is optional at checkout. Treat an empty/whitespace string the same as
+// "not provided" so a blank field doesn't trip the min-length check — otherwise
+// the buyer sees a confusing "phone must be 7 characters" error on a field the
+// form labels "(optional)".
+const optionalPhone = z.preprocess(
+  (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+  z.string().trim().min(7).max(30).optional(),
+);
+
 export const storefrontShipAddressSchema = z.object({
   recipientName: z.string().trim().min(1, "Required.").max(120),
   line1: z.string().trim().min(1, "Required.").max(120),
@@ -11,7 +20,7 @@ export const storefrontShipAddressSchema = z.object({
   state: z.string().trim().toUpperCase().regex(/^[A-Z]{2}$/, "2-letter state."),
   postalCode: z.string().trim().min(3).max(12),
   country: z.string().trim().toUpperCase().length(2).default("US"),
-  phone: z.string().trim().min(7).max(30).optional(),
+  phone: optionalPhone,
 });
 export type StorefrontShipAddress = z.infer<typeof storefrontShipAddressSchema>;
 
@@ -36,7 +45,7 @@ export const checkoutSchema = z.object({
   shipAddress: storefrontShipAddressSchema,
   buyerEmail: z.string().trim().toLowerCase().email("Enter a valid email.").max(254),
   buyerName: z.string().trim().min(1).max(120).optional(),
-  buyerPhone: z.string().trim().min(7).max(30).optional(),
+  buyerPhone: optionalPhone,
   shippingSpeed: z.enum(["STANDARD", "EXPRESS"]),
   processor: z.enum(["STRIPE", "FLUTTERWAVE"]),
   discountCode: z.string().trim().min(1).max(40).optional(),
@@ -69,7 +78,7 @@ export const crossVendorCheckoutSchema = z.object({
   shipAddress: storefrontShipAddressSchema,
   buyerEmail: z.string().trim().toLowerCase().email("Enter a valid email.").max(254),
   buyerName: z.string().trim().min(1).max(120).optional(),
-  buyerPhone: z.string().trim().min(7).max(30).optional(),
+  buyerPhone: optionalPhone,
   // One delivery speed for the whole cart — one shipment, one shipping charge.
   shippingSpeed: z.enum(["STANDARD", "EXPRESS"]),
   groups: z.array(crossVendorGroupSchema).min(1, "Your cart is empty.").max(20),

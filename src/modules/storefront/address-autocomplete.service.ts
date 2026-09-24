@@ -60,6 +60,16 @@ export class AddressAutocompleteService {
       const res = await this.fetchJson(
         `https://maps.googleapis.com/maps/api/place/autocomplete/json?${params.toString()}`,
       );
+      // Google returns HTTP 200 even for errors, with the reason in `status`
+      // (e.g. REQUEST_DENIED when the legacy "Places API" isn't enabled or
+      // billing is off). Log it so config problems aren't silent.
+      const status = (res as { status?: string }).status;
+      if (status && status !== "OK" && status !== "ZERO_RESULTS") {
+        this.log.warn(
+          { status, error: (res as { error_message?: string }).error_message },
+          "address.autocomplete.google_status",
+        );
+      }
       const predictions = Array.isArray(res?.predictions) ? res.predictions : [];
       return predictions
         .filter((p: { description?: string; place_id?: string }) => p.description && p.place_id)
