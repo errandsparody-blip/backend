@@ -172,4 +172,24 @@ export abstract class PaymentProcessor {
     rawBody: Buffer | string,
     signature: string,
   ): ParsedPaymentEvent;
+
+  /**
+   * Verify a transaction directly with the processor (server-to-server), used by
+   * the return/redirect confirmation path so a paid order is recognised even if
+   * the webhook is delayed or never delivered. Returns the same normalised event
+   * shape as the webhook parser. Default: not supported → "other" (the webhook
+   * remains the source of truth). Rails that can verify (Flutterwave) override.
+   */
+  verifyTransaction(_args: {
+    transactionId?: string | null;
+    txRef?: string | null;
+  }): Promise<ParsedPaymentEvent> {
+    return Promise.resolve({
+      type: "other",
+      reference: null,
+      paymentRef: null,
+      amountCents: null,
+      currency: null,
+    });
+  }
 }

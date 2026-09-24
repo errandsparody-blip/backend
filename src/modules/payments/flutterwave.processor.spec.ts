@@ -53,6 +53,49 @@ describe("FlutterwaveProcessor.verifyAndParseWebhook", () => {
   });
 });
 
+describe("FlutterwaveProcessor.verifyTransaction", () => {
+  it("verifies by transaction id and returns a paid event (meta reference)", async () => {
+    const fetchMock = okFetch({
+      id: 285959875,
+      status: "successful",
+      amount: 56.98,
+      currency: "USD",
+      tx_ref: "SF-000007-abc123",
+      meta: { reference: "SF-000007" },
+    });
+    const proc = new FlutterwaveProcessor(SECRET, HASH, fetchMock as never);
+    const parsed = await proc.verifyTransaction({ transactionId: "285959875" });
+    expect(parsed.type).toBe("paid");
+    expect(parsed.reference).toBe("SF-000007");
+    expect(parsed.paymentRef).toBe("285959875");
+    expect(parsed.amountCents).toBe(5698);
+    expect(parsed.currency).toBe("USD");
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/transactions/285959875/verify");
+  });
+
+  it("verifies by tx_ref and derives the order reference when meta is absent", async () => {
+    const fetchMock = okFetch({
+      id: 111,
+      status: "successful",
+      amount: 12,
+      currency: "USD",
+      tx_ref: "CART-9f2-xyz789",
+    });
+    const proc = new FlutterwaveProcessor(SECRET, HASH, fetchMock as never);
+    const parsed = await proc.verifyTransaction({ txRef: "CART-9f2-xyz789" });
+    expect(parsed.type).toBe("paid");
+    expect(parsed.reference).toBe("CART-9f2"); // suffix stripped
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/transactions/verify_by_reference?tx_ref=CART-9f2-xyz789");
+  });
+
+  it("returns 'other' for a non-successful transaction", async () => {
+    const fetchMock = okFetch({ id: 1, status: "failed", amount: 10, currency: "USD" });
+    const proc = new FlutterwaveProcessor(SECRET, HASH, fetchMock as never);
+    const parsed = await proc.verifyTransaction({ transactionId: "1" });
+    expect(parsed.type).toBe("other");
+  });
+});
+
 describe("FlutterwaveProcessor.createCheckout", () => {
   it("creates a Standard payment with a flat subaccount split", async () => {
     const fetchMock = okFetch({ link: "https://checkout.flutterwave.com/pay/xyz" });

@@ -303,4 +303,54 @@ export class FlutterwaveProcessor extends PaymentProcessor {
     }
     return { type: "other", reference: null, paymentRef: null, amountCents: null, currency: null };
   }
+
+  /**
+   * Verify a transaction server-to-server (return/redirect confirmation path).
+   * Prefer the numeric transaction id (from the redirect's `transaction_id`);
+   * fall back to the `tx_ref`. Returns the same normalised shape as the webhook
+   * parser so the caller can reuse markPaidFromEvent. `this.call` throws on a
+   * non-success response, so a not-found/failed transaction surfaces as an error
+   * the caller catches (treated as "not confirmed").
+   */
+  override async verifyTransaction(args: {
+    transactionId?: string | null;
+    txRef?: string | null;
+  }): Promise<ParsedPaymentEvent> {
+    type VerifyData = {
+      id?: number | string;
+      status?: string;
+      amount?: number;
+      currency?: string;
+      tx_ref?: string;
+      meta?: { reference?: string };
+    };
+    let data: VerifyData | null = null;
+    if (args.transactionId) {
+      data = await this.call<VerifyData>(
+        `/transactions/${encodeURIComponent(String(args.transactionId))}/verify`,
+        "GET",
+      );
+    } else if (args.txRef) {
+      data = await this.call<VerifyData>(
+        `/transactions/verify_by_reference?tx_ref=${encodeURIComponent(args.txRef)}`,
+        "GET",
+      );
+    }
+    if (data && data.status === "successful") {
+      return {
+        type: "paid",
+        reference: data.meta?.reference ?? this.referenceFromTxRef(data.tx_ref ?? args.txRef ?? null),
+        paymentRef: data.id != null ? String(data.id) : null,
+        amountCents: typeof data.amount === "number" ? Math.round(data.amount * 100) : null,
+        currency: data.currency ?? null,
+      };
+    }
+    return { type: "other", reference: null, paymentRef: null, amountCents: null, currency: null };
+  }
+
+  /** tx_ref is "<orderReference>-<suffix>" — strip the trailing suffix. */
+  private referenceFromTxRef(txRef: string | null): string | null {
+    if (!txRef) return null;
+    return txRef.replace(/-[a-z0-9]+$/i, "");
+  }
 }

@@ -13,8 +13,10 @@ import { Throttle } from "@nestjs/throttler";
 import { Public } from "../../common/decorators/public.decorator";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import {
+  confirmPaymentSchema,
   crossVendorCheckoutSchema,
   crossVendorQuoteSchema,
+  type ConfirmPaymentInput,
   type CrossVendorCheckoutInput,
   type CrossVendorQuoteInput,
 } from "../../common/schemas/storefront-checkout.schema";
@@ -25,18 +27,27 @@ import {
   type ReturnRequestInput,
 } from "../../common/schemas/storefront-return.schema";
 
+import { Logger } from "@nestjs/common";
+
+import { PaymentProcessorRegistry } from "../payments/payment-processor.registry";
+
 import { AddressAutocompleteService } from "./address-autocomplete.service";
 import { StorefrontCheckoutService } from "./storefront-checkout.service";
+import { StorefrontOrderService } from "./storefront-order.service";
 import { StorefrontPublicService } from "./storefront-public.service";
 import { StorefrontReturnService } from "./storefront-return.service";
 
 @Controller({ path: "public/marketplace", version: "1" })
 export class MarketplacePublicController {
+  private readonly logger = new Logger(MarketplacePublicController.name);
+
   constructor(
     private readonly publicStore: StorefrontPublicService,
     private readonly checkout: StorefrontCheckoutService,
     private readonly returns: StorefrontReturnService,
     private readonly address: AddressAutocompleteService,
+    private readonly registry: PaymentProcessorRegistry,
+    private readonly orders: StorefrontOrderService,
   ) {}
 
   @Public()
@@ -81,6 +92,34 @@ export class MarketplacePublicController {
     @Body(new ZodValidationPipe(crossVendorCheckoutSchema)) body: CrossVendorCheckoutInput,
   ) {
     return this.checkout.createCrossVendorOrder(body);
+  }
+
+  // Confirm payment from the return/redirect: verify the transaction directly
+  // with the processor and mark the order paid (idempotent). This makes the
+  // receipt email, vendor payout, and order status resilient to a delayed or
+  // undelivered webhook — the webhook still wins if it arrives first, and this
+  // path is a no-op ("already_processed") once the order is paid.
+  @Public()
+  @Post("confirm")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  async confirm(
+    @Body(new ZodValidationPipe(confirmPaymentSchema)) body: ConfirmPaymentInput,
+  ): Promise<{ paid: boolean; reference: string | null }> {
+    try {
+      const event = await this.registry
+        .get(body.processor)
+        .verifyTransaction({ transactionId: body.transactionId, txRef: body.txRef });
+      if (event.type !== "paid") return { paid: false, reference: null };
+      const result = await this.orders.markPaidFromEvent(event);
+      // handled === true (we flipped it) or already_processed (a prior webhook /
+      // confirm did) both mean the order is paid.
+      const paid = result.handled === true || result.reason === "already_processed";
+      return { paid, reference: result.reference ?? event.reference ?? null };
+    } catch (err) {
+      this.logger.warn({ err: `${err}` }, "storefront.confirm.verify_failed");
+      return { paid: false, reference: null };
+    }
   }
 
   // Self-service returns: look up a cart's returnable orders by order # + email.

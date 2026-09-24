@@ -74,6 +74,21 @@ export const crossVendorQuoteSchema = z.object({
 });
 export type CrossVendorQuoteInput = z.infer<typeof crossVendorQuoteSchema>;
 
+// Return/redirect confirmation: verify the transaction with the processor and
+// mark the order paid, so a delayed/undelivered webhook doesn't leave a paid
+// order stuck as pending. At least one identifier is required.
+export const confirmPaymentSchema = z
+  .object({
+    processor: z.enum(["STRIPE", "FLUTTERWAVE"]).default("FLUTTERWAVE"),
+    transactionId: z.string().trim().min(1).max(64).optional(),
+    txRef: z.string().trim().min(1).max(120).optional(),
+  })
+  .refine((v) => Boolean(v.transactionId || v.txRef), {
+    message: "Provide a transactionId or txRef.",
+    path: ["txRef"],
+  });
+export type ConfirmPaymentInput = z.infer<typeof confirmPaymentSchema>;
+
 export const crossVendorCheckoutSchema = z.object({
   shipAddress: storefrontShipAddressSchema,
   buyerEmail: z.string().trim().toLowerCase().email("Enter a valid email.").max(254),
