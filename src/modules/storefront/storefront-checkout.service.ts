@@ -91,15 +91,6 @@ export interface CheckoutQuote {
 @Injectable()
 export class StorefrontCheckoutService {
   private readonly logger = new Logger(StorefrontCheckoutService.name);
-  /**
-   * Unified cart payment: buyer pays ONE platform charge for a multi-vendor
-   * cart; the platform then pays out each vendor (collect-then-payout). OFF by
-   * default — verify in staging before enabling (it moves real money through the
-   * platform balance). When off, a multi-vendor cart uses the per-store direct
-   * charges. Single-vendor carts are always a direct charge regardless.
-   */
-  private readonly unifiedCartPayment =
-    (process.env.STOREFRONT_UNIFIED_CART_PAYMENT ?? "").toLowerCase() === "true";
 
   constructor(
     private readonly prisma: PrismaService,
@@ -205,25 +196,28 @@ export class StorefrontCheckoutService {
       cartGroupId?: string | null;
     },
   ): Promise<{ reference: string; checkoutUrl: string }> {
-    // Persist the sub-order (reserve stock + insert) with no collector — this is
-    // a direct-charge order (buyer → vendor).
+    // Collect-then-payout: the buyer pays the PLATFORM (USA Errands holds the
+    // money), and the vendor's share is released later (after their return
+    // window, or a 24h buffer if they take no returns). This keeps refunds
+    // instant + clawback-free — the business never pays a vendor money it might
+    // have to refund. The vendor is credited immediately in their earnings
+    // ledger (payout_status HELD + payout_release_at), just not withdrawable yet.
+    const collector = this.platformCollector();
     const persisted = await this.persistSubOrder(store, items, params, {
-      collectorProcessor: null,
+      collectorProcessor: collector.key,
     });
 
-    // Open the per-vendor hosted checkout (direct destination charge). Opened
-    // AFTER the persist tx commits (a network call must not hold a DB
-    // transaction); on failure we compensate by releasing the reservation.
+    // Open ONE platform charge. Opened AFTER the persist tx commits (a network
+    // call must not hold a DB transaction); on failure we compensate by
+    // releasing the reservation.
     let checkoutUrl: string;
     let paymentRef: string;
     try {
       const web = loadConfig().WEB_PUBLIC_URL;
-      const res = await this.registry.get(params.processor).createCheckout({
+      const res = await collector.processor.createPlatformCheckout({
         reference: persisted.reference,
         amountCents: persisted.totalCents,
-        platformFeeCents: persisted.platformFeeCents,
         currency: "USD",
-        vendorExternalAccountId: persisted.vendorExternalAccountId,
         buyerEmail: params.buyerEmail,
         successUrl: `${web}/store/${store.slug}/order/${persisted.reference}?paid=1`,
         cancelUrl: `${web}/store/${store.slug}/checkout?cancelled=1`,
@@ -478,10 +472,12 @@ export class StorefrontCheckoutService {
     // ship together (and, next step, pack them into one physical shipment).
     const cartGroupId = legs.length > 1 ? randomUUID() : null;
 
-    // Unified payment (flag on) — a MULTI-vendor cart is ONE platform charge; the
-    // platform pays out each vendor after it confirms. Single-vendor carts stay a
-    // direct charge (money straight to the vendor, no platform holding).
-    if (this.unifiedCartPayment && legs.length > 1 && cartGroupId) {
+    // A MULTI-vendor cart is ONE platform charge; the platform holds the money
+    // and releases each vendor's share after their return window (collect-then-
+    // payout). Single-vendor carts go through placeOrder below, which now also
+    // collects to the platform — so the platform holds the money for EVERY
+    // storefront order, keeping refunds instant + clawback-free.
+    if (legs.length > 1 && cartGroupId) {
       return this.openUnifiedCart(legs, input, chosen, schedule, cartGroupId);
     }
 

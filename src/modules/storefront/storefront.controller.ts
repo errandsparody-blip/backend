@@ -103,6 +103,12 @@ export class StorefrontController {
     return this.orders.listForVendor(user.vendorId!);
   }
 
+  // Storefront earnings wallet — held (on the way) vs paid out.
+  @Get("earnings")
+  earnings(@CurrentUser() user: AuthenticatedUser) {
+    return this.orders.earningsForVendor(user.vendorId!);
+  }
+
   @Get("orders/:reference")
   getOrder(
     @CurrentUser() user: AuthenticatedUser,

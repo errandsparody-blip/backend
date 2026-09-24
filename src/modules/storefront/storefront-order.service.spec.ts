@@ -28,6 +28,17 @@ function makeSvc(subs: SubRow[]) {
     $queryRaw: jest.fn(async (q: never) => {
       const t = sqlText(q);
       if (t.includes("FROM storefront_orders") && t.includes("cart_group_id")) return subs;
+      // holdVendorPayout's per-order SELECT (returns policy, no cart_group_id).
+      if (t.includes("returns_allowed") && t.includes("so.id")) {
+        const s = subs[0]!;
+        return [
+          {
+            payout_status: s.payout_status,
+            returns_allowed: s.returns_allowed ?? true,
+            return_window_days: s.return_window_days ?? 30,
+          },
+        ];
+      }
       // Conditional paid-flip (UPDATE … RETURNING id).
       if (t.includes("UPDATE") && t.includes("status = 'PAID'")) return [{ id: "flipped" }];
       if (t.includes("FROM vendor_payout_accounts")) return [{ external_account_id: "acct_v" }];
@@ -48,7 +59,8 @@ function makeSvc(subs: SubRow[]) {
   return { svc, transferToVendor, fulfillment, prisma, executed };
 }
 
-// Default: vendors take no returns → paid out immediately (window = 0).
+// Vendors take no returns → still HELD for a 24h buffer (money always lands on
+// the platform first; a cancel/refund right after purchase must be clawback-free).
 const SUBS: SubRow[] = [
   { id: "o1", reference: "SF-000001", status: "PENDING_PAYMENT", total_cents: 3600, platform_fee_cents: 1100, currency: "USD", vendor_id: "v1", processor: "STRIPE", payout_status: "PENDING", returns_allowed: false, return_window_days: 0 },
   { id: "o2", reference: "SF-000002", status: "PENDING_PAYMENT", total_cents: 5450, platform_fee_cents: 450, currency: "USD", vendor_id: "v2", processor: "STRIPE", payout_status: "PENDING", returns_allowed: false, return_window_days: 0 },
@@ -63,20 +75,15 @@ describe("StorefrontOrderService.distributeCartPayment (unified cart)", () => {
     currency: "USD",
   };
 
-  it("marks every sub-order paid, bridges fulfillment, and pays each vendor their share", async () => {
-    const { svc, transferToVendor, fulfillment } = makeSvc(SUBS);
+  it("marks every sub-order paid, bridges fulfillment, and HOLDS each vendor share (24h buffer, no returns)", async () => {
+    const { svc, transferToVendor, fulfillment, executed } = makeSvc(SUBS);
     const res = await svc.markPaidFromEvent(cartEvent as never);
     expect(res.handled).toBe(true);
     expect(fulfillment.createForPaidOrder).toHaveBeenCalledTimes(2);
-    // Vendor payout = total − platform fee.
-    expect(transferToVendor).toHaveBeenCalledTimes(2);
-    const amounts = transferToVendor.mock.calls
-      .map((c) => (c[0] as { amountCents: number }).amountCents)
-      .sort((a, b) => a - b);
-    expect(amounts).toEqual([2500, 5000]); // 3600−1100, 5450−450
-    // Idempotency: each transfer is keyed on the sub-order reference.
-    const refs = transferToVendor.mock.calls.map((c) => (c[0] as { reference: string }).reference).sort();
-    expect(refs).toEqual(["SF-000001", "SF-000002"]);
+    // Money always lands on the platform first — no payout at payment time, even
+    // when the vendor takes no returns (a 24h buffer covers an immediate cancel).
+    expect(transferToVendor).not.toHaveBeenCalled();
+    expect(executed.some((s) => s.includes("payout_status = 'HELD'"))).toBe(true);
   });
 
   it("rejects a platform charge whose amount doesn't match the cart total", async () => {

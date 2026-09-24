@@ -1387,15 +1387,26 @@ export function storefrontOrderConfirmedTemplate(args: {
 
 /**
  * Vendor "you made a sale" — sent to the vendor's active users when a paid
- * marketplace/storefront order lands in their fulfillment queue.
+ * marketplace/storefront order comes in. USA Errands fulfils it; the vendor's
+ * only job is to keep stock in the warehouse. Their earnings are credited to
+ * their storefront wallet and pay out automatically after the return window.
  */
 export function storefrontVendorSaleTemplate(args: {
   businessName: string;
   orderRef: string;
-  orderId: string;
   units: number;
+  earningsCents?: number;
+  /** When the payout is scheduled to release (end of the hold window). */
+  payoutOn?: string | null;
 }): RenderedEmail {
   const items = `${args.units} item${args.units === 1 ? "" : "s"}`;
+  const earnings =
+    typeof args.earningsCents === "number"
+      ? `$${(args.earningsCents / 100).toFixed(2)}`
+      : null;
+  const payoutLine = args.payoutOn
+    ? `Your earnings${earnings ? ` of <strong>${earnings}</strong>` : ""} are in your storefront wallet and will pay out to your account around <strong>${escape(args.payoutOn)}</strong> (after your return window).`
+    : `Your earnings${earnings ? ` of <strong>${earnings}</strong>` : ""} are in your storefront wallet and pay out automatically after your return window.`;
   return {
     subject: `New sale — order ${args.orderRef}`,
     html: shell({
@@ -1403,12 +1414,15 @@ export function storefrontVendorSaleTemplate(args: {
       title: "You made a sale 🎉",
       bodyHtml:
         `<p style="margin:0 0 12px 0;">Hi ${escape(args.businessName)}, you have a new order <strong>${escape(args.orderRef)}</strong> for <strong>${items}</strong>.</p>` +
-        `<p style="margin:0 0 12px 0;">It's in your fulfillment queue now — open your dashboard to pack and ship it. Your payout is handled automatically once it's confirmed.</p>`,
-      cta: { label: "View order", href: `${cfg.WEB_PUBLIC_URL}/orders/${encodeURIComponent(args.orderId)}` },
+        `<p style="margin:0 0 12px 0;">USA Errands handles picking, packing and shipping from our warehouse — there's nothing you need to do.</p>` +
+        `<p style="margin:0 0 12px 0;">${payoutLine}</p>`,
+      cta: { label: "View earnings", href: `${cfg.WEB_PUBLIC_URL}/storefront` },
     }),
     text:
       `You made a sale — order ${args.orderRef} for ${items}.\n\n` +
-      `It's in your fulfillment queue. View: ${cfg.WEB_PUBLIC_URL}/orders/${args.orderId}`,
+      `USA Errands handles fulfillment; there's nothing for you to do. ` +
+      `Your earnings are in your storefront wallet and pay out after your return window.\n` +
+      `View earnings: ${cfg.WEB_PUBLIC_URL}/storefront`,
   };
 }
 

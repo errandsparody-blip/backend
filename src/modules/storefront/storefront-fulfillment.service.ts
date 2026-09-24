@@ -63,6 +63,7 @@ interface StorefrontOrderFull {
   shipping_speed: string;
   shipping_cents: number;
   total_cents: number;
+  platform_fee_cents: number;
   cart_group_id: string | null;
   fulfillment_order_id: string | null;
 }
@@ -86,7 +87,7 @@ export class StorefrontFulfillmentService {
     const rows = await this.prisma.$queryRaw<StorefrontOrderFull[]>(Prisma.sql`
       SELECT id, reference, vendor_id, buyer_email, buyer_name, buyer_phone,
              ship_address, items, shipping_speed, shipping_cents, total_cents,
-             cart_group_id, fulfillment_order_id
+             platform_fee_cents, cart_group_id, fulfillment_order_id
       FROM storefront_orders WHERE id = ${storefrontOrderId}::uuid
     `);
     const so = rows[0];
@@ -259,18 +260,21 @@ export class StorefrontFulfillmentService {
 
         // Notify the VENDOR they made a sale — in-app notification + email to
         // their active users (best-effort; never blocks the order).
+        const earningsCents = Math.max(0, so.total_cents - so.platform_fee_cents);
         const sale = storefrontVendorSaleTemplate({
           businessName: vendor?.businessName ?? "there",
           orderRef: so.reference,
-          orderId,
           units,
+          earningsCents,
         });
         await this.notifications.emit({
           vendorId: so.vendor_id,
           type: "storefront.sale",
           title: "You made a sale",
-          body: `Order ${so.reference} — ${units} item${units === 1 ? "" : "s"} to fulfil.`,
-          href: `/orders/${orderId}`,
+          // USA Errands fulfils storefront orders — the vendor just earns. Point
+          // them at their storefront earnings, not a fulfillment queue.
+          body: `Order ${so.reference} — ${units} item${units === 1 ? "" : "s"}. We'll handle fulfillment; your earnings are in your storefront wallet.`,
+          href: `/storefront`,
           email: { subject: sale.subject, html: sale.html, text: sale.text },
         });
       } catch {

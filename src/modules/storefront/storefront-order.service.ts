@@ -326,6 +326,14 @@ export class StorefrontOrderService {
       );
     }
 
+    // Hold the vendor's share on the platform balance for their return window
+    // (or a 24h buffer if they take no returns), so a refund/cancel during the
+    // window is instant + clawback-free. No-op for legacy direct-charge orders
+    // (payout_status NONE). Best-effort; a hiccup must not fail the webhook.
+    await this.holdVendorPayout(order.id).catch((err) =>
+      this.logger.error({ err: `${err}`, reference: order.reference }, "storefront.order.hold_failed"),
+    );
+
     return { handled: true, orderId: order.id, reference: order.reference };
   }
 
@@ -407,12 +415,10 @@ export class StorefrontOrderService {
           );
         }
       }
-      // Hold the vendor's share for their return window (so refunds during the
-      // window are instant and clawback-free), or pay now when the vendor takes
-      // no returns. Best-effort; a hiccup must not fail the webhook (buyer paid).
-      const holdDays =
-        (o.returns_allowed ?? true) ? Math.max(0, o.return_window_days ?? 30) : 0;
-      await this.holdOrPayVendor(o, holdDays).catch((err) =>
+      // Hold the vendor's share for their return window (or a 24h buffer when
+      // they take no returns), so refunds during the window are instant and
+      // clawback-free. Best-effort; a hiccup must not fail the webhook.
+      await this.holdVendorPayout(o.id).catch((err) =>
         this.logger.error({ err: `${err}`, reference: o.reference }, "storefront.cart.payout_failed"),
       );
     }
@@ -441,37 +447,41 @@ export class StorefrontOrderService {
   }
 
   /**
-   * At payment time, either HOLD the vendor's share for `holdDays` (their return
-   * window) or pay it now. Holding sets payout_status = 'HELD' + payout_release_at
-   * so the release sweep pays it once the window passes with no open return; a
-   * refund during the window just cancels the hold — no clawback. holdDays = 0
-   * (vendor takes no returns) pays immediately via payoutVendor. Only acts on a
-   * PENDING row, so a duplicate webhook never re-holds or double-pays.
+   * At payment time, HOLD the vendor's share on the platform balance until it's
+   * safe to release: their full return window if they take returns, otherwise a
+   * 24h buffer (a cancel/refund can still happen right after purchase). Sets
+   * payout_status = 'HELD' + payout_release_at; the hourly release sweep pays it
+   * out once the window passes with no open return. A refund during the window
+   * just cancels the hold — no clawback, so the business never pays a vendor
+   * money it might have to refund. Only acts on a PENDING row (set when the order
+   * was collected to the platform), so a duplicate webhook never re-holds, and
+   * it's a no-op for legacy direct-charge orders (payout_status NONE).
    */
-  private async holdOrPayVendor(
-    o: {
-      id: string;
-      reference: string;
-      total_cents: number;
-      platform_fee_cents: number;
-      currency: string;
-      vendor_id: string;
-      processor: string;
-      payout_status: string;
-    },
-    holdDays: number,
-  ): Promise<void> {
-    if (o.payout_status !== "PENDING") return;
-    if (holdDays <= 0) {
-      await this.payoutVendor(o);
-      return;
-    }
+  private async holdVendorPayout(orderId: string): Promise<void> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        payout_status: string;
+        returns_allowed: boolean | null;
+        return_window_days: number | null;
+      }>
+    >(Prisma.sql`
+      SELECT so.payout_status, vs.returns_allowed, vs.return_window_days
+      FROM storefront_orders so
+      LEFT JOIN vendor_storefronts vs ON vs.vendor_id = so.vendor_id
+      WHERE so.id = ${orderId}::uuid
+    `);
+    const o = rows[0];
+    if (!o || o.payout_status !== "PENDING") return;
+    // Return window in hours if the vendor takes returns; else a 24h buffer.
+    const holdHours = (o.returns_allowed ?? true)
+      ? Math.max(1, o.return_window_days ?? 30) * 24
+      : 24;
     await this.prisma.$executeRaw(Prisma.sql`
       UPDATE storefront_orders
       SET payout_status = 'HELD',
-          payout_release_at = now() + (${holdDays} * interval '1 day'),
+          payout_release_at = now() + (${holdHours} * interval '1 hour'),
           updated_at = now()
-      WHERE id = ${o.id}::uuid AND payout_status = 'PENDING'
+      WHERE id = ${orderId}::uuid AND payout_status = 'PENDING'
     `);
   }
 
@@ -560,6 +570,66 @@ export class StorefrontOrderService {
       ORDER BY created_at DESC
       LIMIT 200
     `);
+  }
+
+  /**
+   * Vendor storefront earnings wallet. The vendor's share of each paid order
+   * (total − platform fee) is recognised immediately and grouped by where the
+   * money is: HELD/PENDING = held on the platform balance (paying out on
+   * payout_release_at), PAID = already sent to their account. Refunded/cancelled
+   * holds drop out. Gives the vendor a clear "you've earned X, Y is on the way,
+   * Z has paid out" without exposing platform internals.
+   */
+  async earningsForVendor(vendorId: string): Promise<{
+    heldCents: number;
+    paidCents: number;
+    currency: string;
+    upcoming: Array<{ reference: string; amountCents: number; releaseAt: string | null; status: string }>;
+    recentPaid: Array<{ reference: string; amountCents: number; paidAt: string | null }>;
+  }> {
+    const totals = await this.prisma.$queryRaw<
+      Array<{ held_cents: bigint | null; paid_cents: bigint | null }>
+    >(Prisma.sql`
+      SELECT
+        COALESCE(SUM(total_cents - platform_fee_cents) FILTER (WHERE payout_status IN ('HELD','PENDING')), 0) AS held_cents,
+        COALESCE(SUM(total_cents - platform_fee_cents) FILTER (WHERE payout_status = 'PAID'), 0) AS paid_cents
+      FROM storefront_orders
+      WHERE vendor_id = ${vendorId}::uuid
+    `);
+    const upcoming = await this.prisma.$queryRaw<
+      Array<{ reference: string; amount_cents: number; release_at: Date | null; payout_status: string }>
+    >(Prisma.sql`
+      SELECT reference, (total_cents - platform_fee_cents) AS amount_cents, payout_release_at AS release_at, payout_status
+      FROM storefront_orders
+      WHERE vendor_id = ${vendorId}::uuid AND payout_status IN ('HELD','PENDING')
+      ORDER BY payout_release_at ASC NULLS LAST, created_at ASC
+      LIMIT 100
+    `);
+    const recentPaid = await this.prisma.$queryRaw<
+      Array<{ reference: string; amount_cents: number; paid_at: Date | null }>
+    >(Prisma.sql`
+      SELECT reference, (total_cents - platform_fee_cents) AS amount_cents, paid_at
+      FROM storefront_orders
+      WHERE vendor_id = ${vendorId}::uuid AND payout_status = 'PAID'
+      ORDER BY updated_at DESC
+      LIMIT 50
+    `);
+    return {
+      heldCents: Number(totals[0]?.held_cents ?? 0),
+      paidCents: Number(totals[0]?.paid_cents ?? 0),
+      currency: "USD",
+      upcoming: upcoming.map((r) => ({
+        reference: r.reference,
+        amountCents: Number(r.amount_cents),
+        releaseAt: r.release_at ? r.release_at.toISOString() : null,
+        status: r.payout_status,
+      })),
+      recentPaid: recentPaid.map((r) => ({
+        reference: r.reference,
+        amountCents: Number(r.amount_cents),
+        paidAt: r.paid_at ? r.paid_at.toISOString() : null,
+      })),
+    };
   }
 
   /** One storefront order (vendor-scoped) with its line snapshot. */

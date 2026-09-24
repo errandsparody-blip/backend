@@ -159,54 +159,31 @@ describe("StorefrontCheckoutService.createCrossVendorOrder", () => {
     ],
   };
 
-  it("charges shipping once across the cart and returns a checkout per store", async () => {
-    const { service, createCheckout, shippo } = makeDeps({ rates: TWO });
+  it("opens ONE platform charge for a multi-vendor cart (money held by the platform)", async () => {
+    const { service, createPlatformCheckout, createCheckout, shippo } = makeDeps({ rates: TWO });
     const res = await service.createCrossVendorOrder(shared);
-    expect(res.results).toHaveLength(2);
     expect(res.errors).toHaveLength(0);
-    expect(res.results.map((r) => r.slug)).toEqual(["acme", "beta"]);
+    // A multi-vendor cart is always ONE platform charge now — the platform holds
+    // the money and releases each vendor's share after their return window.
+    expect(res.results).toHaveLength(1);
+    expect(res.results[0]!.slug).toBe("cart");
+    expect(res.results[0]!.reference).toMatch(/^CART-/);
+    expect(createPlatformCheckout).toHaveBeenCalledTimes(1);
+    expect(createCheckout).not.toHaveBeenCalled();
     // One consolidated shipping estimate for the cart.
     expect(shippo.getRates).toHaveBeenCalledTimes(1);
-    // Buyer pays product + delivery only — fulfillment is charged to the vendor's
-    // wallet, NOT the buyer. So platform fee = shipping (+ tax). Shipping (800) is
-    // charged once on one leg; the other leg has no shipping and no tax → 0.
-    const fees = createCheckout.mock.calls.map((c) => (c[0] as { platformFeeCents: number }).platformFeeCents).sort((a, b) => a - b);
-    expect(fees).toEqual([0, 800]);
+    // Charge total = Σ sub-order totals (product + shipping only; fulfillment is
+    // billed to vendor wallets, not the buyer): acme 3300 (2500+800) + beta 5000 = 8300.
+    expect((createPlatformCheckout.mock.calls[0][0] as { amountCents: number }).amountCents).toBe(8300);
   });
 
-  it("unified mode: opens ONE platform charge and returns a single cart result", async () => {
-    const OLD = process.env.STOREFRONT_UNIFIED_CART_PAYMENT;
-    process.env.STOREFRONT_UNIFIED_CART_PAYMENT = "true";
-    try {
-      const { service, createPlatformCheckout, createCheckout } = makeDeps({ rates: TWO });
-      const res = await service.createCrossVendorOrder(shared);
-      expect(res.errors).toHaveLength(0);
-      // One result for the whole cart (single "Complete payment" button).
-      expect(res.results).toHaveLength(1);
-      expect(res.results[0]!.slug).toBe("cart");
-      expect(res.results[0]!.reference).toMatch(/^CART-/);
-      // Exactly one platform charge; no per-vendor destination charges.
-      expect(createPlatformCheckout).toHaveBeenCalledTimes(1);
-      expect(createCheckout).not.toHaveBeenCalled();
-      // Charge total = Σ sub-order totals (product + shipping only; fulfillment is
-      // billed to vendor wallets, not the buyer): acme 3300 (2500+800) + beta 5000
-      // (5000+0) = 8300.
-      expect((createPlatformCheckout.mock.calls[0][0] as { amountCents: number }).amountCents).toBe(8300);
-    } finally {
-      process.env.STOREFRONT_UNIFIED_CART_PAYMENT = OLD;
-    }
-  });
-
-  it("reports a leg whose payment fails without dropping the others", async () => {
-    const { service, createCheckout } = makeDeps({ rates: TWO });
-    createCheckout
-      .mockResolvedValueOnce({ checkoutUrl: "https://pay/1", paymentRef: "pi_1" })
-      .mockRejectedValueOnce(new Error("processor down"));
+  it("fails the whole cart (no partial charge) when the platform charge can't open", async () => {
+    const { service, createPlatformCheckout } = makeDeps({ rates: TWO });
+    createPlatformCheckout.mockRejectedValueOnce(new Error("processor down"));
     const res = await service.createCrossVendorOrder(shared);
-    expect(res.results).toHaveLength(1);
-    expect(res.results[0]!.slug).toBe("acme");
+    expect(res.results).toHaveLength(0);
     expect(res.errors).toHaveLength(1);
-    expect(res.errors[0]!.slug).toBe("beta");
+    expect(res.errors[0]!.slug).toBe("cart");
     expect(res.errors[0]!.code).toBe("storefront_checkout_failed");
   });
 });
@@ -277,8 +254,8 @@ describe("StorefrontCheckoutService.createOrder", () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it("reserves stock, creates the order, and opens a split checkout", async () => {
-    const { service, createCheckout } = makeDeps({ rates: TWO });
+  it("reserves stock, creates the order, and opens a platform (held) checkout", async () => {
+    const { service, createPlatformCheckout, createCheckout } = makeDeps({ rates: TWO });
     const res = await service.createOrder("acme", {
       items: [{ productId: PRODUCT, quantity: 2 }],
       shipAddress: ADDR,
@@ -287,12 +264,13 @@ describe("StorefrontCheckoutService.createOrder", () => {
       processor: "STRIPE",
     });
     expect(res.reference).toBe("SF-000001");
-    expect(res.checkoutUrl).toBe("https://pay/x");
-    // Buyer pays product + delivery only (fulfillment is charged to the vendor
-    // wallet, not the buyer): total = product(5000) + shipping(800) = 5800;
-    // platform fee = shipping(800).
-    expect(createCheckout).toHaveBeenCalledWith(
-      expect.objectContaining({ amountCents: 5800, platformFeeCents: 800, currency: "USD" }),
+    // Single-store orders now also collect to the PLATFORM (money held), so the
+    // vendor's share can be released after the return window / 24h buffer.
+    expect(res.checkoutUrl).toBe("https://pay/platform");
+    expect(createCheckout).not.toHaveBeenCalled();
+    // Buyer pays product + delivery only: total = product(5000) + shipping(800) = 5800.
+    expect(createPlatformCheckout).toHaveBeenCalledWith(
+      expect.objectContaining({ amountCents: 5800, currency: "USD" }),
     );
   });
 });
