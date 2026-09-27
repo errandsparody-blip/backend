@@ -47,6 +47,14 @@ export interface MarkPaidResult {
 @Injectable()
 export class StorefrontOrderService {
   private readonly logger = new Logger(StorefrontOrderService.name);
+  /**
+   * Cross-vendor consolidation: a multi-vendor cart ships as ONE parcel with ONE
+   * label. When on, the paid cart's legs are linked to a single primary
+   * fulfillment order so the warehouse buys only one label. OFF by default; must
+   * match the same flag the ship-sync service reads.
+   */
+  private readonly consolidateShipments =
+    (process.env.STOREFRONT_CONSOLIDATE_SHIPMENTS ?? "").toLowerCase() === "true";
 
   constructor(
     private readonly prisma: PrismaService,
@@ -423,6 +431,16 @@ export class StorefrontOrderService {
       );
     }
 
+    // Consolidate the cart into ONE physical shipment: designate the shipping
+    // leg (earliest created) as the primary fulfillment order and link every
+    // other leg to it, so the warehouse buys ONE label for the whole cart (the
+    // pack pipeline refuses a label for a linked sibling). Best-effort.
+    if (this.consolidateShipments) {
+      await this.linkCartGroupShipment(cartGroupId).catch((err) =>
+        this.logger.error({ err: `${err}`, cartGroupId }, "storefront.cart.link_shipment_failed"),
+      );
+    }
+
     // One buyer confirmation + receipt for the whole cart (best-effort;
     // idempotent per cart group).
     const grandTotalCents = subs.reduce((s, o) => s + o.total_cents, 0);
@@ -457,6 +475,42 @@ export class StorefrontOrderService {
    * was collected to the platform), so a duplicate webhook never re-holds, and
    * it's a no-op for legacy direct-charge orders (payout_status NONE).
    */
+  /**
+   * Link every fulfillment leg of a cart group to a single primary so the whole
+   * cart ships as ONE parcel with ONE label. The primary is the earliest-created
+   * leg (the one the buyer's single shipping charge was placed on); the others
+   * are marked as consolidated siblings via consolidated_into_order_id, which the
+   * pack pipeline uses to skip buying a second label. Idempotent: only links legs
+   * not already linked; safe to re-run on a duplicate webhook.
+   */
+  private async linkCartGroupShipment(cartGroupId: string): Promise<void> {
+    const legs = await this.prisma.$queryRaw<Array<{ fid: string }>>(Prisma.sql`
+      SELECT so.fulfillment_order_id AS fid
+      FROM storefront_orders so
+      WHERE so.cart_group_id = ${cartGroupId}::uuid
+        AND so.fulfillment_order_id IS NOT NULL
+      ORDER BY so.created_at ASC
+    `);
+    if (legs.length < 2) return; // single-leg cart — nothing to consolidate
+    const primaryId = legs[0]!.fid;
+    const siblingIds = legs.slice(1).map((l) => l.fid);
+
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE orders SET is_consolidated_primary = true, updated_at = now()
+      WHERE id = ${primaryId}::uuid
+    `);
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE orders
+      SET consolidated_into_order_id = ${primaryId}::uuid, updated_at = now()
+      WHERE id IN (${Prisma.join(siblingIds.map((id) => Prisma.sql`${id}::uuid`))})
+        AND consolidated_into_order_id IS NULL
+    `);
+    this.logger.log(
+      { cartGroupId, primaryId, siblings: siblingIds.length },
+      "storefront.cart.shipment_linked",
+    );
+  }
+
   private async holdVendorPayout(orderId: string): Promise<void> {
     const rows = await this.prisma.$queryRaw<
       Array<{

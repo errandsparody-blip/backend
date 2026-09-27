@@ -242,6 +242,29 @@ export class OrderPackService {
    * Limited to workflowVersion=2 by definition (only v2 orders enter
    * PENDING_PACKING). Vendor is joined for the queue label.
    */
+  /**
+   * IDs of fulfillment orders that are consolidated SIBLINGS of a cart group —
+   * they ship under a primary leg's single label, so they must never appear in
+   * the pack/rate queues or buy their own label. (Raw read: the column is
+   * managed outside the Prisma model.)
+   */
+  private async consolidatedSiblingIds(): Promise<string[]> {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT id FROM orders WHERE consolidated_into_order_id IS NOT NULL
+    `);
+    return rows.map((r) => r.id);
+  }
+
+  /** True when this fulfillment order ships under another leg's consolidated label. */
+  private async isConsolidatedSibling(orderId: string): Promise<boolean> {
+    const rows = await this.prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT id FROM orders
+      WHERE id = ${orderId}::uuid AND consolidated_into_order_id IS NOT NULL
+      LIMIT 1
+    `);
+    return rows.length > 0;
+  }
+
   async listPackQueue(input: { limit: number }): Promise<
     Array<{
       id: string;
@@ -254,9 +277,11 @@ export class OrderPackService {
       shipState: string;
     }>
   > {
+    const siblingIds = await this.consolidatedSiblingIds();
     const rows = await this.prisma.order.findMany({
       where: {
         status: "PENDING_PACKING" as OrderStatus,
+        ...(siblingIds.length ? { id: { notIn: siblingIds } } : {}),
       },
       orderBy: { createdAt: "asc" },
       take: input.limit,
@@ -298,8 +323,12 @@ export class OrderPackService {
       "AWAITING_SHIPPING_SELECTION" as OrderStatus,
       "AWAITING_WALLET_FUNDING" as OrderStatus,
     ];
+    const siblingIds = await this.consolidatedSiblingIds();
     const rows = await this.prisma.order.findMany({
-      where: { status: { in: targetStatuses } },
+      where: {
+        status: { in: targetStatuses },
+        ...(siblingIds.length ? { id: { notIn: siblingIds } } : {}),
+      },
       orderBy: { updatedAt: "asc" },
       take: input.limit,
       include: {
@@ -1176,6 +1205,15 @@ export class OrderPackService {
     });
     if (!order) throw new NotFoundException();
 
+    // Consolidated sibling of a cart group: it ships under the primary leg's
+    // single label — there is no separate label to rate or buy for it.
+    if (await this.isConsolidatedSibling(orderId)) {
+      throw new ConflictException({
+        message: "This order ships together with the rest of the cart under one label — no separate label to buy.",
+        code: "order_consolidated_sibling",
+      });
+    }
+
     if (
       (order as unknown as { workflowVersion: number }).workflowVersion !== 2
     ) {
@@ -1490,6 +1528,15 @@ export class OrderPackService {
       select: { id: true },
     });
     if (!exists) throw new NotFoundException();
+
+    // Consolidated sibling: ships under the primary leg's single label — never
+    // buy a second label for it.
+    if (await this.isConsolidatedSibling(orderId)) {
+      throw new ConflictException({
+        message: "This order ships together with the rest of the cart under one label — no separate label to buy.",
+        code: "order_consolidated_sibling",
+      });
+    }
 
     // Whole path in a single transaction so the wallet debit and the
     // status update commit together. WalletService.debit accepts our

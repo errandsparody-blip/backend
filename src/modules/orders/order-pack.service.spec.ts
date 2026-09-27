@@ -38,6 +38,9 @@ class FakePrisma {
   order = {
     findFirst: jest.fn(async () => null),
   };
+  // Consolidation guard reads consolidated_into_order_id via raw SQL; default to
+  // "not a sibling" so the existing pre-flight tests exercise their own guards.
+  $queryRaw = jest.fn(async () => []);
 }
 
 describe("OrderPackService — pre-flight validation", () => {
@@ -187,6 +190,19 @@ describe("OrderPackService — pre-flight validation", () => {
     await expect(svc.fetchRates(ORDER_ID, ACTOR_ID)).rejects.toBeInstanceOf(
       ConflictException,
     );
+  });
+
+  it("fetchRates: refuses a consolidated sibling (ships under the primary's one label)", async () => {
+    prisma.order.findFirst.mockResolvedValueOnce({
+      id: ORDER_ID,
+      status: "PACKING_COMPLETED",
+      workflowVersion: 2,
+    } as never);
+    // consolidated_into_order_id lookup returns a row → this is a sibling.
+    prisma.$queryRaw.mockResolvedValueOnce([{ id: ORDER_ID }] as never);
+    await expect(svc.fetchRates(ORDER_ID, ACTOR_ID)).rejects.toMatchObject({
+      response: { code: "order_consolidated_sibling" },
+    });
   });
 
   it("sendToPackQueue: unknown order returns 404 (never confirms existence)", async () => {
