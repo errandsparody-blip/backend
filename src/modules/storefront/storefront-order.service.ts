@@ -704,7 +704,11 @@ export class StorefrontOrderService {
   async adminList(opts: { status?: string } = {}) {
     return this.prisma.$queryRaw(Prisma.sql`
       SELECT so.reference, so.vendor_id, v.business_name, so.buyer_email, so.status,
-             so.processor, so.total_cents, so.shipping_speed, so.shipping_cents,
+             so.processor,
+             -- Exact breakdown of what the customer paid.
+             so.product_subtotal_cents, so.discount_code, so.discount_cents,
+             so.shipping_cents, so.tax_cents, so.total_cents,
+             so.shipping_speed,
              so.tracking_number, so.carrier, so.payout_status, so.payout_release_at,
              so.created_at, so.paid_at, so.shipped_at
       FROM storefront_orders so
