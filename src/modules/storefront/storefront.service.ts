@@ -280,7 +280,7 @@ export class StorefrontService {
              COALESCE(s.avail, 0) AS available_stock
       FROM products p
       LEFT JOIN (
-        SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
+        SELECT product_id, SUM(quantity_available) AS avail
         FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
       ) s ON s.product_id = p.id
       WHERE p.vendor_id = ${vendorId}::uuid AND p.status = 'ACTIVE'
@@ -357,7 +357,7 @@ export class StorefrontService {
              p.description, p.fit, p.gender, p.material, p.care_instructions, p.brand
       FROM products p
       LEFT JOIN (
-        SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
+        SELECT product_id, SUM(quantity_available) AS avail
         FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
       ) s ON s.product_id = p.id
       WHERE p.id = ${productId}::uuid AND p.vendor_id = ${vendorId}::uuid AND p.status = 'ACTIVE'

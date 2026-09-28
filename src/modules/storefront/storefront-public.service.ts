@@ -212,7 +212,7 @@ export class StorefrontPublicService {
              COALESCE(s.avail, 0) AS available, p.variant_group_id
       FROM products p
       LEFT JOIN (
-        SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
+        SELECT product_id, SUM(quantity_available) AS avail
         FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
       ) s ON s.product_id = p.id
       WHERE p.vendor_id = ${vendorId}::uuid
@@ -245,7 +245,7 @@ export class StorefrontPublicService {
              COALESCE(s.avail, 0) AS available
       FROM products p
       LEFT JOIN (
-        SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
+        SELECT product_id, SUM(quantity_available) AS avail
         FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
       ) s ON s.product_id = p.id
       WHERE p.id = ${productId}::uuid
@@ -319,7 +319,7 @@ export class StorefrontPublicService {
              p.description, p.fit, p.gender, p.material, p.care_instructions, p.brand
       FROM products p
       LEFT JOIN (
-        SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
+        SELECT product_id, SUM(quantity_available) AS avail
         FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
       ) s ON s.product_id = p.id
       WHERE ${groupFilter}
@@ -421,7 +421,7 @@ export class StorefrontPublicService {
       JOIN vendors v ON v.id = p.vendor_id
       LEFT JOIN vendor_storefronts vs ON vs.vendor_id = v.id
       LEFT JOIN (
-        SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
+        SELECT product_id, SUM(quantity_available) AS avail
         FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
       ) st ON st.product_id = p.id
       WHERE v.storefront_enabled = true AND v.marketplace_featured = true

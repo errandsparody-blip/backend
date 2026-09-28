@@ -740,7 +740,7 @@ export class StorefrontCheckoutService {
                COALESCE(s.avail, 0) AS available
         FROM products p
         LEFT JOIN (
-          SELECT product_id, SUM(quantity_available - quantity_reserved) AS avail
+          SELECT product_id, SUM(quantity_available) AS avail
           FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
         ) s ON s.product_id = p.id
         WHERE p.id = ${it.productId}::uuid AND p.vendor_id = ${vendorId}::uuid
@@ -888,10 +888,10 @@ export class StorefrontCheckoutService {
       let remaining = item.qty;
       const allocations: SkuAllocation[] = [];
       const skus = await tx.$queryRaw<Array<{ id: string; free: number }>>(Prisma.sql`
-        SELECT id, (quantity_available - quantity_reserved) AS free
+        SELECT id, quantity_available AS free
         FROM skus
         WHERE product_id = ${item.productId}::uuid AND status = 'ACTIVE'
-          AND (quantity_available - quantity_reserved) > 0
+          AND quantity_available > 0
         ORDER BY free DESC
         FOR UPDATE
       `);
