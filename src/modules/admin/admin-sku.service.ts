@@ -48,6 +48,12 @@ export interface AdminSkuRow {
    * rest of the product fields — see ProductService.update().
    */
   productImageUrl: string | null;
+  /**
+   * True when the parent product has all three shipping dimensions (L×W×H) set.
+   * When false, the marketplace has to estimate a box from weight, so shipping
+   * quotes are less accurate — surfaced so an admin can backfill the dimensions.
+   */
+  dimensionsSet: boolean;
   quantityAvailable: number;
   quantityReserved: number;
   storageTier: string;
@@ -113,7 +119,17 @@ export class AdminSkuService {
         // still be stale at typecheck time so we cast at the row-mapping
         // boundary below. Including it in the select keeps the query
         // shape narrow.
-        product: { select: { id: true, code: true, name: true, imageUrl: true } as unknown as { id: true; code: true; name: true } },
+        product: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            imageUrl: true,
+            lengthIn: true,
+            widthIn: true,
+            heightIn: true,
+          } as unknown as { id: true; code: true; name: true },
+        },
         vendor: { select: { id: true, businessName: true } },
       },
     });
@@ -135,6 +151,14 @@ export class AdminSkuService {
         variant: s.variant,
         productImageUrl:
           (s.product as unknown as { imageUrl?: string | null }).imageUrl ?? null,
+        dimensionsSet: (() => {
+          const p = s.product as unknown as {
+            lengthIn?: number | null;
+            widthIn?: number | null;
+            heightIn?: number | null;
+          };
+          return p.lengthIn != null && p.widthIn != null && p.heightIn != null;
+        })(),
         quantityAvailable: s.quantityAvailable,
         quantityReserved: s.quantityReserved,
         storageTier: s.storageTier,
@@ -159,7 +183,17 @@ export class AdminSkuService {
         // still be stale at typecheck time so we cast at the row-mapping
         // boundary below. Including it in the select keeps the query
         // shape narrow.
-        product: { select: { id: true, code: true, name: true, imageUrl: true } as unknown as { id: true; code: true; name: true } },
+        product: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            imageUrl: true,
+            lengthIn: true,
+            widthIn: true,
+            heightIn: true,
+          } as unknown as { id: true; code: true; name: true },
+        },
         vendor: { select: { id: true, businessName: true } },
       },
     });
@@ -174,6 +208,14 @@ export class AdminSkuService {
       variant: sku.variant,
       productImageUrl:
         (sku.product as unknown as { imageUrl?: string | null }).imageUrl ?? null,
+      dimensionsSet: (() => {
+        const p = sku.product as unknown as {
+          lengthIn?: number | null;
+          widthIn?: number | null;
+          heightIn?: number | null;
+        };
+        return p.lengthIn != null && p.widthIn != null && p.heightIn != null;
+      })(),
       quantityAvailable: sku.quantityAvailable,
       quantityReserved: sku.quantityReserved,
       storageTier: sku.storageTier,

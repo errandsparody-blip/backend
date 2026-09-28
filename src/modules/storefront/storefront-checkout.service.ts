@@ -49,6 +49,20 @@ import { StorefrontTaxService } from "./storefront-tax.service";
 
 const unitsOf = (items: CheckoutItem[]): number => items.reduce((s, i) => s + i.qty, 0);
 
+/**
+ * Estimate a shipping box (inches) for a single unit from its weight, used only
+ * when a product has no real dimensions set. Deliberately errs a little large so
+ * the buyer estimate doesn't undercharge vs. the real box measured at pack time.
+ * Admins can (and should) set real L×W×H on the product to override this.
+ */
+function defaultBoxForWeightOz(weightOz: number): { l: number; w: number; h: number } {
+  const oz = weightOz > 0 ? weightOz : 8;
+  if (oz <= 16) return { l: 10, w: 7, h: 3 }; // ≤1 lb — small box / padded mailer
+  if (oz <= 48) return { l: 12, w: 9, h: 4 }; // ≤3 lb
+  if (oz <= 160) return { l: 14, w: 12, h: 8 }; // ≤10 lb
+  return { l: 18, w: 14, h: 12 }; // heavier
+}
+
 interface CheckoutItem {
   productId: string;
   code: string;
@@ -800,12 +814,21 @@ export class StorefrontCheckoutService {
   } {
     const MAX_DIM_IN = 108; // common carrier max length/girth guardrail
     const weightOz = items.reduce((s, i) => s + i.weightOz * i.qty, 0) || 1;
-    const maxLen = Math.max(1, ...items.map((i) => i.lengthIn ?? 0));
-    const maxWid = Math.max(1, ...items.map((i) => i.widthIn ?? 0));
-    const totalVolumeIn3 = items.reduce(
-      (s, i) => s + (i.lengthIn ?? 0) * (i.widthIn ?? 0) * (i.heightIn ?? 0) * i.qty,
-      0,
-    );
+    // Effective per-item dimensions: use the product's real L×W×H when set;
+    // otherwise fall back to a sensible box estimated from the item's weight, so
+    // a product missing dimensions isn't priced as a 1×1×1 (which returns the
+    // carrier's floor rate and undercharges the buyer). Admins should still fill
+    // real dimensions on the product for accuracy — this is just a safety net.
+    const eff = items.map((i) => {
+      const hasDims = i.lengthIn != null && i.widthIn != null && i.heightIn != null;
+      const box = hasDims
+        ? { l: i.lengthIn as number, w: i.widthIn as number, h: i.heightIn as number }
+        : defaultBoxForWeightOz(i.weightOz);
+      return { ...box, qty: i.qty };
+    });
+    const maxLen = Math.max(1, ...eff.map((e) => e.l));
+    const maxWid = Math.max(1, ...eff.map((e) => e.w));
+    const totalVolumeIn3 = eff.reduce((s, e) => s + e.l * e.w * e.h * e.qty, 0);
     const lengthIn = Math.min(MAX_DIM_IN, Math.ceil(maxLen));
     const widthIn = Math.min(MAX_DIM_IN, Math.ceil(maxWid));
     const footprintIn2 = Math.max(1, lengthIn * widthIn);
