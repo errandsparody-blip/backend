@@ -20,6 +20,9 @@ import { AdminInventoryLocationController } from "./admin-inventory-location.con
 import { SuperAdminDashboardController } from "./super-admin-dashboard.controller";
 import { SuperAdminDashboardService } from "./super-admin-dashboard.service";
 import { AdminConfigController } from "./admin-config.controller";
+// Email diagnostics — SUPER_ADMIN sends a one-off test email to confirm
+// deliverability (EmailModule is already imported below).
+import { AdminEmailTestController } from "./admin-email-test.controller";
 // Migration 0043 — packaging library. Controller lives in the admin
 // module; PackagingLibraryService is provided by the @Global()
 // PackagingLibraryModule wired at the app level, so no explicit
@@ -64,6 +67,7 @@ import { AdminVendorService } from "./admin-vendor.service";
     AdminVendorController,
     AdminAuditController,
     AdminConfigController,
+    AdminEmailTestController,
     AdminSkuController,
     // Migration 0035 — per-box consolidation endpoints. Hosted in its
     // own controller so the SUPER_ADMIN scoping is obvious from the
