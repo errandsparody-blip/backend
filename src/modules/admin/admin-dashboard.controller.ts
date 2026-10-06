@@ -176,7 +176,7 @@ export class AdminDashboardController {
       this.prisma.$queryRaw<Array<{ value_cents: number; units: number; sku_count: number }>>(Prisma.sql`
         SELECT
           COALESCE(SUM(p.declared_value_cents * s.quantity_available), 0)::float8 AS value_cents,
-          COALESCE(SUMs.quantity_available, 0)::float8 AS units,
+          COALESCE(SUM(s.quantity_available), 0)::float8 AS units,
           COUNT(*)::float8 AS sku_count
         FROM skus s
         JOIN products p ON p.id = s.product_id
@@ -190,21 +190,21 @@ export class AdminDashboardController {
           v.id AS vendor_id,
           v.business_name AS business_name,
           COALESCE(SUM(p.declared_value_cents * s.quantity_available), 0)::float8 AS value_cents,
-          COALESCE(SUMs.quantity_available, 0)::float8 AS units
+          COALESCE(SUM(s.quantity_available), 0)::float8 AS units
         FROM skus s
         JOIN products p ON p.id = s.product_id
         JOIN vendors v ON v.id = s.vendor_id
         WHERE s.status IN ('ACTIVE', 'RESERVED')
         ${insurableFilter}
         GROUP BY v.id, v.business_name
-        HAVING SUMs.quantity_available > 0
+        HAVING SUM(s.quantity_available) > 0
         ORDER BY value_cents DESC
       `),
       this.prisma.$queryRaw<Array<{ storage_tier: string; value_cents: number; units: number }>>(Prisma.sql`
         SELECT
           s.storage_tier AS storage_tier,
           COALESCE(SUM(p.declared_value_cents * s.quantity_available), 0)::float8 AS value_cents,
-          COALESCE(SUMs.quantity_available, 0)::float8 AS units
+          COALESCE(SUM(s.quantity_available), 0)::float8 AS units
         FROM skus s
         JOIN products p ON p.id = s.product_id
         WHERE s.status IN ('ACTIVE', 'RESERVED')
