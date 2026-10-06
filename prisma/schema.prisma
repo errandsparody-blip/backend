@@ -492,6 +492,12 @@ model Product {
   countryOfOrigin String   @map("country_of_origin") @db.Char(2)
   declaredValueCents Int   @map("declared_value_cents")
 
+  // Migration 0073 — whether this product counts toward the admin
+  // dashboard's Insurable Inventory Value. Defaults true; an admin can
+  // turn it off for goods that don't need coverage so the insurance
+  // figure reflects only what must be insured.
+  needsInsurance  Boolean  @default(true) @map("needs_insurance")
+
   // Dimensions (inches) and weight (oz). Used for shipping rate calc + tier sizing.
   // Length/width/height are optional — vendors often determine box size at
   // pack time. Order-fees treats nulls as 0 in the envelope calc; the carrier

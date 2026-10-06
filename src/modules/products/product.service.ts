@@ -35,6 +35,8 @@ export interface PublicProduct {
   hsCode: string | null;
   countryOfOrigin: string;
   declaredValueCents: number;
+  /** Migration 0073 — counts toward the admin Insurable Inventory Value when true. */
+  needsInsurance: boolean;
   weightOz: number;
   lengthIn: number | null;
   widthIn: number | null;
@@ -334,6 +336,11 @@ export class ProductService {
       hsCode: p.hsCode,
       countryOfOrigin: p.countryOfOrigin,
       declaredValueCents: p.declaredValueCents,
+      // Stale-client guard (pre-`prisma generate`): needs_insurance added in
+      // 0073. Defaults true so products created before the column existed
+      // keep counting toward the insurance figure.
+      needsInsurance:
+        (p as unknown as { needsInsurance?: boolean }).needsInsurance ?? true,
       weightOz: p.weightOz,
       lengthIn: p.lengthIn,
       widthIn: p.widthIn,
@@ -455,6 +462,10 @@ export class ProductService {
     if (patch.countryOfOrigin !== undefined)
       data.countryOfOrigin = patch.countryOfOrigin;
     if (patch.storageTier !== undefined) data.storageTier = patch.storageTier;
+    // Migration 0073 — admin-only "needs insurance" flag. Cast so tsc is
+    // clean against a pre-regenerate Prisma client; runtime column exists.
+    if (patch.needsInsurance !== undefined)
+      (data as Record<string, unknown>).needsInsurance = patch.needsInsurance;
 
     // Idempotent no-op safeguard: if the patch matches what's already
     // on the row, skip the update + audit so we don't pollute the
@@ -504,6 +515,8 @@ export interface AdminProductEditInput {
   hsCode?: string | null;
   countryOfOrigin?: string;
   storageTier?: "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET";
+  /** Migration 0073 — whether this product counts toward Insurable Inventory Value. */
+  needsInsurance?: boolean;
   /** Optional free-text reason ("warehouse re-weighed", "customs correction") logged on the audit row. */
   reason?: string;
 }

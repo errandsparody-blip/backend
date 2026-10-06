@@ -19,8 +19,8 @@
  * Implementation Plan §12.4; expanded 2026-05.
  */
 
-import { Controller, Get } from "@nestjs/common";
-import { Role } from "@prisma/client";
+import { Controller, Get, Query } from "@nestjs/common";
+import { Prisma, Role } from "@prisma/client";
 
 import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
@@ -161,9 +161,18 @@ export class AdminDashboardController {
    * integer range (2^53 cents ≈ $90T).
    */
   @Get("inventory-value")
-  async inventoryValue() {
+  async inventoryValue(@Query("insurableOnly") insurableOnly?: string) {
+    // When ?insurableOnly=true, restrict the figure to products an admin
+    // has marked as needing insurance (migration 0073 — needs_insurance).
+    // Composed as a Prisma.sql fragment so it drops cleanly into each
+    // raw aggregate; empty fragment = count everything (the default).
+    const onlyInsurable = insurableOnly === "true" || insurableOnly === "1";
+    const insurableFilter = onlyInsurable
+      ? Prisma.sql`AND p.needs_insurance = true`
+      : Prisma.empty;
+
     const [totalRows, byVendorRows, byTierRows] = await Promise.all([
-      this.prisma.$queryRaw<Array<{ value_cents: number; units: number; sku_count: number }>>`
+      this.prisma.$queryRaw<Array<{ value_cents: number; units: number; sku_count: number }>>(Prisma.sql`
         SELECT
           COALESCE(SUM(p.declared_value_cents * (s.quantity_available + s.quantity_reserved)), 0)::float8 AS value_cents,
           COALESCE(SUM(s.quantity_available + s.quantity_reserved), 0)::float8 AS units,
@@ -171,10 +180,11 @@ export class AdminDashboardController {
         FROM skus s
         JOIN products p ON p.id = s.product_id
         WHERE s.status IN ('ACTIVE', 'RESERVED')
-      `,
+        ${insurableFilter}
+      `),
       this.prisma.$queryRaw<
         Array<{ vendor_id: string; business_name: string; value_cents: number; units: number }>
-      >`
+      >(Prisma.sql`
         SELECT
           v.id AS vendor_id,
           v.business_name AS business_name,
@@ -184,11 +194,12 @@ export class AdminDashboardController {
         JOIN products p ON p.id = s.product_id
         JOIN vendors v ON v.id = s.vendor_id
         WHERE s.status IN ('ACTIVE', 'RESERVED')
+        ${insurableFilter}
         GROUP BY v.id, v.business_name
         HAVING SUM(s.quantity_available + s.quantity_reserved) > 0
         ORDER BY value_cents DESC
-      `,
-      this.prisma.$queryRaw<Array<{ storage_tier: string; value_cents: number; units: number }>>`
+      `),
+      this.prisma.$queryRaw<Array<{ storage_tier: string; value_cents: number; units: number }>>(Prisma.sql`
         SELECT
           s.storage_tier AS storage_tier,
           COALESCE(SUM(p.declared_value_cents * (s.quantity_available + s.quantity_reserved)), 0)::float8 AS value_cents,
@@ -196,8 +207,9 @@ export class AdminDashboardController {
         FROM skus s
         JOIN products p ON p.id = s.product_id
         WHERE s.status IN ('ACTIVE', 'RESERVED')
+        ${insurableFilter}
         GROUP BY s.storage_tier
-      `,
+      `),
     ]);
 
     const total = totalRows[0] ?? { value_cents: 0, units: 0, sku_count: 0 };
@@ -220,6 +232,9 @@ export class AdminDashboardController {
         valueCents: Math.round(r.value_cents),
         units: Math.round(r.units),
       })),
+      // Echo the active filter so the UI can reflect which mode produced
+      // these numbers (insurable-only vs all physical stock).
+      insurableOnly: onlyInsurable,
       // Stamp so the auto-refreshing tab can show "as of …".
       asOf: new Date().toISOString(),
     };

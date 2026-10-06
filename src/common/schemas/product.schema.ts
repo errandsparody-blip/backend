@@ -118,6 +118,9 @@ export const adminEditProductSchema = z
     widthIn: optionalDimension,
     heightIn: optionalDimension,
     storageTier: storageTierSchema.optional(),
+    // Migration 0073 — admin toggles whether the product counts toward
+    // the Insurable Inventory Value figure.
+    needsInsurance: z.boolean().optional(),
     reason: z.string().trim().min(1).max(280).optional(),
   })
   .strict()
@@ -129,6 +132,7 @@ export const adminEditProductSchema = z
       v.lengthIn !== undefined ||
       v.widthIn !== undefined ||
       v.heightIn !== undefined ||
+      v.needsInsurance !== undefined ||
       v.declaredValueCents !== undefined ||
       v.hsCode !== undefined ||
       v.countryOfOrigin !== undefined ||
