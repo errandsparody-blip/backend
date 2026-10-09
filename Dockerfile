@@ -19,7 +19,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1 — builder. All dev deps + Prisma generate + nest build.
 # -----------------------------------------------------------------------------
-FROM node:20-slim AS builder
+FROM public.ecr.aws/docker/library/node:20-slim AS builder
 WORKDIR /app
 
 # Build tools for native modules + openssl for Prisma's query engine.
@@ -64,7 +64,7 @@ RUN pnpm build
 # -----------------------------------------------------------------------------
 # Stage 2 — runner. Slim production image with fresh prod-only node_modules.
 # -----------------------------------------------------------------------------
-FROM node:20-slim AS runner
+FROM public.ecr.aws/docker/library/node:20-slim AS runner
 WORKDIR /app
 
 # OpenSSL for Prisma at runtime; ca-certs for outbound HTTPS to Stripe / Sentry.
