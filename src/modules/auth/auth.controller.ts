@@ -15,6 +15,7 @@ import {
   Post,
   Req,
   Res,
+  UnauthorizedException,
   UseGuards,
 } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
@@ -227,7 +228,13 @@ export class AuthController {
     const cookies = (req as Request & { cookies?: Record<string, string> }).cookies ?? {};
     const refreshToken = cookies[cfg.COOKIE_REFRESH_NAME];
     if (!refreshToken) {
-      return res.status(HttpStatus.UNAUTHORIZED).json({
+      // Must THROW, not `res.json(...)`. This handler uses
+      // `@Res({ passthrough: true })`, so returning the Express Response
+      // makes Nest try to JSON-serialize it — and the Response holds a
+      // Socket, producing "Converting circular structure to JSON" and a
+      // 500 on every unauthenticated refresh. Throwing lets the exception
+      // filter emit a clean 401 instead.
+      throw new UnauthorizedException({
         message: "Refresh cookie missing.",
         code: "refresh_missing",
       });

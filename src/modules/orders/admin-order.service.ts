@@ -193,7 +193,7 @@ export class AdminOrderService {
           SELECT COALESCE(SUM(amount_cents), 0)::int AS net
           FROM ledger_entries
           WHERE reference_type = 'order'
-            AND reference_id = ${id}::uuid
+            AND reference_id = ${id}
             AND vendor_id = ${before.vendorId}::uuid
         `,
       );
