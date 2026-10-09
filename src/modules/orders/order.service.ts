@@ -26,6 +26,8 @@
  * Two reviewers required for any change to this file (Implementation Plan §17.1).
  */
 
+import { randomUUID } from "node:crypto";
+
 import {
   BadRequestException,
   ConflictException,
@@ -719,6 +721,15 @@ export class OrderService {
 
     // 7. Transactional core.
     const order = await this.prisma.$transaction(async (tx) => {
+      // Pre-generate the order id so the reservation movements and the
+      // fulfillment-fee debit below can be tagged with it immediately. This
+      // is critical for refunds: the admin cancel sums ledger entries by
+      // reference_id, so an untagged fulfillment debit would silently never
+      // be refunded. (Previously these were written with a null referenceId
+      // and a later best-effort backfill patched them — which missed any
+      // debit written before the backfill shipped.)
+      const orderId = randomUUID();
+
       // 7a. Lock SKUs, validate, reserve — identical to legacy.
       const skuIds = Array.from(new Set(input.lines.map((l) => l.skuId))).sort();
       const lockedSkus = await this.lockSkus(tx, vendorId, skuIds);
@@ -762,7 +773,7 @@ export class OrderService {
             deltaAvailable: -need,
             deltaReserved: need,
             referenceType: "order",
-            referenceId: null,
+            referenceId: orderId,
             actorId,
           },
         });
@@ -779,7 +790,9 @@ export class OrderService {
             `Fulfillment fee for ${input.lines.length} SKU(s) → ${input.recipient.shipCity}` +
             (isVendorCarrier ? " (Fulfill Only)" : ""),
           referenceType: "order",
-          referenceId: undefined,
+          // Tag with the order id so an admin cancel's ledger-sum refund picks
+          // up the fulfillment fee. (Was undefined → never refunded.)
+          referenceId: orderId,
           actorId,
         },
         tx as unknown as Parameters<typeof this.wallet.debit>[1],
@@ -791,6 +804,7 @@ export class OrderService {
       // what they were told at submit.
       const created = await tx.order.create({
         data: {
+          id: orderId,
           vendorId,
           externalReference: input.externalReference ?? null,
           status: "PENDING_PACKING" as OrderStatus,
