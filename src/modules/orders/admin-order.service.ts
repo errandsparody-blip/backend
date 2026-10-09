@@ -219,7 +219,7 @@ export class AdminOrderService {
             vendorId: before.vendorId,
             amountCents: refundCents,
             type: "REVERSAL",
-            description: `Admin cancel refund of order ${id.slice(0, 8)}: ${reason}`,
+            description: `Admin cancel refund of order ${formatOrderRef(before.orderNumber)}: ${reason}`,
             referenceType: "order",
             referenceId: id,
             actorId,
