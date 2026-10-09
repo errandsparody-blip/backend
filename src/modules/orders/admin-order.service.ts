@@ -228,11 +228,12 @@ export class AdminOrderService {
         where: { id },
         data: {
           status: "CANCELLED",
-          // OTHER is the catch-all in the schema enum — we put the human
-          // explanation in cancelNote, prefixed so it's grep-able for
-          // support workflows.
+          // OTHER is the catch-all in the schema enum — the human explanation
+          // goes in cancelNote verbatim (no internal prefix; the vendor sees
+          // this on their order timeline). The `order.force_cancelled`
+          // orderEvent below keeps the action grep-able for support.
           cancelReason: "OTHER",
-          cancelNote: `ADMIN_FORCE_CANCEL: ${reason}`,
+          cancelNote: reason,
           cancelledAt: new Date(),
           // Resolve a pending vendor cancellation request as approved.
           ...(hadRequest
@@ -253,6 +254,22 @@ export class AdminOrderService {
           actorId,
         },
       });
+
+      // Make the wallet refund visible on the order timeline (admin + vendor).
+      // Without this, the only trace of the refund is a REVERSAL line buried in
+      // the wallet ledger, which makes "did the vendor actually get their money
+      // back?" hard to answer from the order page.
+      if (refundCents > 0) {
+        await tx.orderEvent.create({
+          data: {
+            orderId: id,
+            type: "order.refunded",
+            description: `Refunded $${(refundCents / 100).toFixed(2)} to vendor wallet (fulfillment + label).`,
+            source: "ADMIN",
+            actorId,
+          },
+        });
+      }
 
       return {
         updated,
