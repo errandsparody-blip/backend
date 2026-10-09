@@ -186,24 +186,33 @@ export class AdminOrderService {
         });
       }
 
-      // Refund the vendor's FULL net spend on this order — the fulfillment
-      // fee AND the shipping/label cost (which in v2 is debited separately
-      // at pack/ship time, so it is NOT in totalChargedCents). We total the
-      // wallet ledger entries tied to this order (debits are negative,
-      // prior refunds positive) and refund whatever is still net-owed. This
-      // makes the cancel refund exact regardless of lifecycle stage and
-      // can't double-refund.
-      const ledgerRows = await tx.$queryRaw<Array<{ net: number }>>(
+      // Refund the vendor's FULL spend on this order — fulfillment fee +
+      // shipping/label — minus anything already credited back.
+      //
+      // We base the "charged" side on the order's own total_charged_cents
+      // column (set to the fulfillment fee at submit and incremented by the
+      // shipping cost at pack time), NOT on a sum of debit ledger rows. An
+      // earlier tagging gap wrote some fulfillment-fee debits with a null
+      // reference_id, so a ledger-by-reference sum silently missed them and
+      // under-refunded by the fulfillment fee. The column is the reliable
+      // record of what the vendor paid, for old and new orders alike.
+      //
+      // Prior credits tagged to this order (our own REVERSALs from a repeat
+      // cancel, or an admin's manual credit) are netted out so we can never
+      // double-refund.
+      const creditRows = await tx.$queryRaw<Array<{ credited: number }>>(
         Prisma.sql`
-          SELECT COALESCE(SUM(amount_cents), 0)::int AS net
+          SELECT COALESCE(SUM(amount_cents), 0)::int AS credited
           FROM ledger_entries
           WHERE reference_type = 'order'
             AND reference_id = ${id}
             AND vendor_id = ${before.vendorId}::uuid
+            AND amount_cents > 0
         `,
       );
-      const netCents = ledgerRows[0]?.net ?? 0;
-      const refundCents = netCents < 0 ? -netCents : 0;
+      const alreadyCreditedCents = creditRows[0]?.credited ?? 0;
+      const grossChargedCents = before.totalChargedCents ?? 0;
+      const refundCents = Math.max(0, grossChargedCents - alreadyCreditedCents);
       if (refundCents > 0) {
         await this.wallet.credit(
           {
