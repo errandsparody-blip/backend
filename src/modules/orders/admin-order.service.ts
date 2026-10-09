@@ -55,7 +55,12 @@ const ALLOWED_TRANSITIONS: Record<string, OrderStatus[]> = {
   // transition's starting set.
   pick: ["LABEL_PURCHASED", "ALLOCATED"],
   pack: ["PICKING"],
-  ship: ["PACKED"],
+  // `ship` = "handed to the carrier". v1 orders reach here from PACKED; v2
+  // orders pack BEFORE buying the label, so by the time the box leaves the
+  // warehouse they sit at LABEL_PURCHASED (there is no PACKED state in v2).
+  // Both are valid starting points — the body only decrements reserved for
+  // lines not already shipped, so it's safe either way.
+  ship: ["PACKED", "LABEL_PURCHASED"],
   // Migration 0037 — terminal hand-off for VENDOR_CARRIER orders.
   // Same starting state as `ship` (PACKED) but skips the
   // SKU-decrement / inventory-movement bookkeeping done inside
@@ -801,8 +806,12 @@ export class AdminOrderService {
           code: "order_wrong_fulfillment_mode",
         });
       }
-      // Mark the order lines as SHIPPED + decrement reserved counts.
-      const lines = await tx.orderLine.findMany({ where: { orderId: id } });
+      // Mark the order lines as SHIPPED + decrement reserved counts. Only
+      // touch lines not already shipped — guards against a double-decrement
+      // if the carrier webhook already released the stock before this click.
+      const lines = await tx.orderLine.findMany({
+        where: { orderId: id, allocationStatus: { not: "SHIPPED" } },
+      });
       for (const line of lines) {
         await tx.sku.update({
           where: { id: line.skuId },

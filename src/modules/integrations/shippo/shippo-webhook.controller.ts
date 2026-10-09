@@ -258,6 +258,45 @@ export class ShippoWebhookController {
       if (targetStatus === "IN_TRANSIT" && !order.shippedAt) data.shippedAt = new Date();
 
       await tx.order.update({ where: { id: order.id }, data });
+
+      // Release reserved stock the first time the carrier tells us the parcel
+      // actually left the warehouse. v2 platform-ship orders pack before the
+      // label buy and never hit the admin `ship()` path, so without this the
+      // reserved count stays stuck forever (units never return to the pool).
+      // Guarded on allocationStatus so repeated webhooks (transit → delivered)
+      // and an earlier admin "Mark handed off" click can't double-decrement.
+      if (
+        targetStatus === "SHIPPED" ||
+        targetStatus === "IN_TRANSIT" ||
+        targetStatus === "DELIVERED"
+      ) {
+        const openLines = await tx.orderLine.findMany({
+          where: { orderId: order.id, allocationStatus: { not: "SHIPPED" } },
+        });
+        for (const line of openLines) {
+          await tx.sku.update({
+            where: { id: line.skuId },
+            data: { quantityReserved: { decrement: line.quantity } },
+          });
+          await tx.inventoryMovement.create({
+            data: {
+              vendorId: line.vendorId,
+              skuId: line.skuId,
+              type: "SHIP",
+              deltaAvailable: 0,
+              deltaReserved: -line.quantity,
+              referenceType: "order",
+              referenceId: order.id,
+              reason: `carrier ${status}`,
+            },
+          });
+          await tx.orderLine.update({
+            where: { id: line.id },
+            data: { allocationStatus: "SHIPPED" },
+          });
+        }
+      }
+
       await tx.orderEvent.create({
         data: {
           orderId: order.id,
