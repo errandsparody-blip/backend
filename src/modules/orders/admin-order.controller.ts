@@ -21,7 +21,11 @@ import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
-import { recipientAddressSchema } from "../../common/schemas/order.schema";
+import {
+  recipientAddressSchema,
+  rejectCancellationSchema,
+  type RejectCancellationInput,
+} from "../../common/schemas/order.schema";
 
 import { IntegrationOrderService } from "../integration/integration-order.service";
 
@@ -209,5 +213,20 @@ export class AdminOrderController {
     @Body(new ZodValidationPipe(forceCancelSchema)) body: ForceCancelInput,
   ) {
     return this.orders.forceCancel(id, user.sub, body.reason);
+  }
+
+  // Migration 0074 — reject a vendor's pending cancellation request. The
+  // order keeps moving through fulfillment; the vendor is notified.
+  // (Approving a request is just force-cancel above, which now also
+  // resolves the pending request and refunds the full net spend.)
+  @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN)
+  @Post(":id/reject-cancel-request")
+  @HttpCode(HttpStatus.OK)
+  rejectCancelRequest(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(rejectCancellationSchema)) body: RejectCancellationInput,
+  ) {
+    return this.orders.rejectCancellation(id, user.sub, body.note);
   }
 }

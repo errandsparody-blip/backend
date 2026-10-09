@@ -1434,6 +1434,16 @@ model Order {
   cancelReason             OrderCancelReason? @map("cancel_reason")
   cancelNote               String?         @map("cancel_note")
 
+  // ---- Migration 0074 — vendor-initiated cancellation request.
+  // Set when a vendor asks to cancel an order that's past the instant
+  // self-cancel window (DRAFT/SUBMITTED/ALLOCATED) but not yet shipped.
+  // "Pending" = cancelRequestedAt != null && cancelRequestResolvedAt == null.
+  cancelRequestedAt        DateTime?       @map("cancel_requested_at")
+  cancelRequestReason      String?         @map("cancel_request_reason")
+  cancelRequestNote        String?         @map("cancel_request_note")
+  cancelRequestResolvedAt  DateTime?       @map("cancel_request_resolved_at")
+  cancelRequestOutcome     String?         @map("cancel_request_outcome") // 'APPROVED' | 'REJECTED'
+
   // ---- Timeline timestamps
   submittedAt              DateTime?       @map("submitted_at")
   allocatedAt              DateTime?       @map("allocated_at")

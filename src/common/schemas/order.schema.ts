@@ -373,6 +373,32 @@ export const cancelOrderSchema = z.object({
 });
 export type CancelOrderInput = z.infer<typeof cancelOrderSchema>;
 
+// Migration 0074 — vendor asks to cancel an order that's already past the
+// instant self-cancel window (label purchased / being packed). Admin then
+// approves (refund + restock + cancel) or rejects.
+export const requestCancellationSchema = z.object({
+  reason: z.enum([
+    "VENDOR_REQUEST",
+    "OUT_OF_STOCK",
+    "ADDRESS_INVALID",
+    "CUSTOMER_CANCELLED",
+    "OTHER",
+  ]),
+  note: z.string().trim().max(500).optional(),
+});
+export type RequestCancellationInput = z.infer<typeof requestCancellationSchema>;
+
+// Admin decision on a pending cancellation request.
+export const approveCancellationSchema = z.object({
+  note: z.string().trim().max(500).optional(),
+});
+export type ApproveCancellationInput = z.infer<typeof approveCancellationSchema>;
+
+export const rejectCancellationSchema = z.object({
+  note: z.string().trim().min(1, "Give the vendor a reason for the rejection.").max(500),
+});
+export type RejectCancellationInput = z.infer<typeof rejectCancellationSchema>;
+
 // ---------------------------------------------------------------------------
 // Migration 0037 — vendor-supplied label uploads (VENDOR_CARRIER mode).
 //

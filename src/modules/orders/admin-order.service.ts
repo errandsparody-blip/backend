@@ -107,14 +107,27 @@ export class AdminOrderService {
     actorId: string,
     reason: string,
   ): Promise<Order> {
+    // Extended in migration 0074 so admins can approve a vendor's
+    // cancellation request right up until the parcel ships — including the
+    // pick/pack states and the v2 shipping-selection states. Anything
+    // SHIPPED / HANDED_OFF / DELIVERED goes through the return flow.
     const FORCE_CANCELLABLE: OrderStatus[] = [
       "DRAFT",
       "SUBMITTED",
       "ALLOCATED",
       "LABEL_PURCHASED",
+      "PICKING",
+      "PACKED",
+      // v2 statuses — cast because the committed Prisma client enum predates
+      // migration 0041 (regenerated on deploy).
+      "PENDING_PACKING" as OrderStatus,
+      "PACKING_COMPLETED" as OrderStatus,
+      "AWAITING_SHIPPING_SELECTION" as OrderStatus,
+      "AWAITING_WALLET_FUNDING" as OrderStatus,
+      "SHIPPING_PAID" as OrderStatus,
     ];
 
-    return this.prisma.$transaction(async (tx): Promise<{ updated: Order; before: { status: OrderStatus; totalChargedCents: number } }> => {
+    return this.prisma.$transaction(async (tx): Promise<{ updated: Order; before: { status: OrderStatus; totalChargedCents: number }; vendorId: string; orderNumber: number; refundCents: number }> => {
       // SELECT ... FOR UPDATE to prevent racing transitions.
       const lockedRows = await tx.$queryRaw<
         Array<{ id: string; vendor_id: string; status: OrderStatus; total_charged_cents: number }>
@@ -168,15 +181,31 @@ export class AdminOrderService {
         });
       }
 
-      // Refund the wallet for whatever was charged. Type REVERSAL keeps the
-      // ledger trail clean — same path the vendor self-cancel uses.
-      if (before.totalChargedCents > 0) {
+      // Refund the vendor's FULL net spend on this order — the fulfillment
+      // fee AND the shipping/label cost (which in v2 is debited separately
+      // at pack/ship time, so it is NOT in totalChargedCents). We total the
+      // wallet ledger entries tied to this order (debits are negative,
+      // prior refunds positive) and refund whatever is still net-owed. This
+      // makes the cancel refund exact regardless of lifecycle stage and
+      // can't double-refund.
+      const ledgerRows = await tx.$queryRaw<Array<{ net: number }>>(
+        Prisma.sql`
+          SELECT COALESCE(SUM(amount_cents), 0)::int AS net
+          FROM ledger_entries
+          WHERE reference_type = 'order'
+            AND reference_id = ${id}::uuid
+            AND vendor_id = ${before.vendorId}::uuid
+        `,
+      );
+      const netCents = ledgerRows[0]?.net ?? 0;
+      const refundCents = netCents < 0 ? -netCents : 0;
+      if (refundCents > 0) {
         await this.wallet.credit(
           {
             vendorId: before.vendorId,
-            amountCents: before.totalChargedCents,
+            amountCents: refundCents,
             type: "REVERSAL",
-            description: `Admin force-cancel of order ${id.slice(0, 8)}: ${reason}`,
+            description: `Admin cancel refund of order ${id.slice(0, 8)}: ${reason}`,
             referenceType: "order",
             referenceId: id,
             actorId,
@@ -184,6 +213,11 @@ export class AdminOrderService {
           tx as unknown as Parameters<typeof this.wallet.credit>[1],
         );
       }
+
+      // If a vendor cancellation request was pending, mark it approved.
+      const hadRequest =
+        (before as unknown as { cancelRequestedAt?: Date | null }).cancelRequestedAt != null &&
+        (before as unknown as { cancelRequestResolvedAt?: Date | null }).cancelRequestResolvedAt == null;
 
       const updated = await tx.order.update({
         where: { id },
@@ -195,7 +229,14 @@ export class AdminOrderService {
           cancelReason: "OTHER",
           cancelNote: `ADMIN_FORCE_CANCEL: ${reason}`,
           cancelledAt: new Date(),
-        },
+          // Resolve a pending vendor cancellation request as approved.
+          ...(hadRequest
+            ? {
+                cancelRequestResolvedAt: new Date(),
+                cancelRequestOutcome: "APPROVED",
+              }
+            : {}),
+        } as unknown as Prisma.OrderUncheckedUpdateInput,
       });
 
       await tx.orderEvent.create({
@@ -211,8 +252,11 @@ export class AdminOrderService {
       return {
         updated,
         before: { status: before.status, totalChargedCents: before.totalChargedCents },
+        vendorId: before.vendorId,
+        orderNumber: before.orderNumber,
+        refundCents,
       };
-    }).then(async ({ updated, before }) => {
+    }).then(async ({ updated, before, vendorId, orderNumber, refundCents }) => {
       // Audit log lives outside the transaction (its own service handles
       // its own persistence). Best-effort — failing the audit shouldn't
       // un-refund the vendor.
@@ -222,10 +266,89 @@ export class AdminOrderService {
         resourceType: "order",
         resourceId: id,
         beforeState: { status: before.status, totalChargedCents: before.totalChargedCents },
-        afterState: { status: "CANCELLED", reason },
+        afterState: { status: "CANCELLED", reason, refundCents },
       }).catch(() => undefined);
+
+      // Tell the vendor their order was cancelled + how much was refunded.
+      await this.notifications
+        .emit({
+          vendorId,
+          type: "order.cancelled",
+          severity: "INFO",
+          title: `Order #${orderNumber} cancelled`,
+          body:
+            refundCents > 0
+              ? `Your order was cancelled and $${(refundCents / 100).toFixed(2)} was refunded to your wallet. The inventory has been restocked.`
+              : `Your order was cancelled and the inventory has been restocked.`,
+          href: `/orders/${id}`,
+        })
+        .catch(() => undefined);
       return updated;
     });
+  }
+
+  /**
+   * Reject a vendor's pending cancellation request — the order keeps moving
+   * through fulfillment. Records the decision + reason and notifies the
+   * vendor. No money or inventory moves.
+   */
+  async rejectCancellation(id: string, actorId: string, note: string): Promise<Order> {
+    const order = await this.prisma.order.findUnique({ where: { id } });
+    if (!order) throw new NotFoundException();
+    const o = order as unknown as {
+      vendorId: string;
+      orderNumber: number;
+      cancelRequestedAt: Date | null;
+      cancelRequestResolvedAt: Date | null;
+    };
+    if (o.cancelRequestedAt == null || o.cancelRequestResolvedAt != null) {
+      throw new ConflictException({
+        message: "There is no pending cancellation request on this order.",
+        code: "no_pending_cancel_request",
+      });
+    }
+
+    const updated = await this.prisma.order.update({
+      where: { id },
+      data: {
+        cancelRequestResolvedAt: new Date(),
+        cancelRequestOutcome: "REJECTED",
+        cancelRequestNote: note,
+      } as unknown as Prisma.OrderUncheckedUpdateInput,
+    });
+
+    await this.prisma.orderEvent.create({
+      data: {
+        orderId: id,
+        type: "order.cancel_request_rejected",
+        description: `Cancellation request rejected by admin: ${note}`,
+        source: "ADMIN",
+        actorId,
+      },
+    });
+
+    await this.notifications
+      .emit({
+        vendorId: o.vendorId,
+        type: "order.cancel_request_rejected",
+        severity: "WARNING",
+        title: `Cancellation declined — order #${o.orderNumber}`,
+        body: `Your cancellation request was declined: ${note}`,
+        href: `/orders/${id}`,
+      })
+      .catch(() => undefined);
+
+    await this.audit
+      .log({
+        actorId,
+        action: "order.cancel_request_rejected",
+        resourceType: "order",
+        resourceId: id,
+        afterState: { note },
+      })
+      .catch(() => undefined);
+
+    return updated;
   }
 
   // ---------------------------------------------------------------------------

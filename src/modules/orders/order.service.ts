@@ -51,6 +51,7 @@ import {
 import { PrismaService } from "../../common/prisma.service";
 import type {
   CancelOrderInput,
+  RequestCancellationInput,
   CreateOrderInput,
   ListOrdersInput,
   OrderLineInput,
@@ -154,6 +155,14 @@ export interface PublicOrder {
   reassessmentDeltaCents: number;
   cancelReason: Order["cancelReason"];
   cancelNote: string | null;
+  // Migration 0074 — vendor cancellation request state.
+  cancelRequestedAt: Date | null;
+  cancelRequestReason: string | null;
+  cancelRequestNote: string | null;
+  cancelRequestResolvedAt: Date | null;
+  cancelRequestOutcome: string | null;
+  /** True when a request is awaiting an admin decision. */
+  cancelRequestPending: boolean;
   submittedAt: Date | null;
   allocatedAt: Date | null;
   shippedAt: Date | null;
@@ -1189,6 +1198,134 @@ export class OrderService {
   }
 
   // ===========================================================================
+  // CANCELLATION REQUEST (vendor-initiated, admin-approved)
+  // ===========================================================================
+
+  /**
+   * Statuses in which a vendor may *request* a cancellation. These are the
+   * "being fulfilled but not shipped" states that sit past the instant
+   * self-cancel window (DRAFT/SUBMITTED/ALLOCATED) and before the parcel
+   * physically leaves (SHIPPED / HANDED_OFF / DELIVERED). An admin reviews
+   * every request and approves (refund + restock + cancel) or rejects it.
+   */
+  private static readonly CANCEL_REQUESTABLE: OrderStatus[] = [
+    "LABEL_PURCHASED",
+    "PICKING",
+    "PACKED",
+    // v2 statuses — cast because the committed Prisma client enum predates
+    // migration 0041 (regenerated on deploy); the rest of the codebase
+    // casts these the same way.
+    "PENDING_PACKING" as OrderStatus,
+    "PACKING_COMPLETED" as OrderStatus,
+    "AWAITING_SHIPPING_SELECTION" as OrderStatus,
+    "AWAITING_WALLET_FUNDING" as OrderStatus,
+    "SHIPPING_PAID" as OrderStatus,
+  ];
+
+  /**
+   * Vendor asks ops to cancel an order that's already past self-cancel.
+   * Records the request + alerts ops; does NOT itself cancel, refund, or
+   * release stock — that happens when an admin approves.
+   */
+  async requestCancellation(
+    vendorId: string,
+    actorId: string,
+    id: string,
+    input: RequestCancellationInput,
+  ): Promise<PublicOrder> {
+    const order = await this.prisma.order.findFirst({
+      where: { id, vendorId },
+    });
+    if (!order) throw new NotFoundException();
+
+    const o = order as unknown as {
+      status: OrderStatus;
+      orderNumber: number;
+      cancelRequestedAt: Date | null;
+      cancelRequestResolvedAt: Date | null;
+    };
+
+    // Already cancelled/returned — nothing to request.
+    if (o.status === "CANCELLED" || o.status === "RETURNED") {
+      throw new ConflictException({
+        message: `This order is already ${o.status.toLowerCase()}.`,
+        code: "order_not_cancel_requestable",
+      });
+    }
+    // A request is already pending — don't let them spam it.
+    if (o.cancelRequestedAt != null && o.cancelRequestResolvedAt == null) {
+      throw new ConflictException({
+        message: "A cancellation request is already pending review for this order.",
+        code: "cancel_request_already_pending",
+      });
+    }
+    if (!OrderService.CANCEL_REQUESTABLE.includes(o.status)) {
+      // DRAFT/SUBMITTED/ALLOCATED → tell them to use the instant cancel;
+      // SHIPPED onward → it's already on its way, use a return.
+      const hint =
+        o.status === "DRAFT" || o.status === "SUBMITTED" || o.status === "ALLOCATED"
+          ? "You can cancel this order directly."
+          : "This order has already shipped — please use the returns flow.";
+      throw new ConflictException({
+        message: `A cancellation can't be requested for an order in status ${o.status}. ${hint}`,
+        code: "order_not_cancel_requestable",
+      });
+    }
+
+    const updated = await this.prisma.order.update({
+      where: { id },
+      // Cast: Prisma client may be stale (pre-generate) on the new 0074
+      // columns. Runtime Postgres has them.
+      data: {
+        cancelRequestedAt: new Date(),
+        cancelRequestReason: input.reason,
+        cancelRequestNote: input.note ?? null,
+        cancelRequestResolvedAt: null,
+        cancelRequestOutcome: null,
+      } as unknown as Prisma.OrderUpdateInput,
+    });
+
+    await this.prisma.orderEvent.create({
+      data: {
+        orderId: id,
+        type: "order.cancel_requested",
+        description: `Vendor requested cancellation (${input.reason})${
+          input.note ? `: ${input.note}` : ""
+        }`,
+        source: "VENDOR",
+        actorId,
+      },
+    });
+
+    // Alert ops (email + in-app admin notification) so they can action it.
+    await this.opsAlerts
+      .send({
+        type: "ops.order.cancel_requested",
+        subject: `Cancellation requested — order #${o.orderNumber}`,
+        html: `<p>A vendor requested cancellation of order <strong>#${o.orderNumber}</strong> (status ${o.status}).</p><p>Reason: ${input.reason}${input.note ? `<br>Note: ${input.note}` : ""}</p><p>Review it in the admin order detail to approve (refund + restock) or reject.</p>`,
+        text: `Cancellation requested — order #${o.orderNumber} (status ${o.status}). Reason: ${input.reason}${input.note ? `. Note: ${input.note}` : ""}. Review in admin to approve or reject.`,
+        idempotencyKey: `order-cancel-req-${id}-${o.cancelRequestedAt ?? ""}-${Date.now()}`,
+        href: `/admin/orders/${id}`,
+        severity: "WARNING",
+      })
+      .catch(() => undefined);
+
+    await this.audit
+      .log({
+        actorId,
+        action: "order.cancel_requested",
+        resourceType: "order",
+        resourceId: id,
+        afterState: { reason: input.reason, note: input.note ?? null, status: o.status },
+      })
+      .catch(() => undefined);
+
+    // Re-fetch with lines so toPublic has everything it needs.
+    void updated;
+    return this.get(vendorId, id);
+  }
+
+  // ===========================================================================
   // Internal helpers
   // ===========================================================================
 
@@ -1302,6 +1439,19 @@ export class OrderService {
       reassessmentDeltaCents: o.reassessmentDeltaCents,
       cancelReason: o.cancelReason,
       cancelNote: o.cancelNote,
+      cancelRequestedAt:
+        (o as unknown as { cancelRequestedAt?: Date | null }).cancelRequestedAt ?? null,
+      cancelRequestReason:
+        (o as unknown as { cancelRequestReason?: string | null }).cancelRequestReason ?? null,
+      cancelRequestNote:
+        (o as unknown as { cancelRequestNote?: string | null }).cancelRequestNote ?? null,
+      cancelRequestResolvedAt:
+        (o as unknown as { cancelRequestResolvedAt?: Date | null }).cancelRequestResolvedAt ?? null,
+      cancelRequestOutcome:
+        (o as unknown as { cancelRequestOutcome?: string | null }).cancelRequestOutcome ?? null,
+      cancelRequestPending:
+        (o as unknown as { cancelRequestedAt?: Date | null }).cancelRequestedAt != null &&
+        (o as unknown as { cancelRequestResolvedAt?: Date | null }).cancelRequestResolvedAt == null,
       submittedAt: o.submittedAt,
       allocatedAt: o.allocatedAt,
       shippedAt: o.shippedAt,

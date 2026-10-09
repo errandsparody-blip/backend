@@ -39,6 +39,8 @@ import { IdempotencyService } from "../../common/idempotency.service";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import {
   cancelOrderSchema,
+  requestCancellationSchema,
+  type RequestCancellationInput,
   createOrderSchema,
   fulfillmentEstimateSchema,
   listOrdersSchema,
@@ -304,6 +306,19 @@ export class OrderController {
     @Body(new ZodValidationPipe(cancelOrderSchema)) body: CancelOrderInput,
   ) {
     return this.orders.cancel(user.vendorId!, user.sub, id, body);
+  }
+
+  // Migration 0074 — vendor requests cancellation of an order that's past
+  // the instant self-cancel window (label purchased / being packed). Ops
+  // approves (refund + restock + cancel) or rejects.
+  @Post(":id/request-cancellation")
+  @HttpCode(HttpStatus.OK)
+  requestCancellation(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(requestCancellationSchema)) body: RequestCancellationInput,
+  ) {
+    return this.orders.requestCancellation(user.vendorId!, user.sub, id, body);
   }
 
   // ---------------------------------------------------------------------------
