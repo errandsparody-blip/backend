@@ -6,7 +6,7 @@
  *   - Campaigns represent events (a code/QR at a booth).
  *   - `referrals` holds one row per referred vendor, attributed at signup.
  *   - When the referred vendor's FIRST inbound PSN is received, both the
- *     referrer and the referred vendor are credited reward_cents ($50 each
+ *     referrer and the referred vendor are credited reward_cents ($10 each
  *     by default) — exactly once (rewarded_at + row lock guard it).
  *
  * All referral persistence goes through raw SQL so the module works even
@@ -22,8 +22,8 @@ import { PrismaService } from "../../common/prisma.service";
 import { NotificationService } from "../notifications/notification.service";
 import { WalletService } from "../wallet/wallet.service";
 
-/** Default reward per side, in cents ($50). Campaigns may override. */
-const DEFAULT_REWARD_CENTS = 5000;
+/** Default reward per side, in cents ($10). Campaigns may override. */
+const DEFAULT_REWARD_CENTS = 1000;
 
 interface ResolvedRef {
   referrerVendorId: string | null;
@@ -142,7 +142,7 @@ export class ReferralService {
         await this.notifyVendor(resolved.referrerVendorId, {
           type: "referral.registered",
           title: "Your referral just signed up",
-          body: `${referee} joined USA Errands with your referral link. You'll both earn $50 once they send and we receive their first shipment (PSN).`,
+          body: `${referee} joined USA Errands with your referral link. You'll both earn $10 once they send and we receive their first shipment (PSN).`,
           subject: "Your referral just signed up",
         });
       }
@@ -157,7 +157,7 @@ export class ReferralService {
 
   /**
    * Fire the referral reward when a referred vendor's first inbound PSN is
-   * received. Credits $50 to the referrer AND $50 to the referred vendor,
+   * received. Credits $10 to the referrer AND $10 to the referred vendor,
    * once. Safe to call on every PSN receipt — the row lock + rewarded_at
    * guard make it idempotent. Pure event/campaign signups (no referrer)
    * are marked QUALIFIED with no payout. Best-effort: never throws.

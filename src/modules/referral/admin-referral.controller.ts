@@ -22,7 +22,7 @@ const ROLE_ADMIN = "ADMIN" as Role;
 const createCampaignSchema = z.object({
   code: z.string().trim().min(2).max(40).regex(/^[A-Za-z0-9_-]+$/, "Use letters, digits, - or _."),
   name: z.string().trim().min(2).max(120),
-  // Reward per side, in dollars → converted to cents. Default $50.
+  // Reward per side, in dollars → converted to cents. Default $10.
   rewardDollars: z.coerce.number().min(0).max(100000).optional(),
 });
 type CreateCampaignInput = z.infer<typeof createCampaignSchema>;

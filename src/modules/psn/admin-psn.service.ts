@@ -480,7 +480,7 @@ export class AdminPsnService {
     });
 
     // Referral reward (migration 0056): when a referred vendor's first PSN
-    // is received, credit the referrer + referee $50 each. Fired AFTER the
+    // is received, credit the referrer + referee $10 each. Fired AFTER the
     // receive commits, best-effort — the service is idempotent (only the
     // first received PSN pays) and never throws back here, so a referral
     // hiccup can't undo a completed receive.
