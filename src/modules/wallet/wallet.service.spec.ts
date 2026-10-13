@@ -72,6 +72,21 @@ class FakePrisma {
       Object.assign(w, data, { updatedAt: new Date() });
       return w;
     },
+    updateMany: async ({
+      where,
+      data,
+    }: {
+      where: { vendorId: string; status?: WalletRow["status"] };
+      data: Partial<WalletRow>;
+    }) => {
+      const matches = this.wallets.filter(
+        (w) =>
+          w.vendorId === where.vendorId &&
+          (where.status === undefined || w.status === where.status),
+      );
+      for (const w of matches) Object.assign(w, data, { updatedAt: new Date() });
+      return { count: matches.length };
+    },
   };
 
   ledgerEntry = {
@@ -172,6 +187,40 @@ describe("WalletService", () => {
     expect(prisma.ledger[0]!.amountCents).toBe(50000);
     expect(prisma.wallets[0]!.balanceCents).toBe(50000);
     expect(audit.log).toHaveBeenCalledTimes(1);
+  });
+
+  it("a DEPOSIT clears a STORAGE_OVERDUE flag; other credit types leave it", async () => {
+    prisma.wallets.push({
+      id: "w0",
+      vendorId: VENDOR,
+      balanceCents: 0,
+      lowBalanceThresholdCents: 5000,
+      status: "STORAGE_OVERDUE",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    // A reversal/manual credit does NOT change the overdue status.
+    await svc.credit({ vendorId: VENDOR, amountCents: 500, type: "REVERSAL", description: "x" });
+    expect(prisma.wallets[0]!.status).toBe("STORAGE_OVERDUE");
+
+    // Funding the wallet (DEPOSIT) lifts the flag immediately.
+    await svc.credit({ vendorId: VENDOR, amountCents: 5000, type: "DEPOSIT", description: "top up" });
+    expect(prisma.wallets[0]!.status).toBe("ACTIVE");
+  });
+
+  it("a DEPOSIT does not reactivate a SUSPENDED wallet", async () => {
+    prisma.wallets.push({
+      id: "w0",
+      vendorId: VENDOR,
+      balanceCents: 0,
+      lowBalanceThresholdCents: 5000,
+      status: "SUSPENDED",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await svc.credit({ vendorId: VENDOR, amountCents: 5000, type: "DEPOSIT", description: "top up" });
+    expect(prisma.wallets[0]!.status).toBe("SUSPENDED");
   });
 
   it("rejects zero / negative / non-integer amounts on credit", async () => {

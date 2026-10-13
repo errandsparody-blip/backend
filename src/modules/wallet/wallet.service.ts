@@ -253,6 +253,18 @@ export class WalletService {
         where: { vendorId: args.vendorId },
         data: { balanceCents: after },
       });
+      // When the vendor funds their wallet, lift a STORAGE_OVERDUE flag right
+      // away (rather than waiting for the next nightly storage-billing run to
+      // collect and clear it). Scoped to DEPOSIT so a small refund/reversal
+      // doesn't flip the status, and to the STORAGE_OVERDUE status so we never
+      // reactivate a SUSPENDED/CLOSED wallet. If the deposit still doesn't
+      // cover what's owed, the next billing run re-flags it — self-correcting.
+      if (args.type === "DEPOSIT") {
+        await txc.wallet.updateMany({
+          where: { vendorId: args.vendorId, status: "STORAGE_OVERDUE" },
+          data: { status: "ACTIVE" },
+        });
+      }
       return { entry, balanceAfterCents: after };
     };
 

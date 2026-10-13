@@ -109,6 +109,13 @@ export class StorageBillingJob {
               data: { nextBillingDate: advanceBillingDate(box.nextBillingDate) },
             });
           }
+          // The storage charge went through, so the vendor is current again.
+          // Clear a prior STORAGE_OVERDUE flag (scoped to that status so we
+          // never reactivate a SUSPENDED/CLOSED wallet).
+          await tx.wallet.updateMany({
+            where: { vendorId: v.id, status: "STORAGE_OVERDUE" },
+            data: { status: "ACTIVE" },
+          });
         });
         billed++;
       } catch (err) {
