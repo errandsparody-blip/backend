@@ -38,6 +38,7 @@ import type { Prisma, StorageTier } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
+import { NotificationService } from "../notifications/notification.service";
 import { advanceBillingDate } from "../sku/sku.service";
 import { WalletService } from "../wallet/wallet.service";
 
@@ -59,6 +60,7 @@ export class StorageBillingJob {
     private readonly prisma: PrismaService,
     private readonly wallet: WalletService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationService,
   ) {}
 
   /** 02:00 UTC every day. Bills any box whose 30-day cycle has come due. */
@@ -120,16 +122,49 @@ export class StorageBillingJob {
         billed++;
       } catch (err) {
         if ((err as { response?: { code?: string } }).response?.code === "insufficient_funds") {
-          await this.prisma.wallet.update({
-            where: { vendorId: v.id },
+          // Flag overdue only from ACTIVE → never clobber SUSPENDED/CLOSED.
+          // updateMany's count tells us whether this is a NEW overdue episode
+          // (ACTIVE → STORAGE_OVERDUE just now) versus one that was already
+          // flagged on a prior run — so we email the vendor exactly once per
+          // episode instead of every night until they pay.
+          const flipped = await this.prisma.wallet.updateMany({
+            where: { vendorId: v.id, status: "ACTIVE" },
             data: { status: "STORAGE_OVERDUE" },
           });
           await this.audit.log({
             action: "wallet.storage_overdue",
             resourceType: "wallet",
             resourceId: v.id,
-            afterState: { liabilityCents: totalCents },
+            afterState: { liabilityCents: totalCents, firstNotice: flipped.count > 0 },
           });
+          if (flipped.count > 0) {
+            const dollars = `$${(totalCents / 100).toFixed(2)}`;
+            // Best-effort — a mail hiccup must never break the billing run.
+            await this.notifications
+              .emit({
+                vendorId: v.id,
+                type: "wallet.storage_overdue",
+                severity: "WARNING",
+                title: "Storage fee couldn't be charged",
+                body: `We tried to charge your ${dollars} storage fee but your wallet balance was too low. Add funds and we'll collect it automatically on the next daily run — no need to do anything else.`,
+                href: "/wallet",
+                email: {
+                  subject: `Action needed: your ${dollars} storage fee couldn't be charged`,
+                  html:
+                    `<p>Hi,</p>` +
+                    `<p>We tried to charge your storage fee of <strong>${dollars}</strong>, but your USA Errands wallet balance was too low to cover it.</p>` +
+                    `<p>Please add funds to your wallet. Once your balance can cover it, we'll charge the outstanding storage automatically on the next daily run — your billing cycle stays on schedule and nothing is skipped.</p>` +
+                    `<p>Until then, your account will show as <strong>storage overdue</strong>.</p>` +
+                    `<p><a href="https://www.myusaerrands.com/wallet">Add funds to your wallet →</a></p>`,
+                  text:
+                    `We tried to charge your storage fee of ${dollars}, but your USA Errands wallet balance was too low.\n\n` +
+                    `Please add funds. Once your balance can cover it, we'll charge the outstanding storage automatically on the next daily run — your cycle stays on schedule.\n\n` +
+                    `Until then, your account shows as storage overdue.\n\n` +
+                    `Add funds: https://www.myusaerrands.com/wallet`,
+                },
+              })
+              .catch(() => undefined);
+          }
           overdue++;
         } else {
           this.logger.error({ err, vendorId: v.id }, "Storage billing threw — investigate");
