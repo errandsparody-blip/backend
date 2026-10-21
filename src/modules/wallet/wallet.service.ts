@@ -108,7 +108,15 @@ export class WalletService {
     const client = (tx ?? this.prisma) as PrismaClient;
     const existing = await client.wallet.findUnique({ where: { vendorId } });
     if (existing) return;
-    await client.wallet.create({ data: { vendorId } });
+    // Migration 0075 — provision the wallet in the vendor's region currency
+    // (UK → GBP; US/default → USD). All current vendors are US, so USD — no
+    // behaviour change today. The `region` read is cast for the stale client.
+    const vendorRow = await client.vendor.findUnique({ where: { id: vendorId } });
+    const region = (vendorRow as unknown as { region?: string } | null)?.region ?? "US";
+    const currency = region === "UK" ? "GBP" : "USD";
+    await client.wallet.create({
+      data: { vendorId, currency } as unknown as Prisma.WalletUncheckedCreateInput,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -138,10 +146,10 @@ export class WalletService {
     let lowBalanceThreshold = 0;
 
     const run = async (txc: Tx) => {
-      const balance = await this.lockAndRead(txc, args.vendorId);
+      const { balanceCents: balance, currency } = await this.lockAndRead(txc, args.vendorId);
       if (balance < args.amountCents) {
         throw new ConflictException({
-          message: `Insufficient funds. Balance is $${(balance / 100).toFixed(2)}.`,
+          message: `Insufficient funds. Balance is ${(balance / 100).toFixed(2)} ${currency}.`,
           code: "insufficient_funds",
         });
       }
@@ -172,7 +180,10 @@ export class WalletService {
           referenceId: args.referenceId ?? null,
           idempotencyKey: args.idempotencyKey ?? null,
           createdBy: args.actorId ?? null,
-        },
+          // Migration 0075 — stamp the wallet's currency on the entry. Cast for
+          // the stale-generated-client pattern (column lands with 0075).
+          currency,
+        } as unknown as Prisma.LedgerEntryUncheckedCreateInput,
       });
       await txc.wallet.update({
         where: { vendorId: args.vendorId },
@@ -232,7 +243,7 @@ export class WalletService {
       });
     }
     const run = async (txc: Tx) => {
-      const balance = await this.lockAndRead(txc, args.vendorId);
+      const { balanceCents: balance, currency } = await this.lockAndRead(txc, args.vendorId);
       const after = balance + args.amountCents;
       const entry = await txc.ledgerEntry.create({
         data: {
@@ -247,7 +258,9 @@ export class WalletService {
           referenceId: args.referenceId ?? null,
           idempotencyKey: args.idempotencyKey ?? null,
           createdBy: args.actorId ?? null,
-        },
+          // Migration 0075 — stamp the wallet's currency on the entry.
+          currency,
+        } as unknown as Prisma.LedgerEntryUncheckedCreateInput,
       });
       await txc.wallet.update({
         where: { vendorId: args.vendorId },
@@ -335,13 +348,18 @@ export class WalletService {
    * Postgres-specific. Prisma's $queryRaw is the only way to issue
    * `SELECT ... FOR UPDATE` from the typed client.
    */
-  private async lockAndRead(tx: Tx, vendorId: string): Promise<number> {
-    const rows = await tx.$queryRaw<Array<{ balance_cents: number }>>(
-      Prisma.sql`SELECT balance_cents FROM wallets WHERE vendor_id = ${vendorId}::uuid FOR UPDATE`,
+  private async lockAndRead(
+    tx: Tx,
+    vendorId: string,
+  ): Promise<{ balanceCents: number; currency: string }> {
+    // Migration 0075 — read the wallet's currency alongside its balance so
+    // every ledger entry is stamped with it. Defaults to USD for pre-0075 rows.
+    const rows = await tx.$queryRaw<Array<{ balance_cents: number; currency: string | null }>>(
+      Prisma.sql`SELECT balance_cents, currency FROM wallets WHERE vendor_id = ${vendorId}::uuid FOR UPDATE`,
     );
     const row = rows[0];
     if (!row) throw new NotFoundException("Wallet not found.");
-    return row.balance_cents;
+    return { balanceCents: row.balance_cents, currency: row.currency ?? "USD" };
   }
 
   private toSnapshot(w: Wallet): WalletSnapshot {
