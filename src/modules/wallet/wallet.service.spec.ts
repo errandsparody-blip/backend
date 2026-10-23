@@ -23,7 +23,6 @@ interface WalletRow {
   balanceCents: number;
   lowBalanceThresholdCents: number;
   status: "ACTIVE" | "STORAGE_OVERDUE" | "SUSPENDED" | "CLOSED";
-  currency?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -39,7 +38,6 @@ interface LedgerRow {
   referenceId: string | null;
   idempotencyKey: string | null;
   createdBy: string | null;
-  currency?: string;
   createdAt: Date;
 }
 
@@ -55,18 +53,13 @@ class FakePrisma {
   wallet = {
     findUnique: async ({ where }: { where: { vendorId: string } }) =>
       this.wallets.find((w) => w.vendorId === where.vendorId) ?? null,
-    create: async ({
-      data,
-    }: {
-      data: { vendorId: string; balanceCents?: number; currency?: string };
-    }) => {
+    create: async ({ data }: { data: { vendorId: string; balanceCents?: number } }) => {
       const w: WalletRow = {
         id: `w${this.nextId++}`,
         vendorId: data.vendorId,
         balanceCents: data.balanceCents ?? 0,
         lowBalanceThresholdCents: 5000,
         status: "ACTIVE",
-        currency: data.currency ?? "USD",
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -111,10 +104,6 @@ class FakePrisma {
     }),
   };
 
-  // ensureWalletExists reads the vendor's region to choose the wallet currency.
-  // null → defaults to US/USD.
-  vendor = { findUnique: async () => null };
-
   /**
    * Fake $queryRaw — returns the wallet's balance to mimic the FOR UPDATE call.
    *
@@ -136,7 +125,7 @@ class FakePrisma {
     }
     const w = this.wallets.find((x) => x.vendorId === vendorId);
     if (!w) return [] as T;
-    return [{ balance_cents: w.balanceCents, currency: w.currency ?? "USD" }] as T;
+    return [{ balance_cents: w.balanceCents }] as T;
   };
 
   // Make $transaction inline — pass `this` through as the tx client.
@@ -218,23 +207,6 @@ describe("WalletService", () => {
     // Funding the wallet (DEPOSIT) lifts the flag immediately.
     await svc.credit({ vendorId: VENDOR, amountCents: 5000, type: "DEPOSIT", description: "top up" });
     expect(prisma.wallets[0]!.status).toBe("ACTIVE");
-  });
-
-  it("stamps the wallet's currency on every ledger entry (GBP wallet → GBP entries)", async () => {
-    prisma.wallets.push({
-      id: "w0",
-      vendorId: VENDOR,
-      balanceCents: 10_000,
-      lowBalanceThresholdCents: 5000,
-      status: "ACTIVE",
-      currency: "GBP",
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    });
-    await svc.debit({ vendorId: VENDOR, amountCents: 1000, type: "FULFILLMENT", description: "x" });
-    await svc.credit({ vendorId: VENDOR, amountCents: 500, type: "DEPOSIT", description: "y" });
-    expect(prisma.ledger).toHaveLength(2);
-    expect(prisma.ledger.every((e) => e.currency === "GBP")).toBe(true);
   });
 
   it("a DEPOSIT does not reactivate a SUSPENDED wallet", async () => {

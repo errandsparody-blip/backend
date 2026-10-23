@@ -58,15 +58,6 @@ enum VendorStatus {
   CLOSED
 }
 
-// Migration 0075 — fulfilment region. A region is a configuration bundle
-// (warehouse origin, carriers, currency, address rules, Stripe account) applied
-// per vendor. US is the launch default; UK is additive. Everything downstream
-// is scoped by the vendor's region. See UK_EXPANSION_PLAN.md.
-enum Region {
-  US
-  UK
-}
-
 // =============================================================================
 // KYC v2 — structured-data enums. Phase 1 of the expanded onboarding form;
 // uploads (ID front/back + selfie + business doc) land in a follow-up. Every
@@ -245,10 +236,6 @@ model Vendor {
   id            String        @id @default(uuid()) @db.Uuid
   businessName  String        @map("business_name")
   country       String        @db.Char(2) // ISO 3166-1 alpha-2
-  // Migration 0075 — the vendor's fulfilment region (which warehouse their
-  // stock lives in + currency of their wallet/fees). Default US; backfilled to
-  // US for every existing vendor so behaviour is unchanged.
-  region        Region        @default(US)
   // Migration 0056 — the vendor's own shareable referral code.
   referralCode  String?       @unique @map("referral_code")
 
@@ -1044,9 +1031,6 @@ model Wallet {
   // Materialized balance. Reconciled by daily job; always equals the sum of
   // ledger_entries.amount_cents for this vendor. CHECK enforces non-negative.
   balanceCents             Int          @default(0) @map("balance_cents")
-  // Migration 0075 — currency of this wallet (minor units in balance_cents).
-  // Default USD; a UK-region wallet is GBP. Debits/credits must match it.
-  currency                 String       @default("USD") @db.Char(3)
   // Configurable per vendor; default $50.00 (5000 cents).
   lowBalanceThresholdCents Int          @default(5000) @map("low_balance_threshold_cents")
 
@@ -1104,9 +1088,6 @@ model LedgerEntry {
   type              LedgerEntryType
   // Signed cents: positive for deposits/credits, negative for charges/debits.
   amountCents       Int             @map("amount_cents")
-  // Migration 0075 — currency of this entry (minor units in amount_cents).
-  // Default USD; reconciliation is grouped per currency. Matches the wallet.
-  currency          String          @default("USD") @db.Char(3)
   // Materialized balance immediately AFTER this entry was applied.
   // NULL for shopper rows (no wallet, no running balance).
   balanceAfterCents Int?            @map("balance_after_cents")
@@ -1398,9 +1379,6 @@ model Order {
   fulfillmentFeeCents      Int             @default(0) @map("fulfillment_fee_cents")   // pick/pack
   insuranceFeeCents        Int             @default(0) @map("insurance_fee_cents")
   totalChargedCents        Int             @default(0) @map("total_charged_cents")     // sum debited from wallet
-  // Migration 0075 — currency of this order's money columns (minor units).
-  // Default USD; a UK-region order is GBP. Matches the vendor's wallet.
-  currency                 String          @default("USD") @db.Char(3)
 
   // Reassessment delta (positive = vendor charged more after weigh; negative = refund).
   reassessmentDeltaCents   Int             @default(0) @map("reassessment_delta_cents")

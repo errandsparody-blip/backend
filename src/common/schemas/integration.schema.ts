@@ -16,29 +16,17 @@
 
 import { z } from "zod";
 
-// State/province/county. Loose at the field level — the per-country rule in
-// the superRefine below requires a 2-letter code for US/CA and lets GB omit it
-// (UK addresses frequently have no county). Kept optional so GB orders validate.
-const stateLoose = z
+const usState = z
   .string()
   .trim()
   .toUpperCase()
-  .max(40)
-  .optional()
-  // Normalise absent/empty to "" so the (NOT NULL) ship_state column always
-  // gets a string. US/CA still require a real 2-letter code via the refine.
-  .transform((v) => v ?? "");
+  .regex(/^[A-Z]{2}$/, "Use a 2-letter state code, e.g. CA.");
 
 const iso2 = z
   .string()
   .trim()
   .toUpperCase()
   .regex(/^[A-Z]{2}$/, "Use a 2-letter ISO country code, e.g. US.");
-
-// UK postcodes, e.g. "SW1A 1AA", "M1 1AE", "B33 8TH", "DN55 1PT".
-const UK_POSTAL_RE = /^[A-Z]{1,2}\d[A-Z\d]? ?\d[A-Z]{2}$/;
-// US 2-letter state shape (membership isn't re-checked here; Shippo/Smarty do).
-const TWO_LETTER_RE = /^[A-Z]{2}$/;
 
 const optionalString = (max: number) =>
   z
@@ -72,31 +60,9 @@ export const integrationRecipientSchema = z.object({
     .min(2, "City is too short.")
     .max(80)
     .regex(/[A-Za-z]/, "City must contain letters."),
-  state: stateLoose,
+  state: usState,
   postalCode: z.string().trim().toUpperCase().min(3).max(12),
   country: iso2.default("US"),
-}).superRefine((d, ctx) => {
-  const country = (d.country ?? "US").toUpperCase();
-  if (country === "GB") {
-    // UK: no county required; validate the postcode shape.
-    if (!UK_POSTAL_RE.test(d.postalCode)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["postalCode"],
-        message: "Enter a valid UK postcode, e.g. SW1A 1AA.",
-      });
-    }
-  } else {
-    // US / CA / everywhere else keeps the prior behaviour: a 2-letter
-    // state/province code is required (membership checked downstream).
-    if (!d.state || !TWO_LETTER_RE.test(d.state)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["state"],
-        message: "Use a 2-letter state/province code, e.g. CA.",
-      });
-    }
-  }
 });
 export type IntegrationRecipient = z.infer<typeof integrationRecipientSchema>;
 

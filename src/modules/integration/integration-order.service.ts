@@ -228,11 +228,7 @@ export class IntegrationOrderService {
     // the address is their concern — skip the blocking check.
     let addressOutcome = "SKIPPED";
     let addressDetail: string | null = null;
-    // Smarty verifies US addresses only — running it on a UK (GB) address would
-    // wrongly reject a valid one. GB destinations skip this check (the
-    // merchant's checkout validated it); a UK-specific validator can slot in
-    // here later per region. US/CA behaviour is unchanged.
-    if (!isVendorCarrier && input.recipient.country !== "GB") {
+    if (!isVendorCarrier) {
       const addr = await this.smarty.verifyUS({
         line1: input.recipient.line1,
         line2: input.recipient.line2,
