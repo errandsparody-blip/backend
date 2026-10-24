@@ -6,6 +6,7 @@ import { AuthModule } from "../auth/auth.module";
 import { EmailModule } from "../email/email.module";
 import { NotificationModule } from "../notifications/notification.module";
 import { ProductModule } from "../products/product.module";
+import { ShippoModule } from "../integrations/shippo/shippo.module";
 import { VendorModule } from "../vendors/vendor.module";
 
 import { AdminAuditController } from "./admin-audit.controller";
@@ -33,6 +34,10 @@ import { AdminFinanceController } from "./admin-finance.controller";
 import { AdminProductController } from "./admin-product.controller";
 import { AdminRolePermissionsController } from "./admin-role-permissions.controller";
 import { AdminShippingPointRangesController } from "./admin-shipping-point-ranges.controller";
+// Shipping-origin diagnostics — read-only view of the sender/return
+// address (incl. phone) the platform sends to Shippo on every label.
+// ShippoService comes from ShippoModule, imported below.
+import { AdminShippingOriginController } from "./admin-shipping-origin.controller";
 import { AdminSkuController } from "./admin-sku.controller";
 import { AdminUsersController } from "./admin-users.controller";
 import { AdminSkuService } from "./admin-sku.service";
@@ -60,6 +65,9 @@ import { AdminVendorService } from "./admin-vendor.service";
     // changes. AuthModule exports TokenService, so importing the
     // module here brings it into DI scope.
     AuthModule,
+    // ShippoService (ship-from address diagnostics) is exported by
+    // ShippoModule.
+    ShippoModule,
   ],
   controllers: [
     AdminDashboardController,
@@ -90,6 +98,8 @@ import { AdminVendorService } from "./admin-vendor.service";
     // Migration 0040 — SUPER_ADMIN edits the shipping-point range
     // table. ShippingPointService is @Global(), no import needed.
     AdminShippingPointRangesController,
+    // Shipping-origin diagnostics (read-only) — ADMIN + SUPER_ADMIN.
+    AdminShippingOriginController,
     // Migration 0043 — packaging library CRUD (SUPER_ADMIN) plus a
     // pack-modal read endpoint (any admin who can read orders).
     AdminPackagingController,

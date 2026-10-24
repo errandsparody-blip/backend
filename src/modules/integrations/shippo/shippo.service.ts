@@ -392,6 +392,45 @@ export class ShippoService {
     return Boolean(this.cfg.SHIPPO_API_KEY);
   }
 
+  /**
+   * The sender ("ship from") address exactly as we send it to Shippo on
+   * every shipment. This is the SINGLE SOURCE for the from-address: both
+   * the shipment payload builder and the admin diagnostics readout call
+   * this, so what an operator sees in the UI is byte-for-byte what prints
+   * on the label.
+   *
+   * IMPORTANT: Shippo prints the phone from THIS payload (`address_from.phone`),
+   * not from the saved address in the Shippo dashboard. The value comes from
+   * the `WAREHOUSE_FROM_PHONE` environment variable — update it there (not in
+   * the Shippo dashboard) to change the number on the label. We don't send a
+   * separate `address_return`, so Shippo uses this same address (and phone)
+   * as the return address too.
+   */
+  getShipFromAddress(): {
+    name: string;
+    street1: string;
+    street2: string;
+    city: string;
+    state: string;
+    zip: string;
+    country: string;
+    phone: string;
+    email: string;
+  } {
+    return {
+      name: this.cfg.WAREHOUSE_FROM_NAME,
+      street1: this.cfg.WAREHOUSE_FROM_STREET1,
+      street2: this.cfg.WAREHOUSE_FROM_STREET2 ?? "",
+      city: this.cfg.WAREHOUSE_FROM_CITY,
+      state: this.cfg.WAREHOUSE_FROM_STATE,
+      zip: this.cfg.WAREHOUSE_FROM_ZIP,
+      country: "US",
+      phone: this.cfg.WAREHOUSE_FROM_PHONE,
+      // USPS rejects label purchase without sender email. See config.ts.
+      email: this.cfg.WAREHOUSE_FROM_EMAIL,
+    };
+  }
+
   // ===========================================================================
   // Rates
   // ===========================================================================
@@ -420,18 +459,7 @@ export class ShippoService {
     // shipment payload. We pass them as objects rather than ID refs to
     // avoid the extra round-trip needed to pre-create address records.
     // Held in locals so the flat-rate shipments below can reuse them.
-    const addressFrom = {
-      name: this.cfg.WAREHOUSE_FROM_NAME,
-      street1: this.cfg.WAREHOUSE_FROM_STREET1,
-      street2: this.cfg.WAREHOUSE_FROM_STREET2 ?? "",
-      city: this.cfg.WAREHOUSE_FROM_CITY,
-      state: this.cfg.WAREHOUSE_FROM_STATE,
-      zip: this.cfg.WAREHOUSE_FROM_ZIP,
-      country: "US",
-      phone: this.cfg.WAREHOUSE_FROM_PHONE,
-      // USPS rejects label purchase without sender email. See config.ts.
-      email: this.cfg.WAREHOUSE_FROM_EMAIL,
-    };
+    const addressFrom = this.getShipFromAddress();
     const addressTo: Record<string, string> = {
       // Recipient name as printed on the label. Trim and fall back to a
       // placeholder only if the caller genuinely has no name on file —
