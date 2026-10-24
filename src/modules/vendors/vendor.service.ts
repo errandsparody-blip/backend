@@ -259,6 +259,78 @@ export class VendorService {
    * the vendor sees here is exactly what will be charged when the
    * cron next picks up their boxes.
    */
+  /**
+   * Best-selling products for the vendor's overview report. Aggregates
+   * outbound order-line quantities per product over a date window, so the
+   * vendor can see what's moving fastest. Counts lines on real orders only
+   * (DRAFT and CANCELLED orders excluded) and excludes CANCELLED lines.
+   *
+   * The date window filters on the order's effective order date
+   * (submittedAt, falling back to createdAt for drafts-turned-orders).
+   * `from`/`to` are optional; omit both for all-time. Scoped to the
+   * calling vendor via the order_lines.vendor_id column (tenant-safe).
+   */
+  async topProducts(
+    vendorId: string,
+    opts: { from?: Date; to?: Date; limit?: number },
+  ): Promise<{
+    items: Array<{
+      productId: string;
+      productCode: string;
+      productName: string;
+      unitsSold: number;
+      orderCount: number;
+    }>;
+    from: string | null;
+    to: string | null;
+  }> {
+    const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
+    const fromClause = opts.from
+      ? Prisma.sql`AND COALESCE(o.submitted_at, o.created_at) >= ${opts.from}`
+      : Prisma.sql``;
+    const toClause = opts.to
+      ? Prisma.sql`AND COALESCE(o.submitted_at, o.created_at) <= ${opts.to}`
+      : Prisma.sql``;
+
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        product_id: string;
+        product_code: string;
+        product_name: string;
+        units_sold: number;
+        order_count: number;
+      }>
+    >(Prisma.sql`
+      SELECT ol.product_id,
+             ol.product_code,
+             ol.product_name,
+             COALESCE(SUM(ol.quantity), 0)::int AS units_sold,
+             COUNT(DISTINCT ol.order_id)::int AS order_count
+      FROM order_lines ol
+      JOIN orders o ON o.id = ol.order_id
+      WHERE ol.vendor_id = ${vendorId}::uuid
+        AND o.status NOT IN ('DRAFT', 'CANCELLED')
+        AND ol.allocation_status <> 'CANCELLED'
+        ${fromClause}
+        ${toClause}
+      GROUP BY ol.product_id, ol.product_code, ol.product_name
+      ORDER BY units_sold DESC, order_count DESC
+      LIMIT ${limit}
+    `);
+
+    return {
+      items: rows.map((r) => ({
+        productId: r.product_id,
+        productCode: r.product_code,
+        productName: r.product_name,
+        unitsSold: r.units_sold,
+        orderCount: r.order_count,
+      })),
+      from: opts.from ? opts.from.toISOString() : null,
+      to: opts.to ? opts.to.toISOString() : null,
+    };
+  }
+
   async getRecurringStorage(vendorId: string): Promise<VendorRecurringStorage> {
     const vendor = await this.prisma.vendor.findUnique({
       where: { id: vendorId },

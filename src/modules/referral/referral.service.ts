@@ -341,6 +341,51 @@ export class ReferralService {
     }));
   }
 
+  /**
+   * Admin leaderboard: how many vendors each referrer has brought in, how
+   * many of those qualified (rewarded), and the total they've earned. One
+   * row per referring vendor, busiest first. Campaign/event signups (no
+   * referrer vendor) are excluded — they show in the campaigns table.
+   */
+  async referrerRollup(): Promise<
+    Array<{
+      referrerVendorId: string;
+      referrerVendor: string;
+      referredCount: number;
+      rewardedCount: number;
+      earnedCents: number;
+    }>
+  > {
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        referrer_vendor_id: string;
+        referrer_vendor: string;
+        referred_count: number;
+        rewarded_count: number;
+        earned_cents: number;
+      }>
+    >(Prisma.sql`
+      SELECT r.referrer_vendor_id,
+             rf.business_name AS referrer_vendor,
+             COUNT(*)::int AS referred_count,
+             COUNT(*) FILTER (WHERE r.status = 'REWARDED')::int AS rewarded_count,
+             COALESCE(SUM(r.reward_cents) FILTER (WHERE r.status = 'REWARDED'), 0)::int AS earned_cents
+      FROM referrals r
+      JOIN vendors rf ON rf.id = r.referrer_vendor_id
+      WHERE r.referrer_vendor_id IS NOT NULL
+      GROUP BY r.referrer_vendor_id, rf.business_name
+      ORDER BY referred_count DESC, earned_cents DESC
+      LIMIT 500
+    `);
+    return rows.map((r) => ({
+      referrerVendorId: r.referrer_vendor_id,
+      referrerVendor: r.referrer_vendor,
+      referredCount: r.referred_count,
+      rewardedCount: r.rewarded_count,
+      earnedCents: r.earned_cents,
+    }));
+  }
+
   async listCampaigns(): Promise<
     Array<{ id: string; code: string; name: string; rewardCents: number; active: boolean; signups: number }>
   > {

@@ -42,6 +42,12 @@ export class AdminReferralController {
     return this.referrals.listCampaigns().then((items) => ({ items }));
   }
 
+  /** Per-referrer leaderboard — how many each vendor has referred. */
+  @Get("referrers")
+  referrers() {
+    return this.referrals.referrerRollup().then((items) => ({ items }));
+  }
+
   @Post("campaigns")
   createCampaign(@Body(new ZodValidationPipe(createCampaignSchema)) body: CreateCampaignInput) {
     return this.referrals.createCampaign({

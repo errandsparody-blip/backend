@@ -7,6 +7,7 @@ import {
   HttpStatus,
   Patch,
   Post,
+  Query,
   ServiceUnavailableException,
   UseGuards,
 } from "@nestjs/common";
@@ -79,6 +80,15 @@ const presignKycUploadSchema = z.object({
 });
 type PresignKycUploadInput = z.infer<typeof presignKycUploadSchema>;
 
+// Best-selling products report query. All optional: no dates = all-time.
+// Coerce so the values arrive as proper Date/number from the query string.
+const topProductsQuerySchema = z.object({
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+  limit: z.coerce.number().int().positive().max(100).optional(),
+});
+type TopProductsQuery = z.infer<typeof topProductsQuerySchema>;
+
 @Controller({ path: "vendors/me", version: "1" })
 @Roles(Role.VENDOR, Role.VENDOR_SUB_USER)
 @UseGuards(TenantGuard)
@@ -102,6 +112,23 @@ export class VendorController {
   @Get("recurring-storage")
   async recurringStorage(@CurrentUser() user: AuthenticatedUser) {
     return this.vendors.getRecurringStorage(user.vendorId!);
+  }
+
+  /**
+   * Best-selling products for the overview report. Optional `from`/`to`
+   * ISO dates bound the window (omit for all-time); `limit` caps rows.
+   * Read-only aggregate — sub-users may view it.
+   */
+  @Get("top-products")
+  async topProducts(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query(new ZodValidationPipe(topProductsQuerySchema)) query: TopProductsQuery,
+  ) {
+    return this.vendors.topProducts(user.vendorId!, {
+      from: query.from,
+      to: query.to,
+      limit: query.limit,
+    });
   }
 
   @Patch()

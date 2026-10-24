@@ -25,8 +25,14 @@ import { Role } from "@prisma/client";
 import { Roles } from "../../common/decorators/roles.decorator";
 import { ShippoService } from "../integrations/shippo/shippo.service";
 
+// The locally-generated Prisma client can lag behind the schema (the ADMIN
+// role was added in migration 0039). Cast the literal so tsc passes offline;
+// Railway regenerates the client on deploy. Same pattern as
+// admin-referral.controller.ts.
+const ROLE_ADMIN = "ADMIN" as Role;
+
 @Controller({ path: "admin/shipping", version: "1" })
-@Roles(Role.SUPER_ADMIN, Role.ADMIN)
+@Roles(Role.SUPER_ADMIN, ROLE_ADMIN)
 export class AdminShippingOriginController {
   constructor(private readonly shippo: ShippoService) {}
 
