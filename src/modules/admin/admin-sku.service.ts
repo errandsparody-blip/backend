@@ -31,6 +31,7 @@ import type {
   AdminListSkusInput,
 } from "../../common/schemas/sku.schema";
 import { AuditService } from "../audit/audit.service";
+import { NotificationService } from "../notifications/notification.service";
 
 export interface AdminSkuRow {
   id: string;
@@ -80,6 +81,7 @@ export class AdminSkuService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly notifications: NotificationService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -336,6 +338,65 @@ export class AdminSkuService {
       },
     });
 
-    return this.get(skuId);
+    const updated = await this.get(skuId);
+
+    // Tell the vendor their stock was manually adjusted. Vendors never make
+    // these adjustments themselves, so a silent change looks like a bug (or
+    // worse) from their side — they must get a notice of what changed and
+    // why. Best-effort: a notification hiccup must not fail the adjustment,
+    // which is already committed above.
+    await this.notifyVendorOfAdjustment(updated, sku.quantityAvailable, input);
+
+    return updated;
+  }
+
+  /**
+   * In-app + email notice to the vendor that an operator adjusted the
+   * available count of one of their SKUs. Fires only when the count
+   * actually moved (delta != 0). Never throws.
+   */
+  private async notifyVendorOfAdjustment(
+    sku: AdminSkuRow,
+    previousQuantity: number,
+    input: AdminAdjustSkuInput,
+  ): Promise<void> {
+    try {
+      if (input.delta === 0) return;
+
+      const reasonText = input.note
+        ? `${input.reason}: ${input.note}`
+        : input.reason;
+      const signedDelta = `${input.delta > 0 ? "+" : ""}${input.delta}`;
+      const variantSuffix = sku.variant ? ` · ${sku.variant}` : "";
+      const productLabel = `${sku.productName} (${sku.productCode}${variantSuffix})`;
+      const direction = input.delta < 0 ? "reduced" : "increased";
+
+      const body =
+        `USA Errands ${direction} the available count of ${productLabel} ` +
+        `from ${previousQuantity} to ${sku.quantityAvailable} (${signedDelta}). ` +
+        `Reason: ${reasonText}.`;
+
+      await this.notifications.emit({
+        vendorId: sku.vendorId,
+        type: "inventory.adjusted",
+        // Reductions are the concerning case (stock removed) — flag amber.
+        severity: input.delta < 0 ? "WARNING" : "INFO",
+        title: "Inventory adjusted by USA Errands",
+        body,
+        href: "/inventory",
+        email: {
+          subject: `Inventory adjusted — ${sku.productCode}`,
+          html:
+            `<p>${body}</p>` +
+            `<p>If this doesn't look right, reply to this email or contact support.</p>` +
+            `<p><a href="https://myusaerrands.com/inventory">View your inventory</a></p>`,
+          text:
+            `${body}\n\nIf this doesn't look right, contact support.\n\n` +
+            `View your inventory: https://myusaerrands.com/inventory`,
+        },
+      });
+    } catch {
+      // Swallow — the adjustment is committed; a failed notice is non-fatal.
+    }
   }
 }
