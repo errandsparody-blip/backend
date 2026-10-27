@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 
 import { AuditModule } from "../audit/audit.module";
+import { IntegrationModule } from "../integration/integration.module";
 import { ReferralModule } from "../referral/referral.module";
 import { SkuModule } from "../sku/sku.module";
 import { WalletModule } from "../wallet/wallet.module";
@@ -12,7 +13,7 @@ import { PsnMessageService } from "./psn-message.service";
 import { PsnService } from "./psn.service";
 
 @Module({
-  imports: [AuditModule, SkuModule, WalletModule, ReferralModule],
+  imports: [AuditModule, SkuModule, WalletModule, ReferralModule, IntegrationModule],
   controllers: [PsnController, AdminPsnController],
   providers: [PsnService, AdminPsnService, PsnMessageService],
   exports: [PsnService, AdminPsnService, PsnMessageService],

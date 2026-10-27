@@ -542,6 +542,35 @@ export class IntegrationOrderService {
     return released;
   }
 
+  /**
+   * Re-check every INSUFFICIENT_STOCK hold for a vendor — invoked after stock
+   * lands (a PSN is received, or an admin tops up a SKU) so queued storefront
+   * orders that were parked waiting for inventory release themselves into
+   * fulfilment. Unlike the funds sweep, holds here depend on DIFFERENT SKUs,
+   * so one order still short on stock must NOT stop the others — we continue
+   * through the whole queue. Best-effort and isolated: any single failure is
+   * logged and skipped, never thrown, so it can be called inline from the
+   * receive flow without risking the receive itself.
+   */
+  async releaseStockHoldsForVendor(vendorId: string): Promise<number> {
+    const holds = await this.prisma.order.findMany({
+      where: { vendorId, status: "ON_HOLD", holdReason: "INSUFFICIENT_STOCK" },
+      select: { id: true },
+      orderBy: { createdAt: "asc" }, // oldest first — fairest claim on new stock
+    });
+    let released = 0;
+    for (const h of holds) {
+      try {
+        const r = await this.releaseHeldOrder(h.id, null);
+        if (r.released) released++;
+        // Do NOT break: the next hold may need a different SKU that IS in stock.
+      } catch (err) {
+        this.logger.warn({ err, orderId: h.id }, "Auto-release of stock hold failed.");
+      }
+    }
+    return released;
+  }
+
   // ===========================================================================
   // STATUS LOOKUP — for the storefront to poll.
   // ===========================================================================

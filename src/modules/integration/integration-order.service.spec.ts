@@ -267,4 +267,58 @@ describe("IntegrationOrderService.ingest (v2)", () => {
     expect(r.holdReason).toBe("INSUFFICIENT_FUNDS");
     expect(wallet.debit).not.toHaveBeenCalled();
   });
+
+  // ---------------------------------------------------------------------------
+  // Stock-hold auto-release (fired when inventory lands via PSN receive).
+  // ---------------------------------------------------------------------------
+  describe("releaseStockHoldsForVendor", () => {
+    it("re-checks only INSUFFICIENT_STOCK holds and releases each independently", async () => {
+      const findMany = jest.fn(async () => [{ id: "o1" }, { id: "o2" }, { id: "o3" }]);
+      // o2 is still short on a DIFFERENT sku — it must NOT stop o3 from
+      // releasing (contrast with the funds sweep, which breaks on the first
+      // failure because all funds holds share one wallet).
+      const releaseHeldOrder = jest
+        .fn()
+        .mockResolvedValueOnce({ released: true, status: "PENDING_PACKING", holdReason: null })
+        .mockResolvedValueOnce({ released: false, status: "ON_HOLD", holdReason: "INSUFFICIENT_STOCK" })
+        .mockResolvedValueOnce({ released: true, status: "PENDING_PACKING", holdReason: null });
+
+      const svc = Object.create(IntegrationOrderService.prototype) as IntegrationOrderService;
+      Object.assign(svc, {
+        prisma: { order: { findMany } },
+        logger: { warn: jest.fn(), log: jest.fn() },
+        releaseHeldOrder,
+      });
+
+      const released = await svc.releaseStockHoldsForVendor(VENDOR);
+
+      expect(findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { vendorId: VENDOR, status: "ON_HOLD", holdReason: "INSUFFICIENT_STOCK" },
+        }),
+      );
+      // All three were attempted — the loop did NOT break after o2 failed.
+      expect(releaseHeldOrder).toHaveBeenCalledTimes(3);
+      expect(released).toBe(2);
+    });
+
+    it("isolates failures — one throwing release never blocks the rest", async () => {
+      const findMany = jest.fn(async () => [{ id: "o1" }, { id: "o2" }]);
+      const releaseHeldOrder = jest
+        .fn()
+        .mockRejectedValueOnce(new Error("boom"))
+        .mockResolvedValueOnce({ released: true, status: "PENDING_PACKING", holdReason: null });
+
+      const svc = Object.create(IntegrationOrderService.prototype) as IntegrationOrderService;
+      Object.assign(svc, {
+        prisma: { order: { findMany } },
+        logger: { warn: jest.fn(), log: jest.fn() },
+        releaseHeldOrder,
+      });
+
+      const released = await svc.releaseStockHoldsForVendor(VENDOR);
+      expect(releaseHeldOrder).toHaveBeenCalledTimes(2);
+      expect(released).toBe(1);
+    });
+  });
 });

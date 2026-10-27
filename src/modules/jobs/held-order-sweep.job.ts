@@ -1,17 +1,19 @@
 /**
  * Held-order sweep — hourly safety net for storefront orders parked in
- * ON_HOLD with reason INSUFFICIENT_FUNDS (Migration 0038).
+ * ON_HOLD waiting on something that has since arrived (Migration 0038).
  *
- * The Stripe deposit webhook already releases a vendor's funded holds the
- * instant a top-up lands, so in the happy path this job finds nothing. It
- * exists to cover the gaps that path can't: admin manual credits, a missed /
- * delayed webhook, or a credit applied by any future code path. For each
- * vendor with funds holds it re-runs allocation (which re-checks the balance
- * under a row lock), releasing as many as the wallet now covers.
+ * Two self-healing reasons are swept:
+ *   - INSUFFICIENT_FUNDS: the Stripe deposit webhook already releases funded
+ *     holds the instant a top-up lands; this covers the gaps that path can't
+ *     (admin manual credits, a missed / delayed webhook).
+ *   - INSUFFICIENT_STOCK: the PSN-receive flow releases stock holds inline the
+ *     moment inventory lands; this covers restock via admin SKU adjustment, a
+ *     failed inline release, or any other path that raises stock. Re-running
+ *     allocation under a row lock places every order the new stock now covers.
  *
- * Unmapped-SKU / insufficient-stock / address holds are deliberately NOT swept
- * — those need a human (remap, restock, fix address), surfaced in the admin
- * held-orders queue instead.
+ * Unmapped-SKU / address holds are deliberately NOT swept — those need a human
+ * (remap the product code, fix the address), surfaced in the admin held-orders
+ * queue instead.
  */
 
 import { Injectable, Logger } from "@nestjs/common";
@@ -33,7 +35,10 @@ export class HeldOrderSweepJob {
   @Cron("0 * * * *", { name: "held-order-sweep", timeZone: "UTC" })
   async run(): Promise<void> {
     const vendors = await this.prisma.order.findMany({
-      where: { status: "ON_HOLD", holdReason: "INSUFFICIENT_FUNDS" },
+      where: {
+        status: "ON_HOLD",
+        holdReason: { in: ["INSUFFICIENT_FUNDS", "INSUFFICIENT_STOCK"] },
+      },
       distinct: ["vendorId"],
       select: { vendorId: true },
     });
@@ -43,7 +48,11 @@ export class HeldOrderSweepJob {
     let released = 0;
     for (const { vendorId } of vendors) {
       try {
+        // Funds first (wallet-gated, stops at the balance), then stock
+        // (SKU-gated, independent per order). Both are best-effort and
+        // isolated per vendor.
         released += await this.integrationOrders.releaseFundedHoldsForVendor(vendorId);
+        released += await this.integrationOrders.releaseStockHoldsForVendor(vendorId);
       } catch (err) {
         this.logger.warn({ err, vendorId }, "Sweep release failed for vendor.");
       }

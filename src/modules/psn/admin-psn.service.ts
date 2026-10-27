@@ -19,6 +19,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from "@nestjs/common";
 import type { Prisma, PrismaClient, PsnStatus } from "@prisma/client";
@@ -35,6 +36,7 @@ import { AuditService } from "../audit/audit.service";
 import { computeFirstBillingDate, SkuService } from "../sku/sku.service";
 import { WalletService } from "../wallet/wallet.service";
 import { ReferralService } from "../referral/referral.service";
+import { IntegrationOrderService } from "../integration/integration-order.service";
 
 // Default window before a stale PsnHold auto-converts to RETURN_REQUESTED.
 // 7 days is long enough for a vendor to notice the dashboard banner /
@@ -46,6 +48,8 @@ type Tx = Omit<PrismaClient, "$connect" | "$disconnect" | "$on" | "$transaction"
 
 @Injectable()
 export class AdminPsnService {
+  private readonly logger = new Logger(AdminPsnService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly skus: SkuService,
@@ -56,6 +60,9 @@ export class AdminPsnService {
     // sealed. The service is @Global(); we just consume it.
     private readonly shippingPoints: ShippingPointService,
     private readonly referrals: ReferralService,
+    // Storefront orders parked ON_HOLD for INSUFFICIENT_STOCK auto-release
+    // the moment the inventory they were waiting on is received here.
+    private readonly integrationOrders: IntegrationOrderService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -486,6 +493,27 @@ export class AdminPsnService {
     // hiccup can't undo a completed receive.
     if (result.status === "RECEIVED" || result.status === "PARTIALLY_RECEIVED") {
       await this.referrals.rewardOnFirstPsn(result.vendorId);
+
+      // Auto-release storefront orders parked ON_HOLD for INSUFFICIENT_STOCK
+      // now that this vendor's inventory has landed. Fired AFTER the receive
+      // commits and wrapped so a release hiccup can never undo a completed
+      // receive — the hourly held-order sweep is the backstop either way.
+      try {
+        const released = await this.integrationOrders.releaseStockHoldsForVendor(
+          result.vendorId,
+        );
+        if (released > 0) {
+          this.logger.log(
+            { vendorId: result.vendorId, released, psnId: result.psnId },
+            "Released storefront stock-holds after PSN receive.",
+          );
+        }
+      } catch (err) {
+        this.logger.warn(
+          { err, vendorId: result.vendorId },
+          "Post-receive stock-hold release failed (non-fatal).",
+        );
+      }
     }
 
     return { status: result.status, psnId: result.psnId };
