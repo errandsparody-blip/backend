@@ -21,6 +21,17 @@ import { loadConfig } from "../../common/config";
 import { CryptoService } from "../../common/crypto.service";
 import { PrismaService } from "../../common/prisma.service";
 
+/**
+ * Grace window for refresh-token rotation. A just-rotated token presented
+ * again within this window (e.g. by a second browser tab or a parallel
+ * request that raced the first refresh) is treated as a benign concurrent
+ * refresh and re-issued, rather than as theft. Genuine replay of an OLD
+ * token, or reuse after this window, still trips full session revocation.
+ * 60s comfortably covers real-world request/clock skew without giving a
+ * thief a meaningful replay window.
+ */
+const ROTATION_GRACE_MS = 60_000;
+
 export interface AccessTokenPayload {
   sub: string;
   vendorId: string | null;
@@ -130,12 +141,62 @@ export class TokenService {
     });
 
     if (!session) {
-      // Possible theft: was this hash a previously-rotated token on any session?
+      // The presented token isn't the current hash. This is EITHER genuine
+      // theft (an old token replayed) OR — far more commonly — a benign
+      // concurrent refresh: the app (or a second browser tab) fired two
+      // refreshes at once with the same cookie, the first rotated the token,
+      // and this one arrived a split-second later still holding the now-
+      // previous token. Treating that race as theft and revoking every
+      // session is what signs real users out "very quickly."
+      //
+      // So we distinguish the two: look up the session whose rotatedHashes
+      // contains this hash, and if the reuse is of the MOST-RECENTLY-rotated
+      // token on a still-active session within a short grace window, treat it
+      // as benign — re-issue a fresh token instead of revoking. Only an OLD
+      // rotated hash, or reuse outside the window, is treated as theft.
       const reused = await this.prisma.session.findFirst({
         where: { rotatedHashes: { has: presentedHash } },
+        include: { user: true },
       });
       if (reused) {
-        // Revoke EVERY active session for that user.
+        const now = new Date();
+        const rotated = reused.rotatedHashes;
+        const isMostRecentRotation =
+          rotated.length > 0 && rotated[rotated.length - 1] === presentedHash;
+        const withinGrace =
+          reused.lastUsedAt != null &&
+          now.getTime() - reused.lastUsedAt.getTime() < ROTATION_GRACE_MS;
+        const sessionUsable =
+          reused.revokedAt == null && reused.expiresAt > now;
+
+        if (sessionUsable && isMostRecentRotation && withinGrace) {
+          // Benign concurrent refresh — re-issue on the same active session
+          // without revoking. Push the current hash into rotatedHashes too so
+          // a third concurrent caller still holding it is tolerated as well.
+          const newToken = this.generateOpaqueToken();
+          const newHash = this.crypto.sha256(newToken);
+          const newExpiresAt = new Date(Date.now() + cfg.JWT_REFRESH_TTL_SECONDS * 1000);
+          await this.prisma.session.update({
+            where: { id: reused.id },
+            data: {
+              rotatedHashes: { push: reused.refreshTokenHash },
+              refreshTokenHash: newHash,
+              userAgent: meta.userAgent ?? reused.userAgent,
+              ip: meta.ip ?? reused.ip,
+              expiresAt: newExpiresAt,
+              lastUsedAt: now,
+            },
+          });
+          return {
+            token: newToken,
+            sessionId: reused.id,
+            expiresAt: newExpiresAt,
+            user: reused.user,
+          };
+        }
+
+        // Genuine reuse (old token replayed, or session already gone) →
+        // revoke EVERY active session for that user.
         await this.prisma.session.updateMany({
           where: { userId: reused.userId, revokedAt: null },
           data: { revokedAt: new Date(), revokedReason: "rotated_token_reuse" },

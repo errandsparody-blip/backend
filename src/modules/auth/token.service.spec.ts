@@ -193,7 +193,7 @@ describe("TokenService", () => {
   // -------------------------------------------------------------------------
   // (3) Theft detection — reusing a rotated token revokes every session.
   // -------------------------------------------------------------------------
-  it("detects refresh-token reuse and revokes every active session for the user", async () => {
+  it("detects refresh-token reuse (outside the grace window) and revokes every active session for the user", async () => {
     const user = seedUser();
     const a = await svc.issueRefreshToken(user, {});
     // Issue a second session so we can prove the theft-detection revokes ALL
@@ -204,6 +204,10 @@ describe("TokenService", () => {
     // Rotate the first session — the original token is now in rotatedHashes.
     await svc.rotateRefreshToken(a.token, {});
 
+    // Age the session past the rotation grace window so the replay is treated
+    // as genuine theft rather than a benign concurrent refresh.
+    prisma.sessions[0]!.lastUsedAt = new Date(Date.now() - 120_000);
+
     // Attacker replays the original token.
     await expect(svc.rotateRefreshToken(a.token, {})).rejects.toThrow();
 
@@ -212,6 +216,40 @@ describe("TokenService", () => {
     expect(live).toHaveLength(0);
     const revokedReasons = prisma.sessions.map((s) => s.revokedReason);
     expect(revokedReasons).toContain("rotated_token_reuse");
+  });
+
+  // -------------------------------------------------------------------------
+  // (3b) Benign concurrent refresh — a just-rotated token replayed within the
+  //      grace window is re-issued, NOT treated as theft. This is the fix for
+  //      users being signed out when two tabs / parallel requests refresh at
+  //      once.
+  // -------------------------------------------------------------------------
+  it("re-issues (does not revoke) when the most-recently-rotated token is replayed within the grace window", async () => {
+    const user = seedUser();
+    const a = await svc.issueRefreshToken(user, {});
+    await svc.issueRefreshToken(user, {});
+
+    // First refresh wins the race (T0 -> T1).
+    const first = await svc.rotateRefreshToken(a.token, {});
+
+    // Second concurrent refresh arrives a split-second later still holding T0.
+    const second = await svc.rotateRefreshToken(a.token, {});
+
+    // It must succeed with a fresh token, NOT throw.
+    expect(second.token).toBeTruthy();
+    expect(second.token).not.toBe(first.token);
+    expect(second.sessionId).toBe(first.sessionId);
+
+    // No session may be revoked by a benign concurrent refresh.
+    const live = prisma.sessions.filter((s) => s.userId === user.id && s.revokedAt === null);
+    expect(live).toHaveLength(2);
+    const revokedReasons = prisma.sessions.map((s) => s.revokedReason);
+    expect(revokedReasons).not.toContain("rotated_token_reuse");
+
+    // The session's current hash is the second token; the first is now rotated.
+    const session = prisma.sessions.find((s) => s.id === first.sessionId)!;
+    expect(session.refreshTokenHash).toBe(crypto.sha256(second.token));
+    expect(session.rotatedHashes).toContain(crypto.sha256(first.token));
   });
 
   // -------------------------------------------------------------------------
