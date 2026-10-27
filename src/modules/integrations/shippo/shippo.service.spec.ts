@@ -227,6 +227,37 @@ describe("ShippoService — boundary helpers", () => {
   });
 
   // -------------------------------------------------------------------------
+  // validateAddress — country handling. USPS validation is US-only, so a
+  // non-US (e.g. Canadian) address must NOT be hard-rejected — it's surfaced
+  // as needs_verification and confirmed by the carrier at label purchase.
+  // -------------------------------------------------------------------------
+  describe("validateAddress — country handling", () => {
+    const caAddr = {
+      line1: "123 Main St",
+      line2: undefined,
+      city: "Saskatoon",
+      state: "SK",
+      postalCode: "S7K 1J5",
+      country: "CA",
+    };
+
+    it("does NOT reject a Canadian address — needs_verification, not invalid", async () => {
+      const r = await svc.validateAddress(caAddr);
+      expect(r.outcome).toBe("needs_verification");
+    });
+
+    it("lower-case country is handled (ca → not rejected)", async () => {
+      const r = await svc.validateAddress({ ...caAddr, country: "ca" });
+      expect(r.outcome).toBe("needs_verification");
+    });
+
+    it("still flags an obviously empty non-US address as invalid", async () => {
+      const r = await svc.validateAddress({ ...caAddr, line1: "", city: "" });
+      expect(r.outcome).toBe("invalid");
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // verifyWebhookSecret — path-query token check (NOT HMAC).
   // -------------------------------------------------------------------------
 

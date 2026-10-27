@@ -955,15 +955,37 @@ export class ShippoService {
   // ===========================================================================
 
   async validateAddress(req: AddressValidationRequest): Promise<AddressValidationOutcome> {
-    // Cheap pre-checks that don't burn an API call. Out-of-scope, blank, etc.
-    if (req.country.trim().toUpperCase() !== "US") {
+    const country = req.country.trim().toUpperCase();
+
+    // Address VALIDATION here is USPS-backed, which only covers US addresses.
+    // For any other country (e.g. Canada) USPS has no record to match, so the
+    // endpoint returns is_valid=false and we used to hard-reject every non-US
+    // address — which parked every Canadian storefront order ON_HOLD with
+    // "Address couldn't be verified," even though Shippo rates and buys labels
+    // to Canada just fine. We DON'T validate non-US addresses here; we surface
+    // them as needs_verification (non-blocking) and let the carrier validate
+    // the address for real at label purchase. Which countries we ship to at all
+    // is enforced upstream at intake (the recipient schema), not here.
+    if (country !== "US") {
+      // Still catch an obviously empty address regardless of country.
+      if (!req.line1?.trim() || !req.city?.trim() || !req.postalCode?.trim()) {
+        return {
+          outcome: "invalid",
+          detail: "Address is missing street, city, or postal code.",
+          corrected: null,
+          providerRef: null,
+        };
+      }
       return {
-        outcome: "invalid",
-        detail: "International shipping is not supported in v1.",
+        outcome: "needs_verification",
+        detail:
+          "Address is outside the US and isn't USPS-verified; the carrier confirms it at label purchase.",
         corrected: null,
         providerRef: null,
       };
     }
+
+    // US: full completeness check, then USPS validation.
     if (!req.line1?.trim() || !req.city?.trim() || !req.state?.trim() || !req.postalCode?.trim()) {
       return {
         outcome: "invalid",
