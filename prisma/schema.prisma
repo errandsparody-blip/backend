@@ -325,6 +325,12 @@ model Vendor {
   /// at the API layer (BATTERIES / LIQUIDS / FRAGILE / HAZARDOUS / NONE).
   productHazards           String[] @default([]) @map("product_hazards")
 
+  // Section 7 — Sales channels (migration 0076). Does the vendor already sell
+  // on e-commerce platforms, which ones, and do they want us to integrate.
+  sellsOnEcommerce         Boolean? @map("sells_on_ecommerce")
+  ecommercePlatforms       String?  @map("ecommerce_platforms")
+  wantsPlatformIntegration Boolean? @map("wants_platform_integration")
+
   // Sections 7 & 8 (Payment & Wallet / Compliance Signature) intentionally
   // omitted from KYC v2 Phase 1. Final-submit is now triggered by a Review
   // step that just stamps `kycSubmittedAt` and flips the vendor into the

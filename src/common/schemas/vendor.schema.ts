@@ -234,6 +234,13 @@ export const submitKycV2Schema = z
     requiresReturnsHandling: z.boolean().optional(),
     productHazards: z.array(hazardEnum).max(5).optional(),
 
+    // Section 7 — Sales channels. `sellsOnEcommerce` is the yes/no; when true
+    // the vendor names the platform(s) and says whether they want integration.
+    // `ecommercePlatforms` accepts "" so a "No" answer can clear it.
+    sellsOnEcommerce: z.boolean().optional(),
+    ecommercePlatforms: z.string().trim().max(400).optional(),
+    wantsPlatformIntegration: z.boolean().optional(),
+
     // Final-submit flag. Sections 7 (Payment & Wallet) and 8 (Compliance
     // signature) from the source spec were dropped — the wire-level signal
     // that "this submission is complete; queue it for admin review" is now
@@ -265,6 +272,7 @@ export const submitKycV2Schema = z
       "primaryShippingCountries",
       "requiresReturnsHandling",
       "productHazards",
+      "sellsOnEcommerce",
     ];
     for (const key of requiredKeys) {
       const v = data[key];
@@ -299,6 +307,25 @@ export const submitKycV2Schema = z
         path: ["businessIndustryOther"],
         message: "Describe the industry.",
       });
+    }
+
+    // Sales channels — if they sell on platforms, they must name at least one
+    // and answer whether they want integration.
+    if (data.sellsOnEcommerce === true) {
+      if (!data.ecommercePlatforms || data.ecommercePlatforms.trim().length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["ecommercePlatforms"],
+          message: "Name the platform(s) you sell on.",
+        });
+      }
+      if (typeof data.wantsPlatformIntegration !== "boolean") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["wantsPlatformIntegration"],
+          message: "Tell us whether you'd like integration.",
+        });
+      }
     }
   });
 

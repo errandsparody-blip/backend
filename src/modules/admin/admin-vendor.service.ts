@@ -273,6 +273,13 @@ export class AdminVendorService {
         primaryShippingCountries: vendor.primaryShippingCountries ?? null,
         requiresReturnsHandling: vendor.requiresReturnsHandling ?? null,
         productHazards: vendor.productHazards ?? [],
+        sellsOnEcommerce:
+          (vendor as { sellsOnEcommerce?: boolean | null }).sellsOnEcommerce ?? null,
+        ecommercePlatforms:
+          (vendor as { ecommercePlatforms?: string | null }).ecommercePlatforms ?? null,
+        wantsPlatformIntegration:
+          (vendor as { wantsPlatformIntegration?: boolean | null }).wantsPlatformIntegration ??
+          null,
       },
     };
   }

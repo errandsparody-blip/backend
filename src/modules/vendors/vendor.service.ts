@@ -84,6 +84,9 @@ export interface VendorProfile {
     primaryShippingCountries: string | null;
     requiresReturnsHandling: boolean | null;
     productHazards: string[];
+    sellsOnEcommerce: boolean | null;
+    ecommercePlatforms: string | null;
+    wantsPlatformIntegration: boolean | null;
   };
 }
 
@@ -688,6 +691,13 @@ export class VendorService {
         primaryShippingCountries: vendor.primaryShippingCountries ?? null,
         requiresReturnsHandling: vendor.requiresReturnsHandling ?? null,
         productHazards: vendor.productHazards ?? [],
+        sellsOnEcommerce:
+          (vendor as { sellsOnEcommerce?: boolean | null }).sellsOnEcommerce ?? null,
+        ecommercePlatforms:
+          (vendor as { ecommercePlatforms?: string | null }).ecommercePlatforms ?? null,
+        wantsPlatformIntegration:
+          (vendor as { wantsPlatformIntegration?: boolean | null }).wantsPlatformIntegration ??
+          null,
       },
     };
   }
@@ -917,7 +927,20 @@ export class VendorService {
       data.productHazards = { set: input.productHazards };
     }
 
-    // Sections 7 & 8 omitted — no funding-method / billing-email /
+    // Section 7 — Sales channels (migration 0076). Cast past the possibly-stale
+    // local Prisma client; Railway regenerates it on deploy.
+    const dataAny = data as unknown as Record<string, unknown>;
+    if (input.sellsOnEcommerce !== undefined) {
+      dataAny.sellsOnEcommerce = input.sellsOnEcommerce;
+    }
+    if (input.ecommercePlatforms !== undefined) {
+      dataAny.ecommercePlatforms = input.ecommercePlatforms;
+    }
+    if (input.wantsPlatformIntegration !== undefined) {
+      dataAny.wantsPlatformIntegration = input.wantsPlatformIntegration;
+    }
+
+    // Section 8 omitted — no funding-method / billing-email /
     // compliance-signature assignments here.
 
     if (isFinalSubmit) {
