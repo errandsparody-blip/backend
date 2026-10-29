@@ -201,6 +201,8 @@ export interface PublicOrder {
   packedWeightOz: number | null;
   packedAt: Date | null;
   packagingLabel: string | null;
+  /** Σ product.weightOz × qty — estimated package weight before packing. */
+  estimatedWeightOz: number | null;
   /**
    * Migration 0037 — fulfillment mode + hand-off timestamp. The vendor
    * UI needs these to decide return eligibility (own-carrier orders
@@ -983,7 +985,7 @@ export class OrderService {
     // 9. Refetch with lines included — toPublic requires them.
     const withLines = await this.prisma.order.findUnique({
       where: { id: order.id },
-      include: { lines: true, packagingOption: true } as Prisma.OrderInclude,
+      include: { lines: { include: { sku: { select: { product: { select: { weightOz: true } } } } } }, packagingOption: true } as Prisma.OrderInclude,
     });
     if (!withLines) {
       throw new NotFoundException(`Order ${order.id} disappeared after create.`);
@@ -1063,7 +1065,7 @@ export class OrderService {
 
     const orders = await this.prisma.order.findMany({
       where,
-      include: { lines: true, packagingOption: true } as Prisma.OrderInclude,
+      include: { lines: { include: { sku: { select: { product: { select: { weightOz: true } } } } } }, packagingOption: true } as Prisma.OrderInclude,
       take: input.limit + 1,
       orderBy: { createdAt: "desc" },
       ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
@@ -1080,7 +1082,7 @@ export class OrderService {
   async get(vendorId: string, id: string): Promise<PublicOrder> {
     const order = await this.prisma.order.findFirst({
       where: { id, vendorId },
-      include: { lines: true, packagingOption: true } as Prisma.OrderInclude,
+      include: { lines: { include: { sku: { select: { product: { select: { weightOz: true } } } } } }, packagingOption: true } as Prisma.OrderInclude,
     });
     if (!order) throw new NotFoundException();
     return this.toPublic(order);
@@ -1128,7 +1130,7 @@ export class OrderService {
 
       const before = await tx.order.findUniqueOrThrow({
         where: { id },
-        include: { lines: true, packagingOption: true } as Prisma.OrderInclude,
+        include: { lines: { include: { sku: { select: { product: { select: { weightOz: true } } } } } }, packagingOption: true } as Prisma.OrderInclude,
       });
 
       // Release reservations on every line.
@@ -1183,7 +1185,7 @@ export class OrderService {
           cancelNote: input.note ?? null,
           cancelledAt: new Date(),
         },
-        include: { lines: true, packagingOption: true } as Prisma.OrderInclude,
+        include: { lines: { include: { sku: { select: { product: { select: { weightOz: true } } } } } }, packagingOption: true } as Prisma.OrderInclude,
       });
 
       await tx.orderEvent.create({
@@ -1545,6 +1547,20 @@ export class OrderService {
           packedAt: raw.packedAt ?? null,
           packagingLabel: label,
         };
+      })(),
+      // Estimated package weight (oz) = Σ product.weightOz × quantity, from
+      // the current product weights. Surfaced so vendors can gauge what a
+      // package weighs BEFORE it's packed (the actual `packedWeightOz` only
+      // exists post-pack) — useful for setting their own storefront shipping
+      // rates. Null when no weight data is available.
+      estimatedWeightOz: (() => {
+        const total = o.lines.reduce((s, l) => {
+          const w =
+            (l as unknown as { sku?: { product?: { weightOz?: number } | null } | null })
+              .sku?.product?.weightOz ?? 0;
+          return s + w * l.quantity;
+        }, 0);
+        return total > 0 ? Math.round(total) : null;
       })(),
       lines: o.lines.map((l) => ({
         id: l.id,
