@@ -34,6 +34,8 @@ function makeTx(openLines: Array<{ id: string; skuId: string; vendorId: string; 
 function makeController(opts: {
   order: Record<string, unknown>;
   tx: TxMock;
+  /** When true, the storefront-order lookup returns a match (buyer already emailed). */
+  storefront?: boolean;
 }) {
   const prisma = {
     webhookEvent: {
@@ -42,6 +44,8 @@ function makeController(opts: {
     },
     order: { findFirst: jest.fn().mockResolvedValue(opts.order) },
     orderEvent: { create: jest.fn().mockResolvedValue({}) },
+    // Used by the customer-tracking helper to detect storefront orders.
+    $queryRaw: jest.fn().mockResolvedValue(opts.storefront ? [{ id: "so1" }] : []),
     $transaction: jest.fn(async (cb: (tx: TxMock) => Promise<unknown>) => cb(opts.tx)),
   };
   const shippo = {
@@ -50,13 +54,15 @@ function makeController(opts: {
     isLive: jest.fn().mockReturnValue(false),
   };
   const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
+  const email = { send: jest.fn().mockResolvedValue({ ok: true }) };
 
   const controller = new ShippoWebhookController(
     shippo as never,
     prisma as never,
     notifications as never,
+    email as never,
   );
-  return { controller, prisma, shippo, tx: opts.tx };
+  return { controller, prisma, shippo, email, tx: opts.tx };
 }
 
 function payload(status: string, trackingNumber = "1Z-TEST") {
@@ -110,5 +116,80 @@ describe("ShippoWebhookController — reserved release", () => {
 
     expect(tx.sku.update).not.toHaveBeenCalled();
     expect(tx.inventoryMovement.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("ShippoWebhookController — customer tracking email", () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  it("emails the recipient their tracking on first in-transit", async () => {
+    const { controller, email } = makeController({
+      order: {
+        id: "o1",
+        status: "LABEL_PURCHASED",
+        shippedAt: null,
+        vendorId: "v1",
+        recipientEmail: "buyer@example.com",
+        recipientName: "Jane",
+        carrier: "UPS",
+        trackingNumber: "1Z-TEST",
+      },
+      tx: makeTx([]),
+    });
+
+    await controller.receive("secret", payload("transit") as never);
+    await flush();
+
+    expect(email.send).toHaveBeenCalledTimes(1);
+    expect(email.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "buyer@example.com",
+        type: "customer.tracking.shipped",
+        idempotencyKey: "customer_tracking_shipped:o1",
+      }),
+    );
+  });
+
+  it("does NOT email a storefront order's recipient (storefront sync already did)", async () => {
+    const { controller, email } = makeController({
+      order: {
+        id: "o1",
+        status: "LABEL_PURCHASED",
+        shippedAt: null,
+        vendorId: "v1",
+        recipientEmail: "buyer@example.com",
+        recipientName: "Jane",
+        carrier: "UPS",
+        trackingNumber: "1Z-TEST",
+      },
+      tx: makeTx([]),
+      storefront: true,
+    });
+
+    await controller.receive("secret", payload("transit") as never);
+    await flush();
+
+    expect(email.send).not.toHaveBeenCalled();
+  });
+
+  it("does NOT email when the order has no recipient email", async () => {
+    const { controller, email } = makeController({
+      order: {
+        id: "o1",
+        status: "LABEL_PURCHASED",
+        shippedAt: null,
+        vendorId: "v1",
+        recipientEmail: null,
+        recipientName: "Jane",
+        carrier: "UPS",
+        trackingNumber: "1Z-TEST",
+      },
+      tx: makeTx([]),
+    });
+
+    await controller.receive("secret", payload("transit") as never);
+    await flush();
+
+    expect(email.send).not.toHaveBeenCalled();
   });
 });

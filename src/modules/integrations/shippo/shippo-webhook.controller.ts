@@ -35,10 +35,17 @@ import {
 import { Throttle } from "@nestjs/throttler";
 import type { OrderStatus } from "@prisma/client";
 
+import { Prisma } from "@prisma/client";
+
 import { Public } from "../../../common/decorators/public.decorator";
 import { formatOrderRef } from "../../../common/order-ref";
 import { PrismaService } from "../../../common/prisma.service";
-import { orderDeliveredTemplate } from "../../email/email-templates";
+import {
+  customerOrderDeliveredTemplate,
+  customerOrderShippedTemplate,
+  orderDeliveredTemplate,
+} from "../../email/email-templates";
+import { EmailService } from "../../email/email.service";
 import { NotificationService } from "../../notifications/notification.service";
 
 import { ShippoService } from "./shippo.service";
@@ -79,6 +86,7 @@ export class ShippoWebhookController {
     private readonly shippo: ShippoService,
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationService,
+    private readonly email: EmailService,
   ) {}
 
   @Public()
@@ -312,10 +320,74 @@ export class ShippoWebhookController {
       });
     });
 
+    // Customer-facing tracking emails (to the ORDER RECIPIENT). Fire on the
+    // first in-transit event ("shipped") and on delivery. Idempotency keys
+    // make repeated webhooks send at most one of each. Storefront orders are
+    // skipped inside the helper (they're emailed by the storefront sync).
+    if (targetStatus === "IN_TRANSIT") {
+      void this.notifyCustomerTracking(order, "shipped").catch(() => undefined);
+    }
     if (targetStatus === "DELIVERED") {
       void this.notifyOrderDelivered(order.id).catch(() => undefined);
+      void this.notifyCustomerTracking(order, "delivered").catch(() => undefined);
     }
     return undefined;
+  }
+
+  /**
+   * Email the end customer (the order recipient) their tracking. Used for
+   * non-storefront orders — e.g. orders pushed through the integration API,
+   * which otherwise never notify the recipient. Best-effort; never throws.
+   */
+  private async notifyCustomerTracking(
+    order: {
+      id: string;
+      recipientEmail: string | null;
+      recipientName: string | null;
+      carrier: string | null;
+      trackingNumber: string | null;
+    },
+    phase: "shipped" | "delivered",
+  ): Promise<void> {
+    const to = order.recipientEmail?.trim();
+    const tracking = order.trackingNumber?.trim();
+    // No customer email on file (partner didn't include it) or no tracking yet
+    // → nothing we can send.
+    if (!to || !tracking) return;
+
+    // Storefront buyers already get a tracking email from the storefront
+    // shipment sync at label-purchase time — don't double-email them.
+    const sf = await this.prisma.$queryRaw<Array<{ id: string }>>(
+      Prisma.sql`SELECT id FROM storefront_orders WHERE fulfillment_order_id = ${order.id}::uuid LIMIT 1`,
+    );
+    if (sf.length > 0) return;
+
+    const tpl =
+      phase === "shipped"
+        ? customerOrderShippedTemplate({
+            recipientName: order.recipientName,
+            carrier: order.carrier ?? "",
+            trackingNumber: tracking,
+          })
+        : customerOrderDeliveredTemplate({
+            recipientName: order.recipientName,
+            trackingNumber: tracking,
+          });
+
+    const res = await this.email.send({
+      to,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+      type: `customer.tracking.${phase}`,
+      idempotencyKey: `customer_tracking_${phase}:${order.id}`,
+    });
+    if (!res.ok) {
+      this.log.warn(
+        { orderId: order.id, phase, error: res.error },
+        "customer.tracking_email.failed",
+      );
+    }
   }
 
   private async notifyOrderDelivered(orderId: string): Promise<void> {

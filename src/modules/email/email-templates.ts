@@ -333,6 +333,60 @@ export function orderDeliveredTemplate(args: { orderRef: string; orderId: string
 }
 
 // ---------------------------------------------------------------------------
+// Customer-facing shipment tracking (sent to the ORDER RECIPIENT, not the
+// vendor) for non-storefront orders — e.g. orders pushed through the
+// integration API. Storefront buyers get their own tracking email from the
+// storefront shipment sync, so the webhook skips those to avoid double-sends.
+// ---------------------------------------------------------------------------
+
+export function customerOrderShippedTemplate(args: {
+  recipientName: string | null;
+  carrier: string;
+  trackingNumber: string;
+}): RenderedEmail {
+  const hi = args.recipientName?.trim() ? `Hi ${args.recipientName.trim()},` : "Hi there,";
+  const carrierLine = args.carrier?.trim() ? `${args.carrier.trim()} has your package. ` : "";
+  const trackUrl = `${cfg.WEB_PUBLIC_URL}/track/${encodeURIComponent(args.trackingNumber)}`;
+  return {
+    subject: "Your order is on its way",
+    html: shell({
+      eyebrow: "  Shipped",
+      title: "Your order is on its way",
+      bodyHtml: `<p style="margin:0 0 12px 0;">${escape(hi)}</p>
+        <p style="margin:0 0 12px 0;">${escape(carrierLine)}Your tracking number:</p>
+        <p style="margin:0 0 12px 0;font-family:'JetBrains Mono',monospace;font-size:14px;color:#0A0A0A;">${escape(args.trackingNumber)}</p>`,
+      cta: { label: "Track your package", href: trackUrl },
+    }),
+    text:
+      `${hi}\n\n` +
+      `${carrierLine}Your tracking number: ${args.trackingNumber}\n\n` +
+      `Track your package: ${trackUrl}`,
+  };
+}
+
+export function customerOrderDeliveredTemplate(args: {
+  recipientName: string | null;
+  trackingNumber: string;
+}): RenderedEmail {
+  const hi = args.recipientName?.trim() ? `Hi ${args.recipientName.trim()},` : "Hi there,";
+  const trackUrl = `${cfg.WEB_PUBLIC_URL}/track/${encodeURIComponent(args.trackingNumber)}`;
+  return {
+    subject: "Your order has been delivered",
+    html: shell({
+      eyebrow: "  Delivered",
+      title: "Your order has been delivered",
+      bodyHtml: `<p style="margin:0 0 12px 0;">${escape(hi)}</p>
+        <p style="margin:0 0 12px 0;">The carrier marked your package as delivered. If you can't find it, check with others at your address and around the delivery location first.</p>`,
+      cta: { label: "View tracking", href: trackUrl },
+    }),
+    text:
+      `${hi}\n\n` +
+      `The carrier marked your package as delivered.\n\n` +
+      `View tracking: ${trackUrl}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Team
 // ---------------------------------------------------------------------------
 
