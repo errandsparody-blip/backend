@@ -51,7 +51,7 @@ export interface RateRequestParcel {
   widthIn: number;
   heightIn: number;
   /**
-   * Migration 0049 / Phase N — Shippo parcel-template id. When set,
+   * Shippo parcel-template id. When set,
    * Shippo returns flat-rate / one-rate / simple-rate pricing for that
    * container instead of weight-based pricing. Values come from
    * CarrierPackagingRegistryService or from a library preset's
@@ -483,7 +483,7 @@ export class ShippoService {
     if (toPhone) addressTo.phone = toPhone;
     const toEmail = req.toAddress.email?.trim();
     if (toEmail) addressTo.email = toEmail;
-    // Migration 0049 / Phase N — carrier template. When set, Shippo
+    // carrier template. When set, Shippo
     // returns flat-rate / one-rate / simple-rate pricing for that
     // container. Shippo accepts either a `template` id OR raw dims;
     // when both are sent, the template's canonical dims take priority

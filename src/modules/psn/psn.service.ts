@@ -37,7 +37,7 @@ import { WalletService } from "../wallet/wallet.service";
 export interface PublicPsn {
   id: string;
   status: PsnStatus;
-  // Migration 0033 — exposed so the vendor portal can render the right
+  // exposed so the vendor portal can render the right
   // detail view (loose / pallet / add-to-pallet) and the admin receive
   // page can show the matching badge.
   shippingMode: ShippingMode;
@@ -60,7 +60,7 @@ export interface PublicPsn {
     receivedQty: number;
     acceptedQty: number;
     damagedQty: number;
-    // Migration 0024 — exposed to the vendor so they see the same
+    // exposed to the vendor so they see the same
     // missing count the admin recorded during receiving.
     missingQty: number;
     notes: string | null;
@@ -429,7 +429,7 @@ export class PsnService {
         receivedQty: l.receivedQty,
         acceptedQty: l.acceptedQty,
         damagedQty: l.damagedQty,
-        // Migration 0024 — surface the missing count the admin recorded
+        // surface the missing count the admin recorded
         // at receive time. Falls back to 0 on rows that pre-date the
         // column being populated.
         missingQty: Number(

@@ -1,5 +1,5 @@
 /**
- * SUPER_ADMIN dashboard endpoint (Phase H).
+ * SUPER_ADMIN dashboard endpoint.
  *
  * Route:
  *   GET /v1/admin/super-dashboard — SUPER_ADMIN only.

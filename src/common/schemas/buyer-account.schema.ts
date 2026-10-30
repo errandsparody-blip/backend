@@ -1,5 +1,5 @@
 /**
- * Optional buyer-account schemas (Migration 0060).
+ * Optional buyer-account schemas.
  */
 import { z } from "zod";
 

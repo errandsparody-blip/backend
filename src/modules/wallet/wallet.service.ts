@@ -3,7 +3,7 @@
  *
  * Implementation Plan §6.4, §14.2.
  *
- * Invariants enforced here AND at the DB level (migration 0005):
+ * Invariants enforced here AND at the DB level:
  *   - balance_cents >= 0 always
  *   - ledger_entries is append-only at DB privilege level
  *   - sum(ledger_entries.amount_cents) == wallets.balance_cents per vendor
@@ -46,7 +46,7 @@ export interface DebitArgs {
     // covers the charge and the hold transitions to PAID.
     | "RECEIVING_HOLD_FEE"
   >
-    // Migration 0059 — one-time $50 storefront setup fee. String literal
+    // one-time $50 storefront setup fee. String literal
     // (like REFERRAL_BONUS) so it typechecks before the local Prisma client
     // is regenerated with the new enum value; the write casts to the enum.
     | "STOREFRONT_FEE";
@@ -62,7 +62,7 @@ export interface CreditArgs {
   amountCents: number;
   // REFUND added in migration 0019 — distinct from REVERSAL (which is for
   // order cancellations); REFUND is for explicit money-back-to-vendor.
-  // REFERRAL_BONUS (migration 0056) is a string literal here rather than an
+  // REFERRAL_BONUS is a string literal here rather than an
   // Extract<LedgerEntryType, …> so it typechecks before the local Prisma
   // client is regenerated with the new enum value; the write casts to the
   // enum, and the regenerated client (Railway) accepts it at runtime.

@@ -1,5 +1,5 @@
 /**
- * Admin controller for the packaging library (Migration 0043).
+ * Admin controller for the packaging library.
  *
  * Routes:
  *   GET    /v1/admin/packaging-options            — all (active + inactive)
@@ -82,7 +82,7 @@ type UpdateInput = z.infer<typeof updateSchema>;
 export class AdminPackagingController {
   constructor(
     private readonly library: PackagingLibraryService,
-    // Migration 0049 / Phase N2 — static registry of Shippo's built-in
+    // static registry of Shippo's built-in
     // carrier templates. Exposed via /carrier so the pack modal can
     // render the Option-A "Carrier packaging" tab.
     private readonly carrierRegistry: CarrierPackagingRegistryService,
@@ -107,7 +107,7 @@ export class AdminPackagingController {
   }
 
   /**
-   * Migration 0049 / Phase N2 — Shippo's built-in carrier templates
+   * Shippo's built-in carrier templates
    * (Option A in the spec). This is a STATIC list from
    * carrier-packaging-registry.ts; it is not stored in the DB and can
    * only be updated by a code deploy. Selecting one at pack time

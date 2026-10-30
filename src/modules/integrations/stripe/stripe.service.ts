@@ -501,7 +501,7 @@ export class StripeService {
   }
 
   /**
-   * Migration 0027 — Stripe Checkout session for the shipping-only
+   * Stripe Checkout session for the shipping-only
    * invoice the buyer pays after admin sets the freight cost. Same
    * shape as the follow-up session but with `purpose: shopper.shipping`
    * so the webhook handler can branch on it. Always single-line-item

@@ -50,7 +50,7 @@ const imageUrlOptional = z
 
 export const createProductSchema = z.object({
   code: productCodeSchema,
-  // Migration 0054 — the vendor's own store SKU (Shopify/Amazon/Woo), used
+  // the vendor's own store SKU (Shopify/Amazon/Woo), used
   // to map storefront-integration orders to this product. Optional; empty
   // string normalises to undefined (no mapping).
   storeSku: z
@@ -118,7 +118,7 @@ export const adminEditProductSchema = z
     widthIn: optionalDimension,
     heightIn: optionalDimension,
     storageTier: storageTierSchema.optional(),
-    // Migration 0073 — admin toggles whether the product counts toward
+    // admin toggles whether the product counts toward
     // the Insurable Inventory Value figure.
     needsInsurance: z.boolean().optional(),
     reason: z.string().trim().min(1).max(280).optional(),

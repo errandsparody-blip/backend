@@ -1,5 +1,5 @@
 /**
- * Zod schemas for the storefront integration API (Migration 0038).
+ * Zod schemas for the storefront integration API.
  *
  * This is the public contract a vendor's website POSTs against. It is
  * intentionally platform-neutral and uses friendly field names (`name`,

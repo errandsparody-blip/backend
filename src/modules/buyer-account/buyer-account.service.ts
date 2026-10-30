@@ -1,5 +1,5 @@
 /**
- * BuyerAccountService — optional, passwordless buyer accounts (Migration 0060).
+ * BuyerAccountService — optional, passwordless buyer accounts.
  *
  * Guests can always check out with just an email. An account additionally saves
  * their default details for faster future checkout and exposes order history.

@@ -1,5 +1,5 @@
 /**
- * OrderPackService — Fulfillment v2 transition machine (Migration 0042).
+ * OrderPackService — Fulfillment v2 transition machine.
  *
  * Extracted from OrderService for SRP: OrderService owns the *submit*
  * lifecycle (v1 quote-then-debit, v2 fee-only-at-submit); this service
@@ -81,7 +81,7 @@ export interface RecordPackInput {
   weightOz: number;
   notes?: string | undefined;
   /**
-   * Migration 0043 — optional packaging library preset. When present,
+   * optional packaging library preset. When present,
    * `lengthIn` / `widthIn` / `heightIn` are IGNORED and the preset's
    * dimensions win (source of truth = the library). `weightOz` is
    * treated as GOODS weight; the preset's `tareWeightOz` is added on
@@ -89,7 +89,7 @@ export interface RecordPackInput {
    */
   packagingOptionId?: string | undefined;
   /**
-   * Migration 0049 / Phase N — direct carrier packaging template
+   * direct carrier packaging template
    * (Option A in the spec). Provided when the operator selected from
    * the "Carrier packaging" tab in the pack modal. Mutually
    * exclusive with `packagingOptionId` from the pack UI, but the
@@ -117,7 +117,7 @@ export interface PackResult {
   /** Set only when a library preset was selected. */
   packagingOptionId: string | null;
   /**
-   * Migration 0049 / Phase N — Shippo carrier template that will be
+   * Shippo carrier template that will be
    * passed to `parcel.template` on the rate request. Set when the
    * operator chose a carrier template directly OR chose a library
    * preset whose shippo_template is non-null. NULL for pure ad-hoc /
@@ -143,7 +143,7 @@ export interface FetchRatesResult {
 }
 
 /**
- * Phase P-C — internal discriminated union returned by the selectRate
+ * internal discriminated union returned by the selectRate
  * transaction body. Not exported: the public shape is
  * `SelectRateOutcome` below, computed AFTER the label-purchase step.
  */
@@ -170,7 +170,7 @@ type DebitInnerResult =
 export type SelectRateOutcome =
   | {
       /**
-       * Phase P-C — happy path. Wallet debited AND label purchased in
+       * happy path. Wallet debited AND label purchased in
        * one selectRate call, per spec Step 7 ("Purchase label through
        * Shippo … will be the last step to completing an order
        * fulfillment request"). Order status advances to LABEL_PURCHASED.
@@ -215,11 +215,11 @@ export class OrderPackService {
     private readonly audit: AuditService,
     private readonly wallet: WalletService,
     private readonly shippo: ShippoService,
-    // Migration 0043 — resolves a selected preset's dimensions and
+    // resolves a selected preset's dimensions and
     // tare weight at recordPack. Injected via the @Global()
     // PackagingLibraryModule.
     private readonly packagingLibrary: PackagingLibraryService,
-    // Migration 0049 / Phase N — validates carrier-template inputs and
+    // validates carrier-template inputs and
     // (in Phase N4b) fills in the canonical dims when the operator
     // picked a carrier template directly.
     private readonly carrierRegistry: CarrierPackagingRegistryService,
@@ -412,7 +412,7 @@ export class OrderPackService {
   ): Promise<PackResult> {
     this.assertPositiveDims(input);
 
-    // Migration 0043 — if a preset was selected, its dims override the
+    // if a preset was selected, its dims override the
     // operator-typed values and its tare weight is added to the goods
     // weight to arrive at the parcel weight. Resolve BEFORE the
     // transaction — the packaging library is read-only from this path
@@ -422,7 +422,7 @@ export class OrderPackService {
     let effectiveHeight = input.heightIn;
     let effectiveWeightOz = input.weightOz;
     let packagingOptionId: string | null = null;
-    // Phase N — Shippo carrier template. Resolved from one of three
+    // Shippo carrier template. Resolved from one of three
     // sources, in priority order:
     //   1. Explicit `input.shippoTemplate` (Option A — Carrier tab).
     //   2. Library preset's own `shippoTemplate` column (a library
@@ -808,7 +808,7 @@ export class OrderPackService {
   }
 
   // =========================================================================
-  // WRITE — updatePackDetails (Phase P-D)
+  // WRITE — updatePackDetails
   //
   // Post-pack edit path: warehouse operator noticed a dim was mis-
   // measured or the wrong packaging was picked, wants to correct
@@ -1181,7 +1181,7 @@ export class OrderPackService {
   async fetchRates(
     orderId: string,
     actorId: string,
-    // Admin add-on overrides (migration 0055). Any field left undefined
+    // Admin add-on overrides. Any field left undefined
     // keeps the vendor's requested value. Persisted here — before rating —
     // so signature confirmation is priced into the returned rates and the
     // insurance choice is stored for the later label purchase.
@@ -1258,7 +1258,7 @@ export class OrderPackService {
       packedWidthIn: Prisma.Decimal | number | null;
       packedHeightIn: Prisma.Decimal | number | null;
       packedWeightOz: number | null;
-      // Migration 0049 / Phase N — Shippo carrier template captured
+      // Shippo carrier template captured
       // at pack time. When set, it unlocks flat-rate / one-rate /
       // simple-rate pricing on this fetch.
       parcelTemplate: string | null;
@@ -1541,7 +1541,7 @@ export class OrderPackService {
     // Whole path in a single transaction so the wallet debit and the
     // status update commit together. WalletService.debit accepts our
     // tx so its locks compose cleanly.
-    // Phase P-C — two-phase commit shape:
+    // two-phase commit shape:
     //   Phase 1 (transaction) → wallet debit + status = SHIPPING_PAID,
     //     OR downgrade to AWAITING_WALLET_FUNDING if wallet was short.
     //   Phase 2 (outside tx, only if Phase 1 committed SHIPPING_PAID) →
@@ -1556,7 +1556,7 @@ export class OrderPackService {
     // Defensive wrap: any raw-SQL / unknown Prisma error inside the tx
     // (missing column, schema drift, trigger raise) previously escaped
     // as a bare 500. Wrap in the same error-mapper pattern as
-    // recordPack (Phase K1) so ops sees prismaCode / pgCode / trigger
+    // recordPack so ops sees prismaCode / pgCode / trigger
     // name inline in the response body — no correlationId round-trip
     // needed to diagnose environment mismatches.
     let inner: DebitInnerResult;
@@ -1656,7 +1656,7 @@ export class OrderPackService {
         // refunds + reverts to AWAITING_SHIPPING_SELECTION for retry.
         // NOTE: `shipment_provider_ref` intentionally NOT written to the
         // orders row — that column exists only on
-        // `order_shipping_rate_options` (migration 0042). Writing it
+        // `order_shipping_rate_options`. Writing it
         // here previously produced Postgres 42703 (undefined_column)
         // which Prisma wraps as P2010 and Nest surfaces as a bare 500.
         // The value is carried in-memory via DebitInnerResult so Phase 2
@@ -1783,7 +1783,7 @@ export class OrderPackService {
     //      for manual reconciliation (the audit trail + Shippo dashboard
     //      have the tracking number, we just failed to record it).
 
-    // Vendor-requested insurance (migration 0055). When set, insure the
+    // Vendor-requested insurance. When set, insure the
     // shipment for the order's declared value. Read via raw SQL so a stale
     // local Prisma client (missing the new columns) can't break the buy.
     const insRows = await this.prisma.$queryRaw<
@@ -1997,7 +1997,7 @@ export class OrderPackService {
       } as unknown as Prisma.InputJsonValue,
     });
 
-    // Layer 9 — if this is a storefront order, mark it shipped + email the
+    // if this is a storefront order, mark it shipped + email the
     // buyer their tracking. Best-effort: a sync/email hiccup must never fail a
     // completed label purchase (the vendor has already been charged).
     await this.storefrontShipmentSync

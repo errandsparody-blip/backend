@@ -17,7 +17,7 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 
-// Migration 0039 — ADMIN role reference.
+// ADMIN role reference.
 const ROLE_ADMIN = "ADMIN" as Role;
 import {
   completeReceivingSchema,
@@ -46,7 +46,7 @@ import { AdminPsnService } from "./admin-psn.service";
 import { PsnMessageService } from "./psn-message.service";
 
 @Controller({ path: "admin/psns", version: "1" })
-// Migration 0039 — ADMIN added; default page key is write. Read
+// ADMIN added; default page key is write. Read
 // endpoints override at method level.
 @Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
 @RequiresPage("admin.psn.write")
@@ -146,7 +146,7 @@ export class AdminPsnController {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 0024 — per-PSN chat (admin side)
+  // per-PSN chat (admin side)
   // ---------------------------------------------------------------------------
 
   /** GET /v1/admin/psns/:id/messages — full thread for this PSN. */
@@ -186,7 +186,7 @@ export class AdminPsnController {
   }
 
   /**
-   * Migration 0024 — presign an R2 PUT for a chat attachment. Reuses the
+   * presign an R2 PUT for a chat attachment. Reuses the
    * shopper presign schema (same MIME allow-list, same 25 MB cap) so we
    * only have one source of truth for what a chat attachment can be.
    * Key prefix is scoped to `psn/<id>/admin` for forensic auditing.

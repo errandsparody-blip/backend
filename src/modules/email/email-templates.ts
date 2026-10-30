@@ -532,7 +532,7 @@ export function shopperIntakeReceivedTemplate(args: {
   intakePayUrl: string;
   intakeTotalCents: number;
   /**
-   * Migration 0023 — which rail the server placed this request on.
+   * which rail the server placed this request on.
    * "WIRE" swaps the call-to-action from "pay securely" to "verify ID +
    * receive bank instructions on your private order page". Defaults to
    * "STRIPE" so legacy callers stay on the original copy.
@@ -749,7 +749,7 @@ export function shopperPaymentInstructionsTemplate(args: {
 }
 
 /**
- * Migration 0027 — shipping invoice email.
+ * shipping invoice email.
  *
  * Fires when admin saves the shipping form for a freight-bearing method
  * (PLATFORM_FREIGHT or BUYER_FORWARDER). The buyer is asked to pay the
@@ -1310,7 +1310,7 @@ export function pricingGuideTemplate(args: {
 }
 
 /**
- * Storefront buyer — return request received (Migration 0061).
+ * Storefront buyer — return request received.
  */
 export function storefrontReturnReceivedTemplate(args: {
   reference: string;
@@ -1337,7 +1337,7 @@ export function storefrontReturnReceivedTemplate(args: {
 }
 
 /**
- * Storefront buyer — return request declined (Migration 0061).
+ * Storefront buyer — return request declined.
  */
 export function storefrontReturnRejectedTemplate(args: {
   reference: string;
@@ -1366,7 +1366,7 @@ export function storefrontReturnRejectedTemplate(args: {
 }
 
 /**
- * Storefront buyer — refund issued (Migration 0059).
+ * Storefront buyer — refund issued.
  */
 export function storefrontRefundTemplate(args: {
   reference: string;
@@ -1481,7 +1481,7 @@ export function storefrontVendorSaleTemplate(args: {
 }
 
 /**
- * Buyer account — passwordless sign-in link (Migration 0060).
+ * Buyer account — passwordless sign-in link.
  */
 export function buyerLoginTemplate(args: { link: string }): RenderedEmail {
   return {

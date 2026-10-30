@@ -1,5 +1,5 @@
 /**
- * Public multi-vendor marketplace feed (Phase 2) — no auth.
+ * Public multi-vendor marketplace feed — no auth.
  *
  *   GET  /v1/public/marketplace/products?category=   — mixed feed across stores
  *   GET  /v1/public/marketplace/categories           — categories across stores

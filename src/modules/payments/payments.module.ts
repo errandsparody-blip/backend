@@ -8,7 +8,7 @@ import { StripeConnectProcessor } from "./stripe-connect.processor";
 
 // PrismaModule is @Global. The processors are self-contained (they read their
 // own credentials from the environment). The registry + payout service are
-// exported so the checkout (Layer 5) and webhook (Layer 6) modules can use them.
+// exported so the checkout and webhook modules can use them.
 @Module({
   controllers: [PayoutAccountController],
   providers: [

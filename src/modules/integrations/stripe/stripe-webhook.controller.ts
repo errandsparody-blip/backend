@@ -55,7 +55,7 @@ export class StripeWebhookController {
     private readonly prisma: PrismaService,
     private readonly shopper: ShopperRequestService,
     private readonly notifications: NotificationService,
-    // Migration 0038 — a top-up may unblock storefront orders that were held
+    // a top-up may unblock storefront orders that were held
     // for INSUFFICIENT_FUNDS; release them instantly after the credit lands.
     private readonly integrationOrders: IntegrationOrderService,
   ) {}
@@ -218,7 +218,7 @@ export class StripeWebhookController {
       await this.shopper.markFollowupPaid({ requestId, stripeIntentId: intent.id });
       return;
     }
-    // Migration 0027 — shipping invoice paid via Stripe Checkout. Same
+    // shipping invoice paid via Stripe Checkout. Same
     // safety-net pattern as intake/followup: both the PI event and the
     // sibling checkout.session.completed event call the idempotent
     // markShippingPaid so a double-fire is a no-op.
@@ -327,7 +327,7 @@ export class StripeWebhookController {
     } else if (purpose === "shopper.followup") {
       await this.shopper.markFollowupPaid({ requestId, stripeIntentId: intentId });
     } else if (purpose === "shopper.shipping") {
-      // Migration 0027 — shipping invoice paid via Stripe Checkout.
+      // shipping invoice paid via Stripe Checkout.
       await this.shopper.markShippingPaid({ requestId, stripeIntentId: intentId });
     } else {
       this.logger.warn({ id: session.id, purpose }, "Unknown shopper checkout purpose.");

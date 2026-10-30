@@ -1,5 +1,5 @@
 /**
- * StorefrontPublicService — public (buyer-facing) reads (Migration 0059).
+ * StorefrontPublicService — public (buyer-facing) reads.
  *
  * The resolver is the single mapping from an incoming store identifier to a
  * vendor, so every URL model (slug path, subdomain, and later custom domains)
@@ -34,7 +34,7 @@ export interface PublicProductCard {
   retailPriceCents: number;
   imageUrl: string | null;
   available: number;
-  /** Set when this card represents a size×colour variant group (Migration 0066);
+  /** Set when this card represents a size×colour variant group;
    *  the product page loads the full variant set via getListing. */
   variantGroupId?: string | null;
   /** True when the group's variants aren't all the same price (card shows "from $X"). */
@@ -65,7 +65,7 @@ export interface PublicListing {
   /** Vendor-declared returns policy, for the product page's Returns section. */
   returnsAllowed: boolean;
   returnWindowDays: number;
-  /** Vendor-authored product details (Migration 0070) for the details section. */
+  /** Vendor-authored product details for the details section. */
   description: string | null;
   fit: string | null;
   gender: string | null;
@@ -169,7 +169,7 @@ export class StorefrontPublicService {
   }
 
   /**
-   * Custom-domain resolver: map a verified host to its store slug (Phase 3).
+   * Custom-domain resolver: map a verified host to its store slug.
    * Returns null when the host isn't a verified domain of a live store.
    */
   async resolveHostToSlug(host: string): Promise<string | null> {
@@ -270,7 +270,7 @@ export class StorefrontPublicService {
   }
 
   /**
-   * A listing with all its size×colour variants (Migration 0066). The path param
+   * A listing with all its size×colour variants. The path param
    * may be a product id OR a variant_group_id. Includes out-of-stock variants so
    * the product page can show every size/colour and disable the sold-out combos.
    * A lone product returns a single-variant listing so the page has one code path.
@@ -389,7 +389,7 @@ export class StorefrontPublicService {
   }
 
   // ---------------------------------------------------------------------------
-  // Multi-vendor marketplace feed (Phase 2) — across storefront-enabled AND
+  // Multi-vendor marketplace feed — across storefront-enabled AND
   // marketplace-featured vendors only.
   // ---------------------------------------------------------------------------
 

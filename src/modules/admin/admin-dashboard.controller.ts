@@ -26,7 +26,7 @@ import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import { PrismaService } from "../../common/prisma.service";
 
-// Migration 0039 — the ADMIN enum member ships in this migration.
+// the ADMIN enum member ships in this migration.
 // Referenced as a string cast so the file builds cleanly whether or
 // not the local Prisma client has been regenerated (Railway
 // regenerates on deploy; local sandboxes may lag).
@@ -94,7 +94,7 @@ export class AdminDashboardController {
       // Migration 0020 added HOLD; an operator needs to see these or
       // they get stuck waiting on a vendor payment with no surface.
       this.prisma.psn.count({ where: { status: "HOLD" } }),
-      // Migration 0035 — StorageBox is the per-physical-box billing
+      // StorageBox is the per-physical-box billing
       // unit. Includes both billing rows and bundled-with-pallet rows
       // (the latter have null nextBillingDate per migration 0036).
       this.prisma.storageBox.count({ where: { status: "ACTIVE" } }),

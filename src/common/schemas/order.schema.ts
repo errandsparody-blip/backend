@@ -241,7 +241,7 @@ export type FulfillmentEstimateInput = z.infer<typeof fulfillmentEstimateSchema>
 // Create — full order submit. Idempotency-Key required at the HTTP layer.
 // ---------------------------------------------------------------------------
 
-// Migration 0037 — vendor-carrier fulfillment-only details. Only relevant
+// vendor-carrier fulfillment-only details. Only relevant
 // when fulfillmentMode = VENDOR_CARRIER. At submit time the service
 // enforces that AT LEAST ONE of (vendorLabelUrl) OR (vendorCarrierName +
 // vendorTrackingNumber) is present — the Zod schema accepts both forms
@@ -282,7 +282,7 @@ export const createOrderSchema = z.object({
     .optional(),
   recipient: recipientAddressSchema,
   lines: z.array(orderLineInputSchema).min(1).max(50),
-  // Migration 0037 — branches the order pipeline. Defaults to
+  // branches the order pipeline. Defaults to
   // PLATFORM_SHIP so existing API clients (older portal builds,
   // automation scripts) keep working unchanged. VENDOR_CARRIER opts the
   // request into the new fulfillment-only flow.
@@ -299,7 +299,7 @@ export const createOrderSchema = z.object({
     .optional()
     .or(z.literal("").transform(() => undefined)),
   insuranceRequested: z.boolean().default(false),
-  // Migration 0055 — signature-on-delivery add-ons the vendor opts into.
+  // signature-on-delivery add-ons the vendor opts into.
   // The admin honours these at buy-label time. adultSignature implies a
   // signature and takes precedence when both are set.
   signatureRequired: z.boolean().default(false),
@@ -312,7 +312,7 @@ export const createOrderSchema = z.object({
 }).superRefine((data, ctx) => {
   // Per-mode required-field check that Zod can express cleanly.
   //
-  // Migration 0041 — PLATFORM_SHIP no longer requires carrierService
+  // PLATFORM_SHIP no longer requires carrierService
   // at the schema layer. v2 orders (fulfillment_v2_enabled=true) don't
   // pick a carrier at submit; the admin does at pack time. The
   // legacy (v1) code path enforces carrierService presence inside
@@ -373,7 +373,7 @@ export const cancelOrderSchema = z.object({
 });
 export type CancelOrderInput = z.infer<typeof cancelOrderSchema>;
 
-// Migration 0074 — vendor asks to cancel an order that's already past the
+// vendor asks to cancel an order that's already past the
 // instant self-cancel window (label purchased / being packed). Admin then
 // approves (refund + restock + cancel) or rejects.
 export const requestCancellationSchema = z.object({
@@ -400,7 +400,7 @@ export const rejectCancellationSchema = z.object({
 export type RejectCancellationInput = z.infer<typeof rejectCancellationSchema>;
 
 // ---------------------------------------------------------------------------
-// Migration 0037 — vendor-supplied label uploads (VENDOR_CARRIER mode).
+// vendor-supplied label uploads (VENDOR_CARRIER mode).
 //
 // Used by the order/new wizard's Fulfillment step so the vendor can
 // upload a PDF or image of their pre-paid label straight to R2 instead

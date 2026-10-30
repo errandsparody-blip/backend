@@ -117,7 +117,7 @@ export class AdminUsersController {
         email: true,
         role: true,
         status: true,
-        // Migration 0039 — MFA enrollment date doubles as "have they
+        // MFA enrollment date doubles as "have they
         // completed setup". No `lastLoginAt` on the User model
         // today; adding one is out of scope for this migration.
         mfaEnrolledAt: true,

@@ -210,7 +210,7 @@ export class AuthService {
       return { userId: u.id, vendorId: vendor.id };
     });
 
-    // Referral / event attribution (migration 0056). Best-effort — the
+    // Referral / event attribution. Best-effort — the
     // service swallows errors so a referral hiccup never breaks signup.
     await this.referrals.recordAttribution(vendorId, input.refCode);
 

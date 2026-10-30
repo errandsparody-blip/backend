@@ -1,5 +1,5 @@
 /**
- * Admin controller for warehouse inventory locations (Migration 0045).
+ * Admin controller for warehouse inventory locations.
  *
  * Routes:
  *   GET    /v1/admin/inventory-locations              — all (SUPER_ADMIN)

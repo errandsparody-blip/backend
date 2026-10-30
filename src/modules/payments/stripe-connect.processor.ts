@@ -1,5 +1,5 @@
 /**
- * StripeConnectProcessor — storefront payments via Stripe Connect (Migration 0059).
+ * StripeConnectProcessor — storefront payments via Stripe Connect.
  *
  * Onboarding: the vendor completes Stripe's hosted Express onboarding (Stripe
  * runs their KYC). We store the connected account id and mirror its status.

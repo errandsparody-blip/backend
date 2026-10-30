@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const tierSchema = z.enum(["SMALL", "MEDIUM", "LARGE", "X_LARGE", "PALLET"]);
 
-// Migration 0033 — explicit shipping mode. LOOSE is the default so any
+// explicit shipping mode. LOOSE is the default so any
 // client that hasn't been updated to send the field continues to work
 // identically to the pre-migration behaviour (per-box stocking + first-
 // month storage). The fee math layer validates the declaration shape
@@ -94,7 +94,7 @@ export const receiveLineSchema = z.object({
   lineId: z.string().uuid(),
   acceptedQty: z.number().int().nonnegative(),
   damagedQty: z.number().int().nonnegative().default(0),
-  // Migration 0024 — items declared but not in the box (courier loss,
+  // items declared but not in the box (courier loss,
   // mispack, etc.). Distinct from damagedQty because the financial story
   // is different; persisted for the audit trail.
   missingQty: z.number().int().nonnegative().default(0),
@@ -115,7 +115,7 @@ export const completeReceivingSchema = z.object({
 });
 export type CompleteReceivingInput = z.infer<typeof completeReceivingSchema>;
 
-// Migration 0024 — PSN chat thread. Both vendor + admin post into the
+// PSN chat thread. Both vendor + admin post into the
 // same shape; the controller derives sender from the authenticated user.
 export const postPsnMessageSchema = z.object({
   body: z.string().trim().min(1, "Message can't be empty.").max(10_000),

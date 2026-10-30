@@ -43,7 +43,7 @@ export interface PublicProduct {
   heightIn: number | null;
   storageTier: "SMALL" | "MEDIUM" | "LARGE" | "X_LARGE" | "PALLET";
   /**
-   * Migration 0022 — optional product image (URL into our R2 bucket).
+   * optional product image (URL into our R2 bucket).
    * `null` when the vendor hasn't uploaded an image. Locked the moment the
    * product is created — the same immutability rule that protects identity,
    * customs, and dimension fields applies here. The image is what admin
@@ -87,7 +87,7 @@ export class ProductService {
       const data = {
         vendorId,
         code: input.code,
-        // Migration 0054 — optional store-SKU mapping.
+        // optional store-SKU mapping.
         ...(input.storeSku ? { storeSku: input.storeSku } : {}),
         name: input.name,
         variant: input.variant,
@@ -99,7 +99,7 @@ export class ProductService {
         ...(input.widthIn != null ? { widthIn: input.widthIn } : {}),
         ...(input.heightIn != null ? { heightIn: input.heightIn } : {}),
         storageTier: input.storageTier,
-        // Migration 0022 — optional product image. Cast keeps the call
+        // optional product image. Cast keeps the call
         // compiling against the stale generated client until Railway
         // re-runs `prisma generate` on next deploy.
         ...(input.imageUrl != null ? { imageUrl: input.imageUrl } : {}),
@@ -258,7 +258,7 @@ export class ProductService {
       updated = await this.prisma.product.update({
       where: { id }, // safe — we just confirmed scope above
       data: {
-        // Migration 0054 — store SKU is a mapping convenience, NOT a locked
+        // store SKU is a mapping convenience, NOT a locked
         // identity/compliance field, so vendors can set or change it any
         // time (empty string clears it). It's absent from `lockableFields`.
         ...(patch.storeSku !== undefined
@@ -462,7 +462,7 @@ export class ProductService {
     if (patch.countryOfOrigin !== undefined)
       data.countryOfOrigin = patch.countryOfOrigin;
     if (patch.storageTier !== undefined) data.storageTier = patch.storageTier;
-    // Migration 0073 — admin-only "needs insurance" flag. Cast so tsc is
+    // admin-only "needs insurance" flag. Cast so tsc is
     // clean against a pre-regenerate Prisma client; runtime column exists.
     if (patch.needsInsurance !== undefined)
       (data as Record<string, unknown>).needsInsurance = patch.needsInsurance;

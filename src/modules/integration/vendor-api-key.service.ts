@@ -1,7 +1,7 @@
 /**
  * VendorApiKeyService — portal-side (JWT-authed) management of storefront
  * integration credentials and the per-vendor default shipping settings
- * (Migration 0038).
+ *.
  *
  * Key lifecycle:
  *   create  → generates uer_live_<keyId>.<secret>, stores keyId + SHA-256(secret),

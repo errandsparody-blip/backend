@@ -1,5 +1,5 @@
 /**
- * IntegrationModule (Migration 0038) — storefront order ingestion.
+ * IntegrationModule — storefront order ingestion.
  *
  * Wires the public API-key-authed ingestion endpoint, the portal-side key /
  * settings management, and the ingestion service that reuses the wallet /

@@ -2,7 +2,7 @@ import { Module } from "@nestjs/common";
 
 import { AuditModule } from "../audit/audit.module";
 
-// Migration 0044 — barcode service is exported so AdminModule's
+// barcode service is exported so AdminModule's
 // AdminBarcodeController and OrderPackController can depend on it
 // without needing to import Prisma directly.
 import { BarcodeService } from "./barcode.service";

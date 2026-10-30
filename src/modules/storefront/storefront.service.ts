@@ -1,5 +1,5 @@
 /**
- * StorefrontService — vendor-facing catalog + storefront settings (Migration 0059).
+ * StorefrontService — vendor-facing catalog + storefront settings.
  *
  * Responsibilities (single, cohesive: "the vendor's own store configuration"):
  *   - List / unlist products and set their public retail price + category/tags.
@@ -164,7 +164,7 @@ export class StorefrontService {
       product.variant && product.variant.toUpperCase() !== "STD" ? product.variant : null;
     // Colour axis: undefined = keep, null = clear.
     const nextColor = input.optionColor === undefined ? product.option_color : input.optionColor;
-    // Detail fields (Migration 0070) are set per-field below: undefined = keep
+    // Detail fields are set per-field below: undefined = keep
     // (column omitted from the UPDATE), null = clear, value = set.
     // Gallery: when provided, set image_urls and keep image_url (primary) in sync
     // with the first image; when omitted, leave both untouched.

@@ -1,6 +1,6 @@
 /**
  * PaymentProcessor — the abstraction every storefront payment rail implements
- * (Migration 0059). Stripe Connect and Flutterwave are the two concrete
+ *. Stripe Connect and Flutterwave are the two concrete
  * implementations; the checkout + webhook code depends ONLY on this interface,
  * so adding a rail later is Open/Closed (new class, no caller changes) and each
  * implementation is substitutable (Liskov).

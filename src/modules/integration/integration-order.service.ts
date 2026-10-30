@@ -1,7 +1,7 @@
 /**
  * IntegrationOrderService — ingests orders pushed from a vendor's storefront
  * (POST /v1/integration/orders) and drops them into the same fulfillment
- * pipeline manual orders use (Migration 0038).
+ * pipeline manual orders use.
  *
  * Design: this service deliberately does NOT call into OrderService.create()
  * — that file is the "two-reviewer" money path and we avoid destabilising it.
@@ -92,7 +92,7 @@ export interface IntegrationOrderResult {
 class InsufficientStockError extends Error {}
 
 /**
- * Migration 0047 — thrown by `ingest` while the v2 rewrite is
+ * thrown by `ingest` while the v2 rewrite is
  * outstanding. Surfaces as HTTP 501 with a stable code so a
  * storefront integration can distinguish it from a transient error.
  */
@@ -956,7 +956,7 @@ export class IntegrationOrderService {
     lines: IntegrationOrderInput["lines"],
   ): Promise<{ kind: "OK"; resolved: ResolvedLine[] } | { kind: "UNMAPPED" }> {
     const codes = Array.from(new Set(lines.map((l) => l.sku)));
-    // Migration 0054 — an incoming `sku` may be the vendor's own STORE SKU
+    // an incoming `sku` may be the vendor's own STORE SKU
     // (mapped via product.storeSku) OR our product code. Match either. The
     // `where` is cast for the stale-client pattern (store_sku exists in the
     // DB after 0054; the generated client learns it on the next regenerate).

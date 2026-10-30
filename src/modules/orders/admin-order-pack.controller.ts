@@ -1,5 +1,5 @@
 /**
- * Admin controller for the Fulfillment v2 pack step (Migration 0042).
+ * Admin controller for the Fulfillment v2 pack step.
  *
  * Mounted at `/v1/admin/pack/*` — a deliberately separate route
  * prefix from the legacy `POST /v1/admin/orders/:id/pack` endpoint
@@ -51,7 +51,7 @@ import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 
 import { OrderPackService } from "./order-pack.service";
 
-// Migration 0039 — ADMIN role reference. Prisma client hasn't been
+// ADMIN role reference. Prisma client hasn't been
 // regenerated for the new enum value in every environment yet, so we
 // cast the literal string to `Role`.
 const ROLE_ADMIN = "ADMIN" as Role;
@@ -83,13 +83,13 @@ const recordPackSchema = z.object({
   weightOz: z.number().int().positive().max(1120),
   notes: z.string().trim().max(500).optional(),
   /**
-   * Migration 0043 — optional packaging library preset. When provided,
+   * optional packaging library preset. When provided,
    * the service overrides the dims with the preset's and adds its tare
    * weight to `weightOz`. Empty / undefined = ad-hoc dimensions.
    */
   packagingOptionId: z.string().uuid().optional(),
   /**
-   * Migration 0049 / Phase N — optional Shippo carrier template
+   * optional Shippo carrier template
    * (Option A in the spec). When provided, the service validates
    * against the static registry, stores the template on the order
    * row, and passes it to Shippo at rate-fetch time to unlock
@@ -120,7 +120,7 @@ const fetchRatesSchema = z
     insuranceRequested: z.boolean().optional(),
     signatureRequired: z.boolean().optional(),
     adultSignatureRequired: z.boolean().optional(),
-    // Migration 0057 — hazmat / special-handling add-ons.
+    // hazmat / special-handling add-ons.
     containsAlcohol: z.boolean().optional(),
     alcoholRecipientType: z.enum(["consumer", "licensee"]).optional(),
     containsDryIce: z.boolean().optional(),
@@ -183,7 +183,7 @@ export class AdminOrderPackController {
   }
 
   /**
-   * Phase P-D — post-pack edit endpoint. Same input shape as
+   * post-pack edit endpoint. Same input shape as
    * /record, but callable only while the label has NOT yet been
    * bought.
    *
@@ -216,7 +216,7 @@ export class AdminOrderPackController {
   }
 
   /**
-   * Phase P-E — "Send back to pack queue". Regresses a packed-but-not-
+   * "Send back to pack queue". Regresses a packed-but-not-
    * yet-shipped order to PENDING_PACKING so the operator can re-pack it
    * with the full toolset on /admin/pack (packaging presets, carrier
    * templates, barcode scan) instead of the old restrictive inline

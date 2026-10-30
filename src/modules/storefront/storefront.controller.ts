@@ -1,5 +1,5 @@
 /**
- * Vendor-facing storefront management (Migration 0059).
+ * Vendor-facing storefront management.
  *
  *   GET   /v1/storefront/settings                  — current storefront config
  *   PUT   /v1/storefront/settings                  — upsert presentation
@@ -61,7 +61,7 @@ export class StorefrontController {
     private readonly domains: VendorDomainService,
   ) {}
 
-  // -------- Custom domains (Phase 3) --------
+  // -------- Custom domains --------
 
   @Get("domains")
   listDomains(@CurrentUser() user: AuthenticatedUser) {

@@ -1,5 +1,5 @@
 /**
- * Storefront shipping presentation (Migration 0059).
+ * Storefront shipping presentation.
  *
  * Buyers must NOT see carriers or a long rate list. We collapse the live Shippo
  * rates into at most two named speeds — "Standard (3–5 days)" and

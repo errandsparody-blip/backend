@@ -1,8 +1,8 @@
 /**
- * StorefrontOrderService — storefront order lifecycle (Migration 0059).
+ * StorefrontOrderService — storefront order lifecycle.
  *
  * The single authority that flips an order to PAID. That transition happens
- * ONLY from a signature-verified processor webhook (Layer 6), is idempotent
+ * ONLY from a signature-verified processor webhook, is idempotent
  * (a duplicate webhook updates zero rows), and only after the charged amount +
  * currency match our record. On success it commits the soft-reserved stock
  * (available − qty, reserved − qty) so inventory reflects the sale, and hands
@@ -609,7 +609,7 @@ export class StorefrontOrderService {
   }
 
   // ---------------------------------------------------------------------------
-  // Records — read models for vendor + admin accounts (Layer 9)
+  // Records — read models for vendor + admin accounts
   // ---------------------------------------------------------------------------
 
   /** A vendor's own storefront orders (most recent first). */
@@ -864,7 +864,7 @@ export class StorefrontOrderService {
   }
 
   /**
-   * Release vendor payouts whose HOLD window has elapsed (Migration 0071).
+   * Release vendor payouts whose HOLD window has elapsed.
    * Pays HELD sub-orders where payout_release_at has passed, the order is still
    * in a paid/fulfilling/shipped/delivered state, and there's no open return
    * request. Flips HELD → PENDING then pays (idempotent via payoutVendor + the

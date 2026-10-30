@@ -1,5 +1,5 @@
 /**
- * PaystackProcessor — storefront payments via Paystack (Migration 0059).
+ * PaystackProcessor — storefront payments via Paystack.
  *
  * Onboarding: the vendor's payout destination is a Paystack SUBACCOUNT created
  * from their bank details (Paystack has no hosted KYC redirect like Stripe).

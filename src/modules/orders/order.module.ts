@@ -12,11 +12,11 @@ import { WalletModule } from "../wallet/wallet.module";
 
 import { AdminOrderController } from "./admin-order.controller";
 import { AdminOrderService } from "./admin-order.service";
-// Migration 0042 — Fulfillment v2 pack-step transition machine.
+// Fulfillment v2 pack-step transition machine.
 // Kept in its own file (SRP) but wired through OrderModule so it
 // shares Prisma/Wallet/Shippo/Audit dependencies.
 import { AdminOrderPackController } from "./admin-order-pack.controller";
-// Migration 0046 — vendor CSV bulk-import service. Same module because
+// vendor CSV bulk-import service. Same module because
 // it composes with OrderService (per-row create) and shares Prisma
 // / audit dependencies.
 import { OrderImportService } from "./order-import.service";

@@ -43,22 +43,22 @@ import { PrismaService } from "../prisma.service";
  * costs one round-trip on boot.
  */
 const REQUIRED_COLUMNS: ReadonlyArray<{ table: string; column: string }> = [
-  // Migration 0040 — shipping points foundation.
+  // shipping points foundation.
   { table: "products", column: "shipping_points" },
   { table: "orders", column: "workflow_version" },
-  // Migration 0041 — Fulfillment v2 estimate columns.
+  // Fulfillment v2 estimate columns.
   { table: "orders", column: "estimated_shipping_min_cents" },
   { table: "orders", column: "estimated_shipping_max_cents" },
-  // Migration 0042 — pack columns on orders.
+  // pack columns on orders.
   { table: "orders", column: "packed_length_in" },
   { table: "orders", column: "packed_width_in" },
   { table: "orders", column: "packed_height_in" },
   { table: "orders", column: "packed_weight_oz" },
   { table: "orders", column: "packed_by_user_id" },
   { table: "orders", column: "packing_notes" },
-  // Migration 0043 — packaging library FK.
+  // packaging library FK.
   { table: "orders", column: "packaging_option_id" },
-  // Migration 0045 — inventory-location FK on SKUs.
+  // inventory-location FK on SKUs.
   { table: "skus", column: "location_id" },
 ];
 
@@ -83,7 +83,7 @@ const REQUIRED_TABLES: ReadonlyArray<string> = [
  */
 const REQUIRED_ENUM_VALUES: ReadonlyArray<{ enumName: string; value: string }> =
   [
-    // Migration 0041 — v2 lifecycle statuses on OrderStatus.
+    // v2 lifecycle statuses on OrderStatus.
     { enumName: "OrderStatus", value: "PENDING_PACKING" },
     { enumName: "OrderStatus", value: "PACKING_COMPLETED" },
     { enumName: "OrderStatus", value: "AWAITING_SHIPPING_SELECTION" },
@@ -183,7 +183,7 @@ export class MigrationSanityService implements OnApplicationBootstrap {
     const presentTables = new Set(tableRows.map((r) => r.table_name));
     const missingTables = REQUIRED_TABLES.filter((t) => !presentTables.has(t));
 
-    // Enum values (migration 0041). A missing enum value fails at first
+    // Enum values. A missing enum value fails at first
     // raw-SQL use with pg error 22P02 — which the column check misses.
     let enumRows: Array<{ enum_name: string; enum_value: string }>;
     try {

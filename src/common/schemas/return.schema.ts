@@ -58,7 +58,7 @@ export const createReturnSchema = z.object({
   expectedDeliveryDate: z.coerce.date({
     errorMap: () => ({ message: "Provide the expected delivery date." }),
   }),
-  // Migration 0018 — optional photo / screenshot evidence the vendor
+  // optional photo / screenshot evidence the vendor
   // attaches at RMA-creation time. Capped at 5 to keep R2 + the
   // inspector UI sane. Each URL is a public R2 link returned by the
   // presigned-PUT flow exposed at POST /returns/uploads.

@@ -48,7 +48,7 @@ export interface AdminOrderListInput {
 
 const ALLOWED_TRANSITIONS: Record<string, OrderStatus[]> = {
   purchaseLabel: ["ALLOCATED"],
-  // Migration 0037 — VENDOR_CARRIER orders have no Shippo label to
+  // VENDOR_CARRIER orders have no Shippo label to
   // buy, so picking can start directly from ALLOCATED for that branch.
   // The mode-specific guard inside markHandedOff() / pick() enforces
   // which orders are eligible; the union here only widens the
@@ -61,7 +61,7 @@ const ALLOWED_TRANSITIONS: Record<string, OrderStatus[]> = {
   // Both are valid starting points — the body only decrements reserved for
   // lines not already shipped, so it's safe either way.
   ship: ["PACKED", "LABEL_PURCHASED"],
-  // Migration 0037 — terminal hand-off for VENDOR_CARRIER orders.
+  // terminal hand-off for VENDOR_CARRIER orders.
   // Same starting state as `ship` (PACKED) but skips the
   // SKU-decrement / inventory-movement bookkeeping done inside
   // ship() since that flows through the carrier reassessment + label
@@ -77,7 +77,7 @@ export class AdminOrderService {
     private readonly shippo: ShippoService,
     private readonly notifications: NotificationService,
     private readonly wallet: WalletService,
-    // Phase T1 — resolves a Shippo carrier template's friendly label
+    // resolves a Shippo carrier template's friendly label
     // for the admin order-detail projection (mirrors the vendor-side
     // projection in OrderService.getById). Without it the admin sees
     // "Custom (no preset)" for every packed order regardless of what
@@ -442,7 +442,7 @@ export class AdminOrderService {
     });
     if (!order) throw new NotFoundException();
 
-    // Phase T1 — Enrich the raw Prisma row with two computed fields
+    // Enrich the raw Prisma row with two computed fields
     // the admin detail page requires but Prisma doesn't expose
     // directly:
     //
@@ -473,7 +473,7 @@ export class AdminOrderService {
         : null);
     const workflowVersion = raw.workflowVersion ?? 1;
 
-    // Migration 0055 — vendor-selected label add-ons. Read via raw SQL so
+    // vendor-selected label add-ons. Read via raw SQL so
     // the admin sees the true choice even when the sandbox Prisma client
     // predates the new columns (the `...order` spread would omit them).
     const addonRows = await this.prisma.$queryRaw<
@@ -768,7 +768,7 @@ export class AdminOrderService {
 
   async pick(id: string, actorId: string) {
     return this.transition(id, actorId, "pick", async (tx, order) => {
-      // Migration 0037 — the ALLOWED_TRANSITIONS union widened to accept
+      // the ALLOWED_TRANSITIONS union widened to accept
       // ALLOCATED on top of LABEL_PURCHASED so VENDOR_CARRIER orders can
       // start picking without a Shippo label. Block PLATFORM_SHIP orders
       // from skipping the label-buy step that way: they must reach
@@ -819,7 +819,7 @@ export class AdminOrderService {
 
   async ship(id: string, actorId: string) {
     const updated = await this.transition(id, actorId, "ship", async (tx, order) => {
-      // Migration 0037 — VENDOR_CARRIER orders own no Shippo label and
+      // VENDOR_CARRIER orders own no Shippo label and
       // emit no tracking webhooks; advancing them through `ship` would
       // create a SHIPPED row the reassessment + delivered-webhook cron
       // can never close out. Force operators down the markHandedOff
@@ -904,7 +904,7 @@ export class AdminOrderService {
   }
 
   /**
-   * Migration 0037 — terminal hand-off for VENDOR_CARRIER orders.
+   * terminal hand-off for VENDOR_CARRIER orders.
    *
    * Same starting state as `ship` (PACKED) but skips the Shippo /
    * tracking-webhook side of the pipeline. The vendor's chosen

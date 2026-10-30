@@ -30,7 +30,7 @@ import { ShopperTokenService } from "./shopper-token.service";
   // R2Module is @Global too — receipt service injects R2Service for SVG uploads.
   // forwardRef on StripeModule — see the matching note in stripe.module.ts.
   // WalletModule exports ShopperLedgerService so we can record shopper-side
-  // ledger entries on intake paid (migration 0019).
+  // ledger entries on intake paid.
   imports: [AuditModule, CryptoModule, WalletModule, forwardRef(() => StripeModule)],
   controllers: [ShopperController, AdminShopperController],
   providers: [

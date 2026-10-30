@@ -134,7 +134,7 @@ export class SkuService {
           quantityAvailable: args.qty,
           quantityReserved: 0,
           storageTier: args.storageTier ?? "SMALL",
-          // Migration 0034 — Model B: the first-month storage fee paid
+          // Model B: the first-month storage fee paid
           // at PSN submit covers this SKU's first cron cycle. Skip the
           // next cron run by setting nextBillingDate to the first of
           // the month AFTER receive. From then on the cron bills and

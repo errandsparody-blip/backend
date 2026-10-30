@@ -59,14 +59,14 @@ describe("OrderPackService — pre-flight validation", () => {
       get: jest.fn().mockResolvedValue({ balanceCents: 0 }),
     };
     const shippo = { getRates: jest.fn() };
-    // Migration 0043 — new dep. These tests never exercise the
+    // new dep. These tests never exercise the
     // packaging branch (packagingOptionId is always absent in the
     // fixtures), so a no-op mock is sufficient.
     const packagingLibrary = {
       getById: jest.fn().mockResolvedValue(null),
       listActive: jest.fn().mockResolvedValue([]),
     };
-    // Phase N — carrier template registry. These tests don't pass a
+    // carrier template registry. These tests don't pass a
     // shippoTemplate on any input, so isKnown never fires; provide a
     // conservative default (returns false) so a future test that
     // forgets to override it fails safely rather than silently.
@@ -79,7 +79,7 @@ describe("OrderPackService — pre-flight validation", () => {
     // never reach the notification path (they 404 or reject before any
     // hand-off), so a no-op mock suffices.
     const notifications = { emit: jest.fn().mockResolvedValue(undefined) };
-    // Storefront ship-sync dep (Layer 9). Pre-flight tests never reach the
+    // Storefront ship-sync dep. Pre-flight tests never reach the
     // label-purchase path, so a no-op mock suffices.
     const storefrontShipmentSync = {
       syncFromFulfillmentOrder: jest.fn().mockResolvedValue(undefined),

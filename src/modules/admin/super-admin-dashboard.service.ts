@@ -1,5 +1,5 @@
 /**
- * SuperAdminDashboardService — Migration 0047 (Phase H).
+ * SuperAdminDashboardService — Migration 0047.
  *
  * Read-only aggregation across the whole platform. Separate from
  * `AdminDashboardController` (which is scoped to operational counts

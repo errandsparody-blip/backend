@@ -1,5 +1,5 @@
 /**
- * Admin storefront returns queue (Migration 0061).
+ * Admin storefront returns queue.
  *
  *   GET  /v1/admin/storefront/returns?status=REQUESTED
  *   POST /v1/admin/storefront/returns/:id/received                    → warehouse got the parcel

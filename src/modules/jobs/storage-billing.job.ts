@@ -1,7 +1,7 @@
 /**
  * Storage billing — runs daily at 02:00 UTC.
  *
- * Per-box 30-day rolling cycle (migration 0035). The billing unit is
+ * Per-box 30-day rolling cycle. The billing unit is
  * the physical box, not the SKU. Every active StorageBox runs its own
  * 30-day cycle anchored to the day its PSN was received; the receiving
  * fee paid at intake covers the first 30 days, so a box is invisible

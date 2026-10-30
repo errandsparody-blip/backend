@@ -197,7 +197,7 @@ export interface VendorRecurringStorage {
     contributingTierCounts: Record<string, number>;
     monthlyEstimateCents: number;
     /**
-     * Migration 0034 — earliest `nextBillingDate` among this PSN's
+     * earliest `nextBillingDate` among this PSN's
      * contributing SKUs. When all contributing SKUs share the same
      * billing date (the common case), this is THAT date. When a PSN
      * filled multiple buckets with different intake months, this is
@@ -209,7 +209,7 @@ export interface VendorRecurringStorage {
      */
     firstBillingDate: string | null;
     /**
-     * Migration 0036 — true when every box on this PSN is bundled with
+     * true when every box on this PSN is bundled with
      * an existing parent pallet (ADD_TO_PALLET shipping mode). These
      * PSNs don't generate their own monthly bill — the parent pallet's
      * $45/mo already covers them — but they're surfaced here so the
@@ -218,14 +218,14 @@ export interface VendorRecurringStorage {
     isBundledWithParentPallet: boolean;
   }>;
   /**
-   * Migration 0036 — total boxes the vendor has that are bundled into
+   * total boxes the vendor has that are bundled into
    * an existing parent pallet and so don't bill independently. Surfaced
    * as a headline so vendors who ship ADD_TO_PALLET can see what they
    * paid stocking on without thinking the system "lost" it.
    */
   bundledBoxCount: number;
   /**
-   * Migration 0036 — per-tier breakdown of the bundled boxes above.
+   * per-tier breakdown of the bundled boxes above.
    * Maps "SMALL" → 3, "LARGE" → 1, etc. Empty object when the vendor
    * has no bundled boxes.
    */
@@ -250,7 +250,7 @@ export class VendorService {
 
   /**
    * Vendor-facing recurring storage breakdown — per-box model
-   * (migration 0035).
+   *.
    *
    * Reads from `storage_boxes`: every ACTIVE row is one physical box
    * we are holding for the vendor, with its own tier (rate) and own
@@ -407,7 +407,7 @@ export class VendorService {
         tier as keyof NonNullable<typeof schedule>["monthlyStorage"]
       ] ?? null;
 
-    // Migration 0036 — split active boxes into the two billing modes:
+    // split active boxes into the two billing modes:
     //   - billingBoxes:  nextBillingDate IS NOT NULL → bill on cycle
     //   - bundledBoxes:  nextBillingDate IS NULL     → covered by an
     //     existing parent pallet's $45/mo (ADD_TO_PALLET shipments)
@@ -909,7 +909,7 @@ export class VendorService {
       data.idExpirationDate = new Date(`${input.idExpirationDate}T00:00:00.000Z`);
     }
 
-    // Section 4 — Business verification document URLs (migration 0032).
+    // Section 4 — Business verification document URLs.
     // The wizard PUTs each file to R2 with a presigned URL and posts the
     // resulting publicUrl back through this endpoint; we just persist it.
     assign("idFrontUrl", input.idFrontUrl);
@@ -927,7 +927,7 @@ export class VendorService {
       data.productHazards = { set: input.productHazards };
     }
 
-    // Section 7 — Sales channels (migration 0076). Cast past the possibly-stale
+    // Section 7 — Sales channels. Cast past the possibly-stale
     // local Prisma client; Railway regenerates it on deploy.
     const dataAny = data as unknown as Record<string, unknown>;
     if (input.sellsOnEcommerce !== undefined) {

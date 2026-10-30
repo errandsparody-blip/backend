@@ -21,7 +21,7 @@ const baseRequest: RequestRow = {
   parentRequestId: null,
   buyerEmail: "buyer@example.com",
   buyerName: "Anna Buyer",
-  // Migration 0023 — wire/ID fields. The receipt builder doesn't render
+  // wire/ID fields. The receipt builder doesn't render
   // them; we fill in the defaults so the fixture matches RequestRow.
   buyerPhone: null,
   paymentMethod: "STRIPE",

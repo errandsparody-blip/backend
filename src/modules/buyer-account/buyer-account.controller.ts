@@ -1,5 +1,5 @@
 /**
- * Optional buyer accounts (Migration 0060) — public, passwordless.
+ * Optional buyer accounts — public, passwordless.
  *
  *   POST /v1/public/account/save           — save own details (no auth)
  *   POST /v1/public/account/request-link   — email a magic sign-in link

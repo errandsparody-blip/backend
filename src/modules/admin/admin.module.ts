@@ -10,21 +10,21 @@ import { ShippoModule } from "../integrations/shippo/shippo.module";
 import { VendorModule } from "../vendors/vendor.module";
 
 import { AdminAuditController } from "./admin-audit.controller";
-// Migration 0044 — barcode CRUD + lookup. BarcodeService is exported
+// barcode CRUD + lookup. BarcodeService is exported
 // from ProductModule (already imported), so no additional imports.
 import { AdminBarcodeController } from "./admin-barcode.controller";
-// Migration 0045 — inventory-location CRUD + SKU assignment.
+// inventory-location CRUD + SKU assignment.
 // InventoryLocationService is provided by the @Global()
 // InventoryLocationModule wired at the app level, so no import here.
 import { AdminInventoryLocationController } from "./admin-inventory-location.controller";
-// Phase H — SUPER_ADMIN-only platform dashboard.
+// SUPER_ADMIN-only platform dashboard.
 import { SuperAdminDashboardController } from "./super-admin-dashboard.controller";
 import { SuperAdminDashboardService } from "./super-admin-dashboard.service";
 import { AdminConfigController } from "./admin-config.controller";
 // Email diagnostics — SUPER_ADMIN sends a one-off test email to confirm
 // deliverability (EmailModule is already imported below).
 import { AdminEmailTestController } from "./admin-email-test.controller";
-// Migration 0043 — packaging library. Controller lives in the admin
+// packaging library. Controller lives in the admin
 // module; PackagingLibraryService is provided by the @Global()
 // PackagingLibraryModule wired at the app level, so no explicit
 // import here is needed.
@@ -60,7 +60,7 @@ import { AdminVendorService } from "./admin-vendor.service";
     VendorModule,
     ProductModule,
     IdempotencyModule,
-    // Migration 0039 — AdminUsersController needs TokenService to
+    // AdminUsersController needs TokenService to
     // revoke a target user's active sessions when their role
     // changes. AuthModule exports TokenService, so importing the
     // module here brings it into DI scope.
@@ -77,7 +77,7 @@ import { AdminVendorService } from "./admin-vendor.service";
     AdminConfigController,
     AdminEmailTestController,
     AdminSkuController,
-    // Migration 0035 — per-box consolidation endpoints. Hosted in its
+    // per-box consolidation endpoints. Hosted in its
     // own controller so the SUPER_ADMIN scoping is obvious from the
     // route file and rate-limited independently of vendor-detail
     // traffic.
@@ -85,31 +85,31 @@ import { AdminVendorService } from "./admin-vendor.service";
     // Admin override path for product details (warehouse-measured
     // weights / dimensions overriding the vendor's declared values).
     AdminProductController,
-    // Migration 0039 — SUPER_ADMIN reads / writes the ADMIN role's
+    // SUPER_ADMIN reads / writes the ADMIN role's
     // page-permission overrides. PagePermissionService itself is
     // provided by the @Global() PagePermissionModule wired at the
     // app level, so no explicit import here is needed.
     AdminRolePermissionsController,
-    // Migration 0039 — SUPER_ADMIN promotes/demotes admin users
+    // SUPER_ADMIN promotes/demotes admin users
     // (including granting the new ADMIN role to an existing
     // operator). Depends on TokenService via the AuthModule import
     // above to revoke sessions on role change.
     AdminUsersController,
-    // Migration 0040 — SUPER_ADMIN edits the shipping-point range
+    // SUPER_ADMIN edits the shipping-point range
     // table. ShippingPointService is @Global(), no import needed.
     AdminShippingPointRangesController,
     // Shipping-origin diagnostics (read-only) — ADMIN + SUPER_ADMIN.
     AdminShippingOriginController,
-    // Migration 0043 — packaging library CRUD (SUPER_ADMIN) plus a
+    // packaging library CRUD (SUPER_ADMIN) plus a
     // pack-modal read endpoint (any admin who can read orders).
     AdminPackagingController,
-    // Migration 0044 — product-barcode CRUD (SUPER_ADMIN) + a
+    // product-barcode CRUD (SUPER_ADMIN) + a
     // lookup endpoint any admin can call (drives the pack scanner).
     AdminBarcodeController,
-    // Migration 0045 — inventory-location catalog (SUPER_ADMIN
+    // inventory-location catalog (SUPER_ADMIN
     // writes) + SKU assignment (any admin who writes orders).
     AdminInventoryLocationController,
-    // Phase H — platform-wide SUPER_ADMIN dashboard (finance-sensitive
+    // platform-wide SUPER_ADMIN dashboard (finance-sensitive
     // aggregates: revenue, wallet totals, warehouse KPIs).
     SuperAdminDashboardController,
   ],

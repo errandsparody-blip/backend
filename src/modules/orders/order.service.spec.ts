@@ -123,7 +123,7 @@ class FakePrisma {
   // Stubs not exercised by these tests — kept here so the type is satisfied.
   sku = { findMany: jest.fn(async () => []) };
 
-  // Migration 0047 — configuration table access was removed alongside
+  // configuration table access was removed alongside
   // the v1 abolition, but the field stays on the fake so a future
   // dependency doesn't need a spec-file rewrite. Returns null (row
   // absent) as a safe default.
@@ -226,7 +226,7 @@ describe("OrderService — tenant isolation + address rejection", () => {
     // test don't depend on the alert succeeding.
     const opsAlerts = { send: jest.fn().mockResolvedValue(undefined) };
 
-    // Migration 0041 — Fulfillment v2 requires ShippingPointService.
+    // Fulfillment v2 requires ShippingPointService.
     // Every test in this file exercises the LEGACY path (v2 flag is
     // false by default because the fake config table is empty), so
     // the service methods are never called. Provide a no-op mock
@@ -239,7 +239,7 @@ describe("OrderService — tenant isolation + address rejection", () => {
         .mockResolvedValue({ totalPoints: 0, resolutions: [], allAssigned: true }),
       resolveRange: jest.fn().mockResolvedValue({ dollarsMin: 0, dollarsMax: 0 }),
     };
-    // Phase O — toPublic now resolves parcel_template → friendly label
+    // toPublic now resolves parcel_template → friendly label
     // via the carrier registry. These tests never touch a packed
     // order, so a no-op mock is fine.
     const carrierRegistry = {
@@ -317,7 +317,7 @@ describe("OrderService — tenant isolation + address rejection", () => {
         insuranceRequested: false,
         signatureRequired: false,
         adultSignatureRequired: false,
-        // Migration 0037 — fulfillment branch defaults to PLATFORM_SHIP
+        // fulfillment branch defaults to PLATFORM_SHIP
         // for existing call-sites that haven't been migrated.
         fulfillmentMode: "PLATFORM_SHIP",
       }),
@@ -327,7 +327,7 @@ describe("OrderService — tenant isolation + address rejection", () => {
     expect(audit.log).not.toHaveBeenCalled();
   });
 
-  // Phase P-B — NEEDS_VERIFICATION was silently allowed pre-fix, letting
+  // NEEDS_VERIFICATION was silently allowed pre-fix, letting
   // typo'd addresses like "160 tuker lane" submit. The spec requires
   // hard validation before submit; both non-ACCEPTED outcomes must 400
   // with the suggested correction (when Shippo returns one) in the

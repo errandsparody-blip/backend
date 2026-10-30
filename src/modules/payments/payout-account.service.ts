@@ -186,7 +186,7 @@ export class PayoutAccountService {
       detailsSubmitted: boolean;
       chargesEnabled: boolean;
       payoutsEnabled: boolean;
-      /** Flutterwave payout bank details (Migration 0068); undefined for Stripe. */
+      /** Flutterwave payout bank details; undefined for Stripe. */
       bankCode?: string | null;
       accountNumber?: string | null;
     },

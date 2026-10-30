@@ -1,5 +1,5 @@
 /**
- * Public self-service return schemas (Migration 0072).
+ * Public self-service return schemas.
  *
  * A buyer looks up their order by reference + email, then opens returns on one
  * or more sub-orders of that cart, supplying the tracking number of the parcel

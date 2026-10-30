@@ -30,7 +30,7 @@ import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { IdempotencyService } from "../../common/idempotency.service";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 
-// Migration 0039 — ADMIN role reference.
+// ADMIN role reference.
 const ROLE_ADMIN = "ADMIN" as Role;
 import {
   adminAdjustSkuSchema,
@@ -46,7 +46,7 @@ import { AdminSkuService } from "./admin-sku.service";
 const SKU_ID_RE = /^[A-Z0-9-]{6,80}$/;
 
 @Controller({ path: "admin/skus", version: "1" })
-// Migration 0039 — ADMIN added at class level with a read-only gate.
+// ADMIN added at class level with a read-only gate.
 // The registry has no `admin.inventory.write` key, so an ADMIN can
 // never be granted `adjust` via config. The adjust method also opts
 // back out at the @Roles level (defence in depth).
@@ -82,7 +82,7 @@ export class AdminSkuController {
     return this.skus.listMovements(id, q);
   }
 
-  // Migration 0039 — inventory adjustments affect billing base, so
+  // inventory adjustments affect billing base, so
   // ADMIN can NEVER be granted this via config. Method-level @Roles
   // OVERRIDES the class list, dropping ADMIN. No @RequiresPage means
   // the class-level admin.inventory.read still nominally applies,

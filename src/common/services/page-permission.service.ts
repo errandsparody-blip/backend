@@ -32,7 +32,7 @@ import { Role } from "@prisma/client";
 
 import { PrismaService } from "../prisma.service";
 
-// Migration 0039 — the ADMIN enum member is added by this migration.
+// the ADMIN enum member is added by this migration.
 // Compared against the generated Prisma type as a string constant so
 // the reference builds cleanly whether or not the local Prisma client
 // has been regenerated (Railway regenerates on deploy; local

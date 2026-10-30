@@ -1,5 +1,5 @@
 /**
- * Admin barcode endpoints (Migration 0044).
+ * Admin barcode endpoints.
  *
  * Routes:
  *   GET    /v1/admin/products/:productId/barcodes   — list product's barcodes

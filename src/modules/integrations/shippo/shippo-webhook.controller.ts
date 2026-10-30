@@ -208,7 +208,7 @@ export class ShippoWebhookController {
 
     // Don't downgrade. e.g. once SHIPPED, ignore a delayed pre_transit event.
     //
-    // Migration 0037 — HANDED_OFF is a terminal success state for
+    // HANDED_OFF is a terminal success state for
     // VENDOR_CARRIER orders. Those orders never carry a Shippo label
     // and Shippo will never emit a tracking webhook for them, so in
     // practice we should never reach this RANK lookup with a

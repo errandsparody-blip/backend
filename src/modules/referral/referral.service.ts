@@ -1,7 +1,7 @@
 /**
  * ReferralService — vendor-to-vendor referrals + event campaign capture.
  *
- * Model (migration 0056):
+ * Model:
  *   - Each vendor has a unique `referral_code` they share.
  *   - Campaigns represent events (a code/QR at a booth).
  *   - `referrals` holds one row per referred vendor, attributed at signup.

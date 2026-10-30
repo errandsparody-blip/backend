@@ -61,7 +61,7 @@ import {
 import { R2Service } from "../integrations/r2/r2.service";
 import { ReturnService } from "../returns/return.service";
 
-// Migration 0046 — vendor CSV bulk-import service. Delegated to; the
+// vendor CSV bulk-import service. Delegated to; the
 // controller only validates the upload envelope and defers to the
 // service for parsing + per-row order creation.
 import {
@@ -82,12 +82,12 @@ export class OrderController {
     // import a module here; we just inject the service to presign
     // vendor-supplied label uploads on the new VENDOR_CARRIER flow.
     private readonly r2: R2Service,
-    // Migration 0046 — CSV bulk-import.
+    // CSV bulk-import.
     private readonly imports: OrderImportService,
   ) {}
 
   // ---------------------------------------------------------------------------
-  // Migration 0047 — the /fulfillment-config endpoint was removed. v1
+  // the /fulfillment-config endpoint was removed. v1
   // has been abolished per spec so there's no branch for the frontend
   // to select. Leave a no-op stub returning { v2Enabled: true } for a
   // release cycle so an older cached web client doesn't hard-fail on
@@ -101,7 +101,7 @@ export class OrderController {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 0041 — vendor-facing shipping estimate preview for the
+  // vendor-facing shipping estimate preview for the
   // v2 wizard. The wizard calls this on the Review step (v2 only) so
   // the vendor sees the exact estimate range + wallet-cover
   // requirement before clicking Submit. Backend uses the same points
@@ -155,7 +155,7 @@ export class OrderController {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 0037 — Presign a PUT for a vendor-supplied shipping label
+  // Presign a PUT for a vendor-supplied shipping label
   // on the VENDOR_CARRIER fulfillment flow.
   //
   // The order/new wizard's Fulfillment step uses this so the vendor can
@@ -210,7 +210,7 @@ export class OrderController {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 0037 — fulfillment-cost estimate for the VENDOR_CARRIER
+  // fulfillment-cost estimate for the VENDOR_CARRIER
   // branch of the order wizard. Returns handling + insurance + total
   // without hitting Shippo, so the vendor sees a live running cost as
   // they add lines / toggle insurance.
@@ -308,7 +308,7 @@ export class OrderController {
     return this.orders.cancel(user.vendorId!, user.sub, id, body);
   }
 
-  // Migration 0074 — vendor requests cancellation of an order that's past
+  // vendor requests cancellation of an order that's past
   // the instant self-cancel window (label purchased / being packed). Ops
   // approves (refund + restock + cancel) or rejects.
   @Post(":id/request-cancellation")
@@ -322,7 +322,7 @@ export class OrderController {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 0046 — Vendor CSV bulk import.
+  // Vendor CSV bulk import.
   //
   // The CSV is uploaded as a JSON payload `{ csv, sourceFilename }`
   // so we don't need multipart parsing plumbing. The controller

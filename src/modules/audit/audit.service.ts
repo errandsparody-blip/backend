@@ -1,6 +1,6 @@
 /**
  * AuditService — every privileged or financial action goes through here.
- * Append-only at both the DB privilege level (migration 0002) and the
+ * Append-only at both the DB privilege level and the
  * application level (no update/delete methods exist).
  *
  * Implementation Plan §4.7.

@@ -55,7 +55,7 @@ export class AdminPsnService {
     private readonly skus: SkuService,
     private readonly audit: AuditService,
     private readonly wallet: WalletService,
-    // Migration 0040 — Fulfillment v2 requires every product on a
+    // Fulfillment v2 requires every product on a
     // PSN to have shippingPoints assigned before the PSN can be
     // sealed. The service is @Global(); we just consume it.
     private readonly shippingPoints: ShippingPointService,
@@ -140,7 +140,7 @@ export class AdminPsnService {
     const psn = await this.prisma.psn.findUnique({
       where: { id },
       include: {
-        // Migration 0024 — include the product's storageTier on each
+        // include the product's storageTier on each
         // line so the admin receive page can render a "Tier size"
         // column (dimensions sourced from the tier_dimensions config
         // row on the frontend). The product include also keeps the
@@ -153,7 +153,7 @@ export class AdminPsnService {
                 code: true,
                 name: true,
                 variant: true,
-                // `storageTier` is on the Product model (migration 0010).
+                // `storageTier` is on the Product model.
                 // `imageUrl` was added in migration 0022. Both flow
                 // through this cast because Railway's stale Prisma
                 // client may not know about either column until the
@@ -161,7 +161,7 @@ export class AdminPsnService {
                 // product image here lets the admin receive page
                 // visually match incoming stock without an extra hop.
                 //
-                // Migration 0040 — `shippingPoints` (Decimal, nullable)
+                // `shippingPoints` (Decimal, nullable)
                 // rides through the same cast so the admin receive UI
                 // can render a per-product super-admin editor + gate
                 // Complete Receiving on unassigned lines.
@@ -176,7 +176,7 @@ export class AdminPsnService {
         },
         vendor: { select: { id: true, businessName: true, country: true } },
         exceptions: true,
-        // Migration 0020 — include hold lifecycle so the receive page can
+        // include hold lifecycle so the receive page can
         // render the current state. Limit to the most-recent for display;
         // the audit log has the full history if anyone needs it.
         ...({ holds: { orderBy: { createdAt: "desc" }, take: 5 } } as Record<string, unknown>),
@@ -213,10 +213,10 @@ export class AdminPsnService {
         });
       }
 
-      // Migration 0040 — Fulfillment v2. Every product on this PSN
+      // Fulfillment v2. Every product on this PSN
       // must have shippingPoints assigned before we can seal it.
       // Reason: the vendor-facing shipping-cost estimate at order
-      // submit (Phase B) reads this value; without it, we can't
+      // submit reads this value; without it, we can't
       // gate wallet-cover validation and would ship product the
       // vendor can't afford to send. Only SUPER_ADMIN can set the
       // points — a WAREHOUSE_OPERATOR hitting this branch means
@@ -352,7 +352,7 @@ export class AdminPsnService {
             receivedQty: total,
             acceptedQty: submitted.acceptedQty,
             damagedQty: submitted.damagedQty,
-            // Migration 0024 — capture the missing count alongside damaged.
+            // capture the missing count alongside damaged.
             // Cast around the stale Prisma client (the column is in 0024,
             // generated client catches up post-deploy).
             ...({ missingQty: submitted.missingQty ?? 0 } as Record<string, unknown>),
@@ -395,13 +395,13 @@ export class AdminPsnService {
         },
       });
 
-      // Migration 0035 — create one StorageBox row per physical box the
+      // create one StorageBox row per physical box the
       // vendor declared in this shipment. This is the new billing unit
       // (replaces SKU-based storage billing): the daily cron iterates
       // these rows, debits per box on its 30-day anchor, and admin can
       // mark them empty / removed via the consolidate UI.
       //
-      // Migration 0036 — ADD_TO_PALLET PSNs now ALSO create StorageBox
+      // ADD_TO_PALLET PSNs now ALSO create StorageBox
       // rows, but with nextBillingDate=null so the cron skips them.
       // That keeps the vendor's recurring-storage view honest (they see
       // every box they paid stocking on) without double-billing — the
@@ -486,7 +486,7 @@ export class AdminPsnService {
       return { status: updated.status, psnId: updated.id, vendorId: updated.vendorId };
     });
 
-    // Referral reward (migration 0056): when a referred vendor's first PSN
+    // Referral reward: when a referred vendor's first PSN
     // is received, credit the referrer + referee $10 each. Fired AFTER the
     // receive commits, best-effort — the service is idempotent (only the
     // first received PSN pays) and never throws back here, so a referral

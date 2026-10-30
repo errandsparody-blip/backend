@@ -133,7 +133,7 @@ export class LedgerService {
       id: e.id,
       type: e.type,
       amountCents: e.amountCents,
-      // Migration 0019 — column is nullable to support shopper-side
+      // column is nullable to support shopper-side
       // rows that have no wallet. The vendor-scoped queries above only
       // ever return vendor rows, which always carry a snapshot, but TS
       // can't see that — coerce null to 0 for the public shape.

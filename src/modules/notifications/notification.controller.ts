@@ -59,7 +59,7 @@ const readCategorySchema = z.object({
 type ReadCategoryInput = z.infer<typeof readCategorySchema>;
 
 @Controller({ path: "notifications", version: "1" })
-// Migration 0039 — ADMIN added. NotificationService scopes by
+// ADMIN added. NotificationService scopes by
 // recipient (userId/vendorId), so the endpoint cannot leak someone
 // else's notifications regardless of role. No @RequiresPage needed
 // — every authenticated user sees their own inbox. The sidebar's

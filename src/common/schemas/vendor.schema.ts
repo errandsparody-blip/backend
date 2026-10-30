@@ -208,7 +208,7 @@ export const submitKycV2Schema = z
     idNumber: z.string().trim().min(2).max(60).optional(),
     idExpirationDate: isoFutureDate.optional(),
 
-    // Section 4 — Business verification documents (migration 0032).
+    // Section 4 — Business verification documents.
     //
     // Files are uploaded out-of-band via the existing R2 presign flow
     // (POST /v1/vendors/me/kyc/uploads/presign); the wizard PUTs each

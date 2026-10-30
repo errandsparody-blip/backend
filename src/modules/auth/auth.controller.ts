@@ -66,7 +66,7 @@ function metaOf(req: Request): ReqMeta {
 export class AuthController {
   constructor(
     private readonly auth: AuthService,
-    // Migration 0039 — resolves the current user's effective page
+    // resolves the current user's effective page
     // permissions. Injected via @Global() PagePermissionModule.
     private readonly pagePermissions: PagePermissionService,
   ) {}
@@ -289,7 +289,7 @@ export class AuthController {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 0039 — page-permission hydration for the frontend.
+  // page-permission hydration for the frontend.
   //
   // The web app calls this once on layout mount (cached in React
   // Query) to know which admin sidebar items to render and which

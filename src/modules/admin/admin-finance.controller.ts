@@ -15,7 +15,7 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { PrismaService } from "../../common/prisma.service";
 
-// Migration 0039 — ADMIN role reference.
+// ADMIN role reference.
 const ROLE_ADMIN = "ADMIN" as Role;
 
 // All ledger types the admin transactions filter accepts. Mirrors the
@@ -99,7 +99,7 @@ type ListVendorsInput = z.infer<typeof listVendorsSchema>;
 const DEFAULT_LIMIT = 50;
 
 @Controller({ path: "admin", version: "1" })
-// Migration 0039 — ADMIN added at the class level; each method
+// ADMIN added at the class level; each method
 // declares its own @RequiresPage because this controller mixes
 // vendor-list traffic (admin.vendors.read) with reconciliation +
 // transactions (admin.finance.read).

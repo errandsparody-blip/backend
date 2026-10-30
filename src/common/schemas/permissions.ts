@@ -35,7 +35,7 @@ export type Permission = (typeof Permission)[keyof typeof Permission];
  * Static role → permission mapping. This is the LEGACY authorisation
  * layer used by the `hasPermission` helper below and a small number
  * of surviving callers. The newer, more granular
- * `PagePermissionService` (migration 0039) supersedes this map for
+ * `PagePermissionService` supersedes this map for
  * anything ADMIN-tier: ADMIN's real capabilities come from the
  * per-page overrides in the `admin_role_page_permissions` config row
  * and are enforced by `PagePermissionGuard`, not by anything here.
@@ -86,7 +86,7 @@ export const ROLE_PERMISSIONS: Readonly<
     Permission.ReadAnyVendor,
   ],
   [Role.SUPER_ADMIN]: Object.values(Permission),
-  // Migration 0039 — ADMIN is intentionally absent (see the header
+  // ADMIN is intentionally absent (see the header
   // comment on ROLE_PERMISSIONS). Its capabilities come from the
   // `admin_role_page_permissions` config row via PagePermissionGuard.
   // `hasPermission` returns `false` for any missing role, which is

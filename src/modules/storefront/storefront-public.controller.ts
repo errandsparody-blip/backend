@@ -1,5 +1,5 @@
 /**
- * Public storefront reads + checkout (Migration 0059) — no auth.
+ * Public storefront reads + checkout — no auth.
  *
  *   GET  /v1/public/storefront/:slug                   — resolve store header
  *   GET  /v1/public/storefront/:slug/products          — listed, in-stock catalog
@@ -54,7 +54,7 @@ export class StorefrontPublicController {
     return this.publicStore.resolveBySlug(slug);
   }
 
-  // Custom-domain resolver (Phase 3): host → { slug } for the web middleware.
+  // Custom-domain resolver: host → { slug } for the web middleware.
   @Public()
   @Get("by-host/:host")
   @Throttle({ default: { limit: 240, ttl: 60_000 } })

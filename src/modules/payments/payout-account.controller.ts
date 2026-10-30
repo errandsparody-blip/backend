@@ -1,5 +1,5 @@
 /**
- * Vendor-facing payout-account connection (Migration 0059).
+ * Vendor-facing payout-account connection.
  *
  *   GET  /v1/payments/accounts               — connected payout accounts + status
  *   GET  /v1/payments/flutterwave/banks      — settlement banks for a country

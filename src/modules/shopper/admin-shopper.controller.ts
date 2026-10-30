@@ -48,7 +48,7 @@ import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 import { PrismaService } from "../../common/prisma.service";
 
-// Migration 0039 — ADMIN role reference. Cast because the local
+// ADMIN role reference. Cast because the local
 // Prisma client may lag; runtime is exact string equality.
 const ROLE_ADMIN = "ADMIN" as Role;
 import {
@@ -106,7 +106,7 @@ import { ShopperTokenService } from "./shopper-token.service";
 const FINANCE_ROLES = [Role.FINANCE_ADMIN, Role.SUPER_ADMIN] as const;
 
 @Controller({ path: "admin/shopper", version: "1" })
-// Migration 0039 — ADMIN is added to the compile-time role list here.
+// ADMIN is added to the compile-time role list here.
 // The class-level @RequiresPage("admin.shopper.write") is the default
 // dynamic gate; GET endpoints override at the method level to
 // admin.shopper.read so a SUPER_ADMIN can grant read-only shopper
@@ -133,7 +133,7 @@ export class AdminShopperController {
   // List + detail
   // ---------------------------------------------------------------------------
 
-  // Migration 0039 — override to the read key so a SUPER_ADMIN can
+  // override to the read key so a SUPER_ADMIN can
   // grant an ADMIN read-only shopper access (list + detail) without
   // opening every mutation.
   @Get()
@@ -182,7 +182,7 @@ export class AdminShopperController {
   }
 
   /**
-   * Migration 0021 — admin confirms the items have landed at the warehouse
+   * admin confirms the items have landed at the warehouse
    * and the request can move to READY_TO_SHIP. No body required; the action
    * is idempotent at the transition level (a second call would 409).
    */
@@ -261,7 +261,7 @@ export class AdminShopperController {
       );
     }
 
-    // Migration 0027 — shipping-invoice payment cycle.
+    // shipping-invoice payment cycle.
     //
     // After saving the shipping form, if the row has a non-zero
     // shipping cost AND the buyer hasn't already paid for shipping on
@@ -769,7 +769,7 @@ export class AdminShopperController {
   }
 
   /**
-   * Migration 0025 — release on the buyer's own carrier label.
+   * release on the buyer's own carrier label.
    *
    * Same end state as `/ship` (status moves to SHIPPED + tracking is
    * recorded) but the carrier + tracking come from the prepaid label
@@ -830,7 +830,7 @@ export class AdminShopperController {
   }
 
   /**
-   * Migration 0025 — record an in-person pickup (PICKUP method only).
+   * record an in-person pickup (PICKUP method only).
    *
    * Transitions READY_FOR_PICKUP → DELIVERED and stamps
    * pickupCompletedAt. Optional note lands in the chat thread so the
@@ -866,7 +866,7 @@ export class AdminShopperController {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 0023 — wire-track admin actions
+  // wire-track admin actions
   //
   // The four endpoints below drive the high-value (> wire threshold)
   // workflow. They're idempotent at the status-transition level — a
@@ -979,7 +979,7 @@ export class AdminShopperController {
   }
 
   /**
-   * Migration 0058 — clear the buyer's committed (locked) payment method so
+   * clear the buyer's committed (locked) payment method so
    * they can choose again. Used when a buyer legitimately needs to switch
    * (e.g. they picked wire, then asked to pay by card instead). Finance-gated
    * and audit-logged with the acting admin. Posts a chat note so the buyer
@@ -1294,7 +1294,7 @@ export class AdminShopperController {
    * canonical method ordering + last-known default rates (used to
    * pre-fill the rate input when admin first opens the shipping form).
    */
-  // Migration 0039 — pre-fill data for the shopper shipping form.
+  // pre-fill data for the shopper shipping form.
   // Read-only; ADMIN with admin.shopper.read can hit this so the
   // detail page renders its rate input with the current defaults.
   @Get("freight-rates")

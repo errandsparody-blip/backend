@@ -260,7 +260,7 @@ export class AdminVendorService {
           ? vendor.idExpirationDate.toISOString().slice(0, 10)
           : null,
         // KYC v2 Phase 2 — public R2 URLs for the four document uploads
-        // (migration 0032). Reviewers click straight through from the
+        //. Reviewers click straight through from the
         // admin vendor detail page; these fields are NULL until the
         // vendor uploads each file in the wizard.
         idFrontUrl: vendor.idFrontUrl ?? null,
@@ -800,7 +800,7 @@ export class AdminVendorService {
    * inside `loadFeeSchedule`.
    */
   // ---------------------------------------------------------------------------
-  // Storage-box consolidation (migration 0035)
+  // Storage-box consolidation
   // ---------------------------------------------------------------------------
 
   /**
@@ -817,7 +817,7 @@ export class AdminVendorService {
       tier: string;
       status: string;
       receivedAt: string;
-      // Migration 0036 — null means "bundled with parent pallet, not
+      // null means "bundled with parent pallet, not
       // billed independently". UI should render those rows with a
       // "Bundled" badge instead of a charge date.
       nextBillingDate: string | null;
@@ -855,7 +855,7 @@ export class AdminVendorService {
       tier: String(r.tier),
       status: String(r.status),
       receivedAt: r.receivedAt.toISOString(),
-      // Migration 0036 — nullable. NULL → bundled with parent pallet,
+      // nullable. NULL → bundled with parent pallet,
       // not billed independently.
       nextBillingDate: r.nextBillingDate?.toISOString() ?? null,
       palletContentTier: r.palletContentTier ? String(r.palletContentTier) : null,
@@ -1280,11 +1280,7 @@ export class AdminVendorService {
       email: { subject: args.email.subject, html: args.email.html, text: args.email.text },
     });
     // EmailService is invoked through NotificationService.emit when an email
-    // payload is supplied — sending it here too would double-deliver. Left
-    // commented for posterity in case the notifications module changes.
-    // if (args.ownerUserId) {
-    //   await this.email.send({ to: ..., type: args.type, userId: args.ownerUserId, ... });
-    // }
+    // payload is supplied — sending it here too would double-deliver.
   }
 
   /**

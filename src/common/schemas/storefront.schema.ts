@@ -1,5 +1,5 @@
 /**
- * Storefront / marketplace request schemas (Migration 0059).
+ * Storefront / marketplace request schemas.
  *
  * Vendor-facing: manage which products are listed, storefront presentation,
  * the store slug, enabling the storefront, and the marketplace feature toggle.
@@ -44,11 +44,11 @@ export const setProductListingSchema = z
       .optional(),
     category: z.string().trim().min(1).max(60).optional().nullable(),
     tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
-    // Colour axis (Migration 0066). Size is NOT accepted here — it derives from
+    // Colour axis. Size is NOT accepted here — it derives from
     // the product's own `variant` (its inventory listing), never re-typed.
     optionColor: z.string().trim().min(1).max(40).optional().nullable(),
     imageUrls: z.array(z.string().trim().url().max(500)).max(10).optional(),
-    // Storefront product details (Migration 0070) — ASOS-style. All optional,
+    // Storefront product details — ASOS-style. All optional,
     // nullable to clear.
     description: z.string().trim().max(4000).optional().nullable(),
     fit: z.string().trim().max(60).optional().nullable(),
@@ -93,7 +93,7 @@ export type UpsertStorefrontSettingsInput = z.infer<typeof upsertStorefrontSetti
 export const setFeaturedSchema = z.object({ featured: z.boolean() });
 export type SetFeaturedInput = z.infer<typeof setFeaturedSchema>;
 
-// Custom domain registration (Phase 3).
+// Custom domain registration.
 export const addDomainSchema = z.object({
   host: z.string().trim().min(3).max(255),
 });

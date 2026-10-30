@@ -1,5 +1,5 @@
 /**
- * Storefront-integration API key format (Migration 0038).
+ * Storefront-integration API key format.
  *
  * A key the vendor's website sends to authenticate to the integration endpoint.
  * Presented to the vendor exactly once at creation; only the public `keyId` and

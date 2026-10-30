@@ -1,5 +1,5 @@
 /**
- * Storefront payment webhooks (Migration 0059) — PUBLIC, protected by the
+ * Storefront payment webhooks — PUBLIC, protected by the
  * processor's signature. An order is marked paid ONLY here, never from a
  * browser callback. Handlers verify the signature (via the processor), then
  * hand the normalised event to the idempotent StorefrontOrderService.

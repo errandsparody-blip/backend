@@ -2,7 +2,7 @@
  * Human-readable order references.
  *
  * Every Order row has a monotonic integer `orderNumber` populated by the
- * Postgres sequence `orders_order_number_seq` (migration 0029). The user
+ * Postgres sequence `orders_order_number_seq`. The user
  * never sees the raw integer — emails, notifications, the receipt, and
  * the portal UI all render it through `formatOrderRef` so the format is
  * defined in exactly one place. If we ever want to widen the prefix or

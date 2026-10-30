@@ -46,7 +46,7 @@ import {
 import { AuditService } from "../audit/audit.service";
 import { ProductService } from "../products/product.service";
 
-// Migration 0040 — Fulfillment v2 shipping-cost proxy. Decimal at
+// Fulfillment v2 shipping-cost proxy. Decimal at
 // the DB layer, but the wire contract accepts a JSON number for
 // admin editor UX (no BigNumber lib on the frontend). Cap at 100 to
 // keep bucket math sane; refuse negatives + non-finite values with
@@ -65,7 +65,7 @@ type PatchShippingPointsInput = z.infer<typeof patchShippingPointsSchema>;
 export class AdminProductController {
   constructor(
     private readonly products: ProductService,
-    // Migration 0040 — shipping points don't fit the existing
+    // shipping points don't fit the existing
     // editAsAdmin path (that method takes vendor-facing fields;
     // shippingPoints is admin-only and lives in a different write
     // scope). Straight Prisma + audit here keeps the ProductService
@@ -93,11 +93,11 @@ export class AdminProductController {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 0040 — Fulfillment v2: shipping points assignment.
+  // Fulfillment v2: shipping points assignment.
   //
   // Super-admin-only write on a product's per-unit shipping-cost
   // proxy. The value is never surfaced to vendors; it feeds into the
-  // vendor-facing estimate range at order-submit time (Phase B).
+  // vendor-facing estimate range at order-submit time.
   //
   // Idempotent: setting the same value twice is a no-op audit-wise —
   // we still log so a super admin's "yes, I intentionally kept it

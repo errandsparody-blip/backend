@@ -41,7 +41,7 @@ import {
   type VerifySocialInput,
 } from "../../common/schemas/admin-vendor.schema";
 
-// Migration 0039 — ADMIN role reference. Cast because the local
+// ADMIN role reference. Cast because the local
 // Prisma client may lag behind the schema in the sandbox. Runtime is
 // exact string equality so the reference is stable across envs.
 const ROLE_ADMIN = "ADMIN" as Role;
@@ -65,7 +65,7 @@ export class AdminVendorController {
   // Read
   // ---------------------------------------------------------------------------
 
-  // Migration 0039 — ADMIN can be granted vendor read access via the
+  // ADMIN can be granted vendor read access via the
   // admin.vendors.read page key. FINANCE_ADMIN + SUPER_ADMIN keep their
   // compiled-in access (no config toggle for them).
   @Roles(Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)

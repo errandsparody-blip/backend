@@ -1,5 +1,5 @@
 /**
- * Storefront abandoned-cart sweep (Migration 0059) — safety net.
+ * Storefront abandoned-cart sweep — safety net.
  *
  * Checkout reserves stock the instant an order row is written; if the buyer
  * never completes payment, that inventory would stay reserved forever — and

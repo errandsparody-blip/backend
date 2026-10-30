@@ -1,5 +1,5 @@
 /**
- * StorefrontCheckoutService — public buyer quote + checkout (Migration 0059).
+ * StorefrontCheckoutService — public buyer quote + checkout.
  *
  * Flow:
  *   quote()       → validate items + stock, price the cart, return the ≤2
@@ -7,7 +7,7 @@
  *   createOrder() → re-validate + soft-reserve stock, create the storefront
  *                   order (PENDING_PAYMENT), then open a split checkout on the
  *                   chosen processor. Payment is confirmed later by the webhook
- *                   (Layer 6); the label is bought at pack time (Layer 7), so
+ *; the label is bought at pack time, so
  *                   the shipping figure here is a quote.
  *
  * Money: buyer pays product − discount + shipping + fulfillment fee. The vendor
@@ -376,7 +376,7 @@ export class StorefrontCheckoutService {
   }
 
   // ---------------------------------------------------------------------------
-  // Cross-vendor checkout (Phase 2)
+  // Cross-vendor checkout
   // ---------------------------------------------------------------------------
 
   /**

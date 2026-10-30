@@ -126,7 +126,7 @@ export interface PublicOrder {
   id: string;
   /**
    * Monotonic, platform-assigned order number. Rendered as `#${orderNumber}`
-   * in the portal and emails (migration 0029). The PRIMARY identifier shown
+   * in the portal and emails. The PRIMARY identifier shown
    * to vendors — externalReference below is their own optional bookkeeping
    * id and is surfaced as a secondary "Your reference" field.
    */
@@ -157,7 +157,7 @@ export interface PublicOrder {
   reassessmentDeltaCents: number;
   cancelReason: Order["cancelReason"];
   cancelNote: string | null;
-  // Migration 0074 — vendor cancellation request state.
+  // vendor cancellation request state.
   cancelRequestedAt: Date | null;
   cancelRequestReason: string | null;
   cancelRequestNote: string | null;
@@ -173,7 +173,7 @@ export interface PublicOrder {
   createdAt: Date;
   updatedAt: Date;
   /**
-   * Migration 0041 — Fulfillment v2 discriminator.
+   * Fulfillment v2 discriminator.
    *   1 = legacy flow (Shippo quoted at submit, everything debited)
    *   2 = v2 flow (fulfillment fee only at submit, estimate range shown)
    * Vendor UI branches on this to render either the legacy money
@@ -181,14 +181,14 @@ export interface PublicOrder {
    */
   workflowVersion: number;
   /**
-   * Migration 0041 — v2 shipping estimate captured at submit time.
+   * v2 shipping estimate captured at submit time.
    * Both null for legacy (workflowVersion=1) orders AND for v2
    * VENDOR_CARRIER orders (no platform shipping to estimate).
    */
   estimatedShippingMinCents: number | null;
   estimatedShippingMaxCents: number | null;
   /**
-   * Phase O — vendor-visible packaging summary. All null until the
+   * vendor-visible packaging summary. All null until the
    * warehouse records pack; then reflects the actual outside-of-box
    * dimensions and parcel weight sent to the carrier. `packagingLabel`
    * resolves to either the library-preset label (e.g. "USPS Medium
@@ -204,7 +204,7 @@ export interface PublicOrder {
   /** Σ product.weightOz × qty — estimated package weight before packing. */
   estimatedWeightOz: number | null;
   /**
-   * Migration 0037 — fulfillment mode + hand-off timestamp. The vendor
+   * fulfillment mode + hand-off timestamp. The vendor
    * UI needs these to decide return eligibility (own-carrier orders
    * become returnable at HANDED_OFF) and to show the hand-off event.
    * Defaults to PLATFORM_SHIP for legacy rows.
@@ -212,7 +212,7 @@ export interface PublicOrder {
   fulfillmentMode: "PLATFORM_SHIP" | "VENDOR_CARRIER";
   handedOffAt: Date | null;
   /**
-   * Vendor-selected label add-ons (migration 0055). Surfaced so the admin
+   * Vendor-selected label add-ons. Surfaced so the admin
    * pack/buy-label UI can show what the vendor asked for and the operator
    * knows to expect the surcharges. insurance is bought against
    * itemsDeclaredValueCents; adultSignature implies signatureRequired.
@@ -253,11 +253,11 @@ export class OrderService {
     // creates an order, so ops sees the new pick/pack work without
     // having to refresh the admin orders list.
     private readonly opsAlerts: OpsAlertService,
-    // Migration 0041 — Fulfillment v2 uses shipping points to compute
+    // Fulfillment v2 uses shipping points to compute
     // the vendor-facing estimate range at submit time. Injected via
-    // the @Global() ShippingPointModule (migration 0040).
+    // the @Global() ShippingPointModule.
     private readonly shippingPoints: ShippingPointService,
-    // Phase O — resolves an order's parcel_template (Shippo carrier
+    // resolves an order's parcel_template (Shippo carrier
     // template) to its friendly label so the vendor-visible packaging
     // summary reads "USPS Medium Flat Rate Box" rather than
     // "USPS_MediumFlatRateBox1".
@@ -520,7 +520,7 @@ export class OrderService {
   }
 
   // ===========================================================================
-  // CREATE V2 — Fulfillment v2 (migration 0041). Feature-flag gated by
+  // CREATE V2 — Fulfillment v2. Feature-flag gated by
   // `fulfillment_v2_enabled`. See create() above for the dispatch entry
   // point.
   //
@@ -528,14 +528,14 @@ export class OrderService {
   //
   //   * NO Shippo quote at submit. The vendor sees a shipping-points-
   //     based ESTIMATE range instead. Actual shipping is bought at pack
-  //     time by admin (Phase C).
+  //     time by admin.
   //
   //   * NO insurance handling. Insurance is inherently tied to the
   //     carrier's insurance product, which we buy alongside the label.
   //     v2 defers that decision to pack time.
   //
   //   * Wallet debit is ONLY the fulfillment fee. Actual shipping is
-  //     debited at pack-and-charge time (Phase C).
+  //     debited at pack-and-charge time.
   //
   //   * Blocks submit when ANY product on the order lacks a
   //     shippingPoints value — a super admin must set it before the
@@ -664,7 +664,7 @@ export class OrderService {
     if (!isVendorCarrier) {
       // 5a. Every product on the order must have shipping points
       // assigned. Super admin sets them at PSN receive time
-      // (migration 0040). We refuse submit here so the vendor sees a
+      //. We refuse submit here so the vendor sees a
       // clear error rather than a $0 estimate that sails through
       // wallet validation.
       const productLines = input.lines.map((l) => {
@@ -694,7 +694,7 @@ export class OrderService {
       // The top (not the bottom) is used so the vendor is protected
       // against ordering something the actual carrier quote would put
       // them under-funded on. The check is repeated at pack time
-      // (Phase C) against the actual rate; this pre-flight is just
+      // against the actual rate; this pre-flight is just
       // to catch obvious cases before we reserve inventory.
       const requiredCoverage = fulfillmentFeeCents + estimatedShippingMaxCents;
       const walletSnapshot = await this.wallet.get(vendorId);
@@ -853,7 +853,7 @@ export class OrderService {
             workflowVersion: 2,
             estimatedShippingMinCents,
             estimatedShippingMaxCents,
-            // Migration 0055 — vendor-selected label add-ons. Persisted so
+            // vendor-selected label add-ons. Persisted so
             // the admin honours them at buy-label time. adultSignature
             // implies signature; normalise here so downstream logic can
             // read either flag directly.
@@ -994,7 +994,7 @@ export class OrderService {
   }
 
   /**
-   * Migration 0041 — vendor-facing shipping estimate preview for the
+   * vendor-facing shipping estimate preview for the
    * v2 wizard. Returns the same numbers the backend will use at
    * submit time, so the vendor sees the exact wallet-cover
    * requirement before they commit.
@@ -1475,7 +1475,7 @@ export class OrderService {
       cancelledAt: o.cancelledAt,
       createdAt: o.createdAt,
       updatedAt: o.updatedAt,
-      // Migration 0041 — cast because the local Prisma client may
+      // cast because the local Prisma client may
       // not include workflow_version / estimated_shipping_*_cents
       // until `prisma generate` runs on the deploy machine. Runtime
       // Postgres returns the columns just fine. Legacy rows default
@@ -1489,7 +1489,7 @@ export class OrderService {
       estimatedShippingMaxCents:
         (o as unknown as { estimatedShippingMaxCents?: number | null })
           .estimatedShippingMaxCents ?? null,
-      // Migration 0037 — fulfillment mode + hand-off timestamp. Read via
+      // fulfillment mode + hand-off timestamp. Read via
       // cast (stale client) with a PLATFORM_SHIP default for legacy rows.
       // The vendor UI keys return eligibility off these.
       fulfillmentMode:
@@ -1498,7 +1498,7 @@ export class OrderService {
           | "VENDOR_CARRIER"
           | undefined) ?? "PLATFORM_SHIP",
       handedOffAt: (o as unknown as { handedOffAt?: Date | null }).handedOffAt ?? null,
-      // Migration 0055 — vendor-selected add-ons. Cast-read (stale client)
+      // vendor-selected add-ons. Cast-read (stale client)
       // with false defaults for legacy rows.
       insuranceRequested:
         (o as unknown as { insuranceRequested?: boolean }).insuranceRequested ?? false,
@@ -1506,7 +1506,7 @@ export class OrderService {
         (o as unknown as { signatureRequired?: boolean }).signatureRequired ?? false,
       adultSignatureRequired:
         (o as unknown as { adultSignatureRequired?: boolean }).adultSignatureRequired ?? false,
-      // Phase O — vendor-visible packaging summary. Reads through
+      // vendor-visible packaging summary. Reads through
       // `as unknown` casts because the sandbox Prisma client hasn't
       // been regenerated for the pack-step / packaging_option
       // relation yet; in CI the delegate exists. Runtime Postgres

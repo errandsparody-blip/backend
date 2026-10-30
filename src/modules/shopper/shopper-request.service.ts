@@ -88,23 +88,23 @@ import { ShopperTokenService } from "./shopper-token.service";
 
 export interface RequestRow {
   id: string;
-  // Migration 0015 — short human-readable reference (SHP-000042). Generated
+  // short human-readable reference (SHP-000042). Generated
   // from a Postgres sequence at create time.
   reference: string;
   parentRequestId: string | null;
   buyerEmail: string;
   buyerName: string | null;
-  // Migration 0023 — added for the wire/ID flow. Nullable so historical
+  // added for the wire/ID flow. Nullable so historical
   // rows don't blow up when read.
   buyerPhone: string | null;
-  // Migration 0023 — payment rail this request is on.
+  // payment rail this request is on.
   paymentMethod: "STRIPE" | "WIRE";
-  // Migration 0058 — the specific method the buyer COMMITTED to on the manual
+  // the specific method the buyer COMMITTED to on the manual
   // rail (wire/ach/zelle/cashapp/stripe). Null until they confirm. Once set,
   // the choice is hard-locked and this reflects how they actually paid.
   committedPaymentMethodCode: string | null;
   paymentCommittedAt: Date | null;
-  // Migration 0023 — gov-ID review packet (only meaningful when WIRE).
+  // gov-ID review packet (only meaningful when WIRE).
   idVerificationStatus:
     | "NONE"
     | "PENDING_UPLOAD"
@@ -116,7 +116,7 @@ export interface RequestRow {
   idRejectionReason: string | null;
   idVerifiedAt: Date | null;
   idVerifiedById: string | null;
-  // Migration 0023 — wire-transfer proof packet.
+  // wire-transfer proof packet.
   wireProofUrl: string | null;
   wireProofUploadedAt: Date | null;
   wireConfirmedAt: Date | null;
@@ -130,11 +130,11 @@ export interface RequestRow {
   itemsSubtotalCents: number;
   commissionRateBps: number;
   commissionCents: number;
-  // Migration 0013 — U.S. sales tax estimated at intake, actual at procurement.
+  // U.S. sales tax estimated at intake, actual at procurement.
   estimatedTaxRateBps: number;
   estimatedTaxCents: number;
   actualTaxCents: number | null;
-  // Migration 0014 — which state's rate was used.
+  // which state's rate was used.
   effectiveTaxState: string | null;
   intakeTotalCents: number;
   intakeStripeSessionId: string | null;
@@ -147,16 +147,16 @@ export interface RequestRow {
   followupStripeIntentId: string | null;
   followupStripeRefundId: string | null;
   followupResolvedAt: Date | null;
-  // Migration 0012 — refund ids for the cancel-with-refund flow. Distinct from
+  // refund ids for the cancel-with-refund flow. Distinct from
   // followupStripeRefundId so we never overwrite the negative-followup refund.
   cancelIntakeRefundId: string | null;
   cancelFollowupRefundId: string | null;
-  // Migration 0016 — packed parcel dimensions captured by warehouse staff.
+  // packed parcel dimensions captured by warehouse staff.
   parcelLengthIn: number | null;
   parcelWidthIn: number | null;
   parcelHeightIn: number | null;
   parcelWeightOz: number | null;
-  // Migration 0017 — freight rate snapshot + system-calculated cost. Lets
+  // freight rate snapshot + system-calculated cost. Lets
   // the receipt explain "weight × rate = $X · charged $Y".
   freightRateCentsPerLb: number | null;
   shippingCalculatedCents: number | null;
@@ -176,7 +176,7 @@ export interface LineRow {
   quantity: number;
   estimatedUnitPriceCents: number;
   actualUnitPriceCents: number | null;
-  // Migration 0016 — actual per-line weight in ounces, captured at receive.
+  // actual per-line weight in ounces, captured at receive.
   actualWeightOz: number | null;
   procurementStatus: string | null;
   procurementNotes: string | null;
@@ -275,7 +275,7 @@ export class ShopperRequestService {
        */
       effectiveTaxState: string;
       /**
-       * Migration 0023 — server-derived payment rail. WIRE is the only
+       * server-derived payment rail. WIRE is the only
        * rail used in production today (the STRIPE branch is no longer
        * reachable from the public controller as of May 2026), but the
        * union is preserved for any legacy callers.
@@ -425,7 +425,7 @@ export class ShopperRequestService {
           parentRequestId,
           buyerEmail: input.buyerEmail,
           buyerName: input.buyerName ?? null,
-          // Migration 0023 — phone is required at the Zod layer for new
+          // phone is required at the Zod layer for new
           // requests but the column is nullable for back-compat. We coerce
           // an empty input back to null defensively.
           buyerPhone: input.buyerPhone && input.buyerPhone.length > 0 ? input.buyerPhone : null,
@@ -509,7 +509,7 @@ export class ShopperRequestService {
   }
 
   /**
-   * Migration 0058 — commit the buyer to a specific payment method and
+   * commit the buyer to a specific payment method and
    * HARD-LOCK the choice.
    *
    * Called the moment the buyer confirms a method (before we email them the
@@ -576,7 +576,7 @@ export class ShopperRequestService {
   }
 
   /**
-   * Migration 0058 — admin clears a committed payment method so the buyer can
+   * admin clears a committed payment method so the buyer can
    * pick again ("contact us to change"). Audit-logged with the acting admin.
    */
   async resetPaymentMethodCommitment(args: {
@@ -725,7 +725,7 @@ export class ShopperRequestService {
       afterState: { stripeIntentId: args.stripeIntentId },
     });
 
-    // Migration 0019 — record the unified-finance ledger entries for the
+    // record the unified-finance ledger entries for the
     // items + commission on the intake-paid transition. The service is
     // idempotent on its own keys so a webhook replay doesn't double-write.
     // Best-effort: a failure here mustn't block the buyer's payment flow.
@@ -864,7 +864,7 @@ export class ShopperRequestService {
         status: before.status,
       });
     }
-    // Migration 0025 — branch on shipping method. PICKUP transitions to
+    // branch on shipping method. PICKUP transitions to
     // READY_FOR_PICKUP (terminal-readiness for in-person handoff); every
     // other method continues to READY_TO_SHIP (buy/release a label). If
     // the method isn't set yet we refuse — without it we don't know
@@ -882,7 +882,7 @@ export class ShopperRequestService {
         code: "shopper_warehouse_delivery_no_method",
       });
     }
-    // Migration 0027 — refuse to advance until the buyer has paid the
+    // refuse to advance until the buyer has paid the
     // shipping invoice (for freight-bearing methods). Zero-cost methods
     // (BUYER_FREIGHT, PICKUP) bypass automatically.
     this.assertShippingPaid(before, "warehouse_delivery");
@@ -951,7 +951,7 @@ export class ShopperRequestService {
       afterState: data as Prisma.InputJsonValue,
     });
 
-    // Migration 0021 — auto-transition PROCURING → AWAITING_DELIVERY once
+    // auto-transition PROCURING → AWAITING_DELIVERY once
     // every line has reached a terminal procurement state (purchased or
     // unavailable). This is the trigger that fires the buyer-facing
     // notification "your items have been purchased."
@@ -1033,7 +1033,7 @@ export class ShopperRequestService {
     freightRates: Record<string, number>;
   }): Promise<RequestRow> {
     const before = await this.getById(args.requestId, { includeLines: false });
-    // Migration 0021 — AWAITING_DELIVERY is the new home for the shipping
+    // AWAITING_DELIVERY is the new home for the shipping
     // panel (after admin marks all lines PURCHASED, the request lands
     // there). PROCURING + AWAITING_RECONCILIATION remain accepted for
     // backward compatibility with in-flight requests created before the
@@ -1128,13 +1128,13 @@ export class ShopperRequestService {
     if (args.input.parcelWidthIn !== undefined) data.parcelWidthIn = args.input.parcelWidthIn;
     if (args.input.parcelHeightIn !== undefined) data.parcelHeightIn = args.input.parcelHeightIn;
     if (args.input.parcelWeightOz !== undefined) data.parcelWeightOz = args.input.parcelWeightOz;
-    // Migration 0021 — admin can update destination from the shipping
+    // admin can update destination from the shipping
     // panel. We persist as JSON (Prisma `Json` column) so the receipt and
     // label can both read it back without an extra join.
     if (args.input.shippingAddress !== undefined) {
       data.shippingAddress = args.input.shippingAddress as Prisma.InputJsonValue;
     }
-    // Migration 0025 — method-specific fields. Buyer label only attaches
+    // method-specific fields. Buyer label only attaches
     // to BUYER_FREIGHT; pickup name + scheduled date only to PICKUP.
     if (args.input.buyerLabelUrl !== undefined) {
       data.buyerLabelUrl = args.input.buyerLabelUrl;
@@ -1393,7 +1393,7 @@ export class ShopperRequestService {
   }
 
   // =========================================================================
-  // Shipping invoice (migration 0027)
+  // Shipping invoice
   //
   // The shipping invoice is a separate Stripe Checkout session created when
   // admin saves the shipping form for a freight-bearing method (cost > 0).
@@ -1515,7 +1515,7 @@ export class ShopperRequestService {
         status: row.status,
       });
     }
-    // Migration 0027 — gate on shipping-invoice payment.
+    // gate on shipping-invoice payment.
     this.assertShippingPaid(row, "ship");
     const updated = await (
       this.prisma as unknown as { shopperRequest: AnyPrismaShopperRequest }
@@ -1539,7 +1539,7 @@ export class ShopperRequestService {
   }
 
   /**
-   * Migration 0025 — release a BUYER_FREIGHT shipment.
+   * release a BUYER_FREIGHT shipment.
    *
    * Identical state transition as markShipped (READY_TO_SHIP → SHIPPED)
    * but the tracking + carrier come from the buyer's prepaid label
@@ -1586,7 +1586,7 @@ export class ShopperRequestService {
         code: "shopper_buyer_label_missing",
       });
     }
-    // Migration 0027 — gate on shipping-invoice payment. BUYER_FREIGHT is
+    // gate on shipping-invoice payment. BUYER_FREIGHT is
     // zero-cost so this is effectively a no-op for the happy path; kept
     // as defence-in-depth in case admin manually set a non-zero cost.
     this.assertShippingPaid(row, "release_with_buyer_label");
@@ -1616,7 +1616,7 @@ export class ShopperRequestService {
   }
 
   /**
-   * Migration 0025 — record an in-person pickup.
+   * record an in-person pickup.
    *
    * Only valid for PICKUP-method requests in READY_FOR_PICKUP state.
    * Transitions to DELIVERED (terminal) and stamps pickupCompletedAt
@@ -1649,7 +1649,7 @@ export class ShopperRequestService {
         status,
       });
     }
-    // Migration 0027 — PICKUP is zero-cost so the gate is normally a
+    // PICKUP is zero-cost so the gate is normally a
     // no-op; defence-in-depth in case admin manually charged shipping.
     this.assertShippingPaid(row, "mark_picked_up");
     const now = new Date();
@@ -1919,7 +1919,7 @@ export class ShopperRequestService {
   }
 
   // =========================================================================
-  // Migration 0023 — wire-transfer / ID-verification state machine.
+  // wire-transfer / ID-verification state machine.
   //
   // Lifecycle (only relevant to paymentMethod = WIRE rows):
   //
@@ -2038,7 +2038,7 @@ export class ShopperRequestService {
     requestId: string;
     actorId: string;
     /**
-     * Migration 0026 — optional per-request bank instructions. When
+     * optional per-request bank instructions. When
      * present, persisted alongside the approval and used by the
      * buyer-facing thread response in preference to the global config.
      * The Zod schema in the controller guarantees `accountNumber` is

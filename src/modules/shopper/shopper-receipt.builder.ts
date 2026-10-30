@@ -81,7 +81,7 @@ export interface ReceiptBreakdown {
   parcelWeightOz: number | null;
 
   /**
-   * Migration 0017 — freight breakdown. `freightRateCentsPerLb` is the
+   * freight breakdown. `freightRateCentsPerLb` is the
    * snapshot of the per-method rate used at save time; together with
    * `shippingCalculatedCents` it lets the receipt show
    * `weight × rate = calc · charged X` so the buyer sees any operator

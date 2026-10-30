@@ -165,7 +165,7 @@ export class PsnController {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 0024 — per-PSN chat (vendor side)
+  // per-PSN chat (vendor side)
   //
   // `psns.get` already enforces tenant scoping (only the owning vendor
   // can resolve the PSN), so calling it before each message action gives
@@ -209,7 +209,7 @@ export class PsnController {
   }
 
   /**
-   * Migration 0024 — presign an R2 PUT for a vendor-side chat
+   * presign an R2 PUT for a vendor-side chat
    * attachment. The vendor must own the PSN — psns.get() throws 404 if
    * not. Same MIME allow-list / size cap as the shopper presign route;
    * key prefix is scoped to `psn/<id>/vendor` so forensic audits can

@@ -23,7 +23,7 @@
  *      the same unit means no float/cast bookkeeping at the render
  *      layer.
  *
- *   3. Points are Decimal on the DB (migration 0040) but arrive here
+ *   3. Points are Decimal on the DB but arrive here
  *      as `number` after Prisma's Decimal-to-string-to-number round-
  *      trip. That's fine for bucket-boundary comparisons because
  *      the resolver only checks inequality — no accumulation, no

@@ -31,7 +31,7 @@ import { IntegrationOrderService } from "../integration/integration-order.servic
 
 import { AdminOrderService } from "./admin-order.service";
 
-// Migration 0039 — ADMIN role reference.
+// ADMIN role reference.
 const ROLE_ADMIN = "ADMIN" as Role;
 
 const forceCancelSchema = z.object({
@@ -79,7 +79,7 @@ const listSchema = z.object({
 type ListInput = z.infer<typeof listSchema>;
 
 @Controller({ path: "admin/orders", version: "1" })
-// Migration 0039 — ADMIN added at class level. Default @RequiresPage
+// ADMIN added at class level. Default @RequiresPage
 // is `admin.orders.write`; GETs override to `admin.orders.read` so a
 // SUPER_ADMIN can grant read-only order queue access without also
 // granting pick/pack/ship. `force-cancel` opts BACK OUT of ADMIN at
@@ -89,7 +89,7 @@ type ListInput = z.infer<typeof listSchema>;
 export class AdminOrderController {
   constructor(
     private readonly orders: AdminOrderService,
-    // Migration 0038 — resolving a storefront ON_HOLD order re-runs allocation
+    // resolving a storefront ON_HOLD order re-runs allocation
     // (re-maps SKUs, re-checks funds, reserves + debits) on the held row.
     private readonly integrationOrders: IntegrationOrderService,
   ) {}
@@ -100,7 +100,7 @@ export class AdminOrderController {
     return this.orders.list(q);
   }
 
-  // Migration 0038 — retry allocation on a held storefront order. Use after the
+  // retry allocation on a held storefront order. Use after the
   // blocker is fixed (wallet topped up, SKU received, address corrected). Idempotent:
   // a non-held order is a no-op; a still-blocked order stays held with an updated reason.
   @Post(":id/release")
@@ -168,7 +168,7 @@ export class AdminOrderController {
   }
 
   /**
-   * Migration 0037 — terminal hand-off for VENDOR_CARRIER orders.
+   * terminal hand-off for VENDOR_CARRIER orders.
    *
    * Replaces the `ship` action for orders the vendor brought their
    * own label for. There's no Shippo label to print, no carrier
@@ -198,7 +198,7 @@ export class AdminOrderController {
    * that (PICKING and beyond) requires the return flow because real-world
    * activity has happened.
    */
-  // Migration 0039 — force-cancel refunds the wallet in the same
+  // force-cancel refunds the wallet in the same
   // transaction as the inventory release. Method-level @Roles
   // OVERRIDES the class-level list, dropping ADMIN + WAREHOUSE_OPERATOR
   // so this is only ever reachable by FINANCE_ADMIN or SUPER_ADMIN.
@@ -215,7 +215,7 @@ export class AdminOrderController {
     return this.orders.forceCancel(id, user.sub, body.reason);
   }
 
-  // Migration 0074 — reject a vendor's pending cancellation request. The
+  // reject a vendor's pending cancellation request. The
   // order keeps moving through fulfillment; the vendor is notified.
   // (Approving a request is just force-cancel above, which now also
   // resolves the pending request and refunds the full net spend.)

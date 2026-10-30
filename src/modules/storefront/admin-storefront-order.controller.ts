@@ -1,5 +1,5 @@
 /**
- * Admin view + actions on storefront orders (Migration 0059) — records across
+ * Admin view + actions on storefront orders — records across
  * all vendors, plus admin-initiated refunds.
  *
  *   GET  /v1/admin/storefront/orders?status=PAID

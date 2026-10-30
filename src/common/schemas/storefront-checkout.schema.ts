@@ -1,5 +1,5 @@
 /**
- * Public storefront checkout schemas (Migration 0059).
+ * Public storefront checkout schemas.
  */
 import { z } from "zod";
 
@@ -52,7 +52,7 @@ export const checkoutSchema = z.object({
 });
 export type CheckoutInput = z.infer<typeof checkoutSchema>;
 
-// Cross-vendor cart (Phase 2): shared buyer + address, one group per store.
+// Cross-vendor cart: shared buyer + address, one group per store.
 // The whole cart is ONE physical delivery from the USA Errands warehouse, so the
 // buyer picks a single delivery speed and is charged shipping ONCE for the cart
 // (shipping + fulfillment go to USA Errands; each vendor still receives only

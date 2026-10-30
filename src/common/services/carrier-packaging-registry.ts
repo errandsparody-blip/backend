@@ -10,7 +10,7 @@
  * these; they are code-controlled.
  *
  * Custom preset packaging that the admin creates lives in
- * `packaging_options` (migration 0043) and is edited via
+ * `packaging_options` and is edited via
  * PackagingLibraryService — that IS admin-editable.
  *
  * When an operator picks a carrier template at pack time, the

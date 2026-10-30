@@ -1,6 +1,6 @@
 /**
  * Held-order sweep — hourly safety net for storefront orders parked in
- * ON_HOLD waiting on something that has since arrived (Migration 0038).
+ * ON_HOLD waiting on something that has since arrived.
  *
  * Two self-healing reasons are swept:
  *   - INSUFFICIENT_FUNDS: the Stripe deposit webhook already releases funded

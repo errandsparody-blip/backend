@@ -130,7 +130,7 @@ export class ShopperController {
     requestId: string;
     reference: string;
     threadUrl: string;
-    // Migration 0023 — empty string when the buyer was routed to WIRE.
+    // empty string when the buyer was routed to WIRE.
     // The frontend already refuses to navigate to anything not starting
     // with https://, so an empty string keeps it on /shopper/r/<token>.
     payUrl: string;
@@ -145,7 +145,7 @@ export class ShopperController {
 
     const cfg = loadConfig();
     const commissionBps = await this.loadCommissionBps();
-    // Migration 0023 — load the wire threshold AFTER computing the items
+    // load the wire threshold AFTER computing the items
     // subtotal (we'd need to validate the lines first either way; doing
     // the lookup up here keeps the create-call atomic).
     const wireThresholdCents = await loadWireThresholdCents(this.prisma, this.logger);
@@ -169,7 +169,7 @@ export class ShopperController {
       taxRates[effectiveTaxState] ??
       (effectiveTaxState === FALLBACK_WAREHOUSE_STATE ? FALLBACK_TAX_BPS : 0);
 
-    // Migration 0023 — decide the rail BEFORE creating the row so the
+    // decide the rail BEFORE creating the row so the
     // initial status is correct and we don't have to mutate-after-create
     // (which would race with the chat-message insert below).
     //
@@ -427,7 +427,7 @@ export class ShopperController {
       idCheckPassed &&
       bankRevealStatuses.has(request.status as string);
 
-    // Migration 0026 — prefer the per-request bank instructions chosen
+    // prefer the per-request bank instructions chosen
     // by the admin at approval time. If null we fall back to the global
     // config row so historical requests created before this column was
     // populated keep working unchanged.
@@ -488,7 +488,7 @@ export class ShopperController {
     const paymentMethodsFull = shouldRevealBank
       ? await this.loadActivePaymentMethods()
       : [];
-    // Migration 0058 — once the buyer has committed to a method, the choice is
+    // once the buyer has committed to a method, the choice is
     // hard-locked. Collapse the offered list to just that method so the client
     // can't render a picker that lets them switch. `committedPaymentMethodCode`
     // is also surfaced below so the UI shows the locked state even if the
@@ -524,7 +524,7 @@ export class ShopperController {
         // isn't due yet. Details are intentionally NOT included. When the
         // buyer has committed, this is collapsed to the single locked method.
         paymentMethods,
-        // Migration 0058 — the committed (locked) method + when it happened.
+        // the committed (locked) method + when it happened.
         // Null until the buyer confirms. Drives the buyer UI's locked state
         // and tells the buyer they can no longer switch.
         committedPaymentMethodCode: request.committedPaymentMethodCode,
@@ -716,7 +716,7 @@ export class ShopperController {
   }
 
   // ---------------------------------------------------------------------------
-  // Migration 0023 — wire-track buyer endpoints
+  // wire-track buyer endpoints
   // ---------------------------------------------------------------------------
 
   /**
@@ -837,12 +837,6 @@ export class ShopperController {
         code: "shopper_wire_not_applicable",
       });
     }
-    // if (request.idVerificationStatus !== "APPROVED") {
-    //   throw new BadRequestException({
-    //     message: "ID must be approved before uploading wire proof.",
-    //     code: "shopper_wire_id_not_verified",
-    //   });
-    // }
     const allowed = ["QUOTE_SENT", "AWAITING_WIRE_PAYMENT", "WIRE_PROOF_UPLOADED", "WIRE_UNDER_REVIEW"];
     if (!allowed.includes(request.status as string)) {
       throw new BadRequestException({
@@ -1371,7 +1365,7 @@ export class ShopperController {
       status: row.status,
       buyerEmail: row.buyerEmail,
       buyerName: row.buyerName,
-      // Migration 0023 — wire-track UI state. The buyer thread needs to
+      // wire-track UI state. The buyer thread needs to
       // know which rail this is + how far through the ID/wire flow they
       // are; the bank-instructions payload is emitted SEPARATELY in
       // getThread() so we can gate it on idVerificationStatus + status.
@@ -1406,12 +1400,12 @@ export class ShopperController {
       shippingCostCents: row.shippingCostCents,
       followupAmountCents: row.followupAmountCents,
       followupResolvedAt: row.followupResolvedAt,
-      // Migration 0016 — parcel info shown to buyer alongside shipping cost.
+      // parcel info shown to buyer alongside shipping cost.
       parcelLengthIn: row.parcelLengthIn,
       parcelWidthIn: row.parcelWidthIn,
       parcelHeightIn: row.parcelHeightIn,
       parcelWeightOz: row.parcelWeightOz,
-      // Migration 0017 — freight rate snapshot + system-calculated cost.
+      // freight rate snapshot + system-calculated cost.
       // Both nullable until admin saves shipping for the first time.
       freightRateCentsPerLb: row.freightRateCentsPerLb,
       shippingCalculatedCents: row.shippingCalculatedCents,

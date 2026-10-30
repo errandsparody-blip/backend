@@ -1,5 +1,5 @@
 /**
- * Payout-account connection schemas (Migration 0059).
+ * Payout-account connection schemas.
  */
 import { z } from "zod";
 

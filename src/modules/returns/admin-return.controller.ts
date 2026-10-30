@@ -25,7 +25,7 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
 
-// Migration 0039 — ADMIN role reference.
+// ADMIN role reference.
 const ROLE_ADMIN = "ADMIN" as Role;
 import {
   finalizeReturnSchema,
@@ -44,7 +44,7 @@ import { R2Service } from "../integrations/r2/r2.service";
 import { ReturnService } from "./return.service";
 
 @Controller({ path: "admin/returns", version: "1" })
-// Migration 0039 — ADMIN added. Default is write; GET overrides to
+// ADMIN added. Default is write; GET overrides to
 // read. `inspect` triggers refunds to the vendor wallet, but stays
 // grantable to ADMIN via config since it doesn't move money OUT of
 // the platform — only back to the vendor. SUPER_ADMIN can revoke

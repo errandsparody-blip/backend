@@ -20,7 +20,7 @@ export const ShopperRequestStatusValues = [
   "AWAITING_INTAKE_PAYMENT",
   "PAID",
   "PROCURING",
-  // Migration 0021 — Phase 2 shopper redesign. Items have been purchased
+  // Phase 2 shopper redesign. Items have been purchased
   // and we're waiting for them to physically land at the warehouse before
   // shipping onward to the buyer.
   "AWAITING_DELIVERY",
@@ -30,7 +30,7 @@ export const ShopperRequestStatusValues = [
   "DELIVERED",
   "CANCELLED",
   "REFUNDED",
-  // Migration 0023a — wire-transfer / ID-verification track. Statuses are
+  // wire-transfer / ID-verification track. Statuses are
   // listed in lifecycle order so a glance at the enum tells the story.
   "AWAITING_ID_VERIFICATION",
   "ID_UNDER_REVIEW",
@@ -43,11 +43,11 @@ export const ShopperRequestStatusValues = [
 ] as const;
 export type ShopperRequestStatus = (typeof ShopperRequestStatusValues)[number];
 
-// Migration 0023 — payment rail. Server-derived; never accept from client.
+// payment rail. Server-derived; never accept from client.
 export const ShopperPaymentMethodValues = ["STRIPE", "WIRE"] as const;
 export type ShopperPaymentMethod = (typeof ShopperPaymentMethodValues)[number];
 
-// Migration 0023 — ID-verification lifecycle. Only meaningful on WIRE
+// ID-verification lifecycle. Only meaningful on WIRE
 // requests; STRIPE requests stay at NONE forever.
 export const ShopperIdVerificationStatusValues = [
   "NONE",
@@ -61,7 +61,7 @@ export type ShopperIdVerificationStatus =
 
 export const ShopperShippingMethodValues = [
   "PLATFORM_FREIGHT",
-  // Migration 0025a — buyer's own carrier label.
+  // buyer's own carrier label.
   "BUYER_FREIGHT",
   "BUYER_FORWARDER",
   "PICKUP",
@@ -101,7 +101,7 @@ const emailField = z
   .refine((v) => !v.includes(".."), "Email cannot contain consecutive dots.")
   .refine((v) => STRICT_EMAIL_RE.test(v), "Looks like a typo — double-check the email.");
 
-// Migration 0023 — buyer phone, required at intake. Loose digit/`+` check;
+// buyer phone, required at intake. Loose digit/`+` check;
 // we don't enforce E.164 because international numbers vary too much and a
 // hard parse would lock out legitimate buyers. Operators eyeball the
 // number anyway during the ID-review step for high-value (wire) requests.
@@ -176,7 +176,7 @@ export const SHOPPER_REFERENCE_PATTERN = /^SHP-[A-Z0-9-]{3,32}$/;
 
 export const createShopperRequestSchema = z.object({
   buyerEmail: emailField,
-  // Migration 0023 — name + phone are required for new intake. They were
+  // name + phone are required for new intake. They were
   // optional in v1; the wire-transfer / ID-verification track tightened
   // the contract because we need a real identity attached to every
   // request that might end up on the WIRE rail.
@@ -289,7 +289,7 @@ export const adminUpdateShopperLineSchema = z.object({
   procurementStatus: z.enum(ShopperLineProcurementStatusValues).optional(),
   procurementNotes: z.string().trim().max(2000).optional(),
   productTitle: z.string().trim().max(200).optional(),
-  // Migration 0016 — actual per-line weight (oz). Capped at 5,000 lb
+  // actual per-line weight (oz). Capped at 5,000 lb
   // (80,000 oz) — way above any realistic single-line weight, but
   // protects against typos like "8000" being read as 8000 lb when the
   // user meant 80.
@@ -313,7 +313,7 @@ const dim = () =>
   z.number().nonnegative("Cannot be negative.").max(200, "Too large.");
 
 export const adminSetShopperShippingSchema = z.object({
-  // Migration 0017 — `shippingCostCents` is now derived by default from
+  // `shippingCostCents` is now derived by default from
   // (parcel weight × method's per-lb rate) but admin can override (real-
   // world surcharges, partner pricing, etc.). The `useCalculated` flag
   // controls which path the service takes:
@@ -330,7 +330,7 @@ export const adminSetShopperShippingSchema = z.object({
   // — admin can set it before, after, or alongside shipping. Reconciled
   // against estimatedTaxCents to compute the buyer follow-up.
   actualTaxCents: cents(2_500_000, "Sales tax").nullable().optional(),
-  // Migration 0016 — packed parcel dimensions and total weight. All
+  // packed parcel dimensions and total weight. All
   // optional so admin can save shipping cost without them, then come
   // back once the box is sealed and weighed.
   parcelLengthIn: dim().nullable().optional(),
@@ -342,7 +342,7 @@ export const adminSetShopperShippingSchema = z.object({
     .max(80_000, "Weight too large.")
     .nullable()
     .optional(),
-  // Migration 0021 — admin can update the destination address from the
+  // admin can update the destination address from the
   // shipping panel. We accept the same shape used at intake, plus a `null`
   // shortcut to clear (rarely needed; mostly here for symmetry).
   shippingAddress: shopperShippingAddressSchema.nullable().optional(),
@@ -357,7 +357,7 @@ export const adminSetShopperShippingSchema = z.object({
     .nonnegative("Rate cannot be negative.")
     .max(100_000, "Rate is too large (max $1,000/lb).")
     .optional(),
-  // Migration 0025 — buyer-supplied shipping label (R2 URL) when the
+  // buyer-supplied shipping label (R2 URL) when the
   // shipping method is BUYER_FREIGHT. We don't price freight in that
   // mode; the buyer's label is the label we slap on the box.
   buyerLabelUrl: z
@@ -366,7 +366,7 @@ export const adminSetShopperShippingSchema = z.object({
     .max(2048, "URL too long.")
     .nullable()
     .optional(),
-  // Migration 0025 — pickup window when shippingMethod = PICKUP. We
+  // pickup window when shippingMethod = PICKUP. We
   // capture the person who will pick up (name only; no ID per product
   // decision) plus the scheduled date/time so the warehouse can have
   // it ready.
@@ -417,7 +417,7 @@ export const adminShipShopperSchema = z.object({
 export type AdminShipShopperInput = z.infer<typeof adminShipShopperSchema>;
 
 // ---------------------------------------------------------------------------
-// Migration 0025 — release with buyer-supplied label (BUYER_FREIGHT mode)
+// release with buyer-supplied label (BUYER_FREIGHT mode)
 // ---------------------------------------------------------------------------
 // Admin clicks "Release with buyer label" once the package is ready and
 // the buyer's label is on it. Tracking + carrier come from the buyer's
@@ -432,7 +432,7 @@ export const adminReleaseWithBuyerLabelSchema = z.object({
 export type AdminReleaseWithBuyerLabelInput = z.infer<typeof adminReleaseWithBuyerLabelSchema>;
 
 // ---------------------------------------------------------------------------
-// Migration 0025 — mark picked up (PICKUP mode)
+// mark picked up (PICKUP mode)
 // ---------------------------------------------------------------------------
 // Admin clicks "Mark picked up" after the buyer has physically collected
 // the package from the warehouse. Records the timestamp and transitions
@@ -458,7 +458,7 @@ export const adminCancelShopperSchema = z.object({
 export type AdminCancelShopperInput = z.infer<typeof adminCancelShopperSchema>;
 
 // ---------------------------------------------------------------------------
-// Migration 0023 — buyer ID + wire upload schemas (buyer-side)
+// buyer ID + wire upload schemas (buyer-side)
 // ---------------------------------------------------------------------------
 //
 // Buyer uploads happen in two stages: first call the presign endpoint
@@ -516,10 +516,10 @@ export type SendShopperPaymentInstructionsInput = z.infer<
 >;
 
 // ---------------------------------------------------------------------------
-// Migration 0023 — admin wire / ID review schemas
+// admin wire / ID review schemas
 // ---------------------------------------------------------------------------
 
-// Migration 0026 — per-request bank instructions. Admin can attach a
+// per-request bank instructions. Admin can attach a
 // specific account to wire to at approval time (mirrors the shape of
 // the global `shopper_bank_instructions` config row so the buyer-side
 // renderer can stay one component). Only `accountNumber` is required;
@@ -546,7 +546,7 @@ export type ShopperWireBankInstructions = z.infer<typeof shopperWireBankInstruct
 export const adminApproveShopperIdSchema = z.object({
   // Optional admin note appended to the chat thread when approving.
   note: z.string().trim().max(2000).optional(),
-  // Migration 0026 — admin sends the buyer-facing account number(s)
+  // admin sends the buyer-facing account number(s)
   // alongside the approval. Optional: when omitted, the buyer sees
   // whatever's in the global `shopper_bank_instructions` config row.
   bankInstructions: shopperWireBankInstructionsSchema.optional(),

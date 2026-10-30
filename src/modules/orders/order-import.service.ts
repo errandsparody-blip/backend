@@ -1,5 +1,5 @@
 /**
- * OrderImportService — vendor CSV bulk import (Migration 0046).
+ * OrderImportService — vendor CSV bulk import.
  *
  * Parses a CSV upload from the vendor dashboard, validates each row
  * against a strict header schema, and creates an order per row via

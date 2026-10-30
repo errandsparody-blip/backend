@@ -1,5 +1,5 @@
 /**
- * StorefrontReturnService — buyer self-service returns (Migration 0061).
+ * StorefrontReturnService — buyer self-service returns.
  *
  * A signed-in buyer requests a return on a shipped/delivered order; an admin
  * approves (which issues a refund via StorefrontOrderService) or rejects. One
