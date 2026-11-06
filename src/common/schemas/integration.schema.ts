@@ -70,6 +70,11 @@ export const integrationOrderLineSchema = z.object({
   // The vendor's USA Errands product code — resolved to an active SKU at ingest.
   sku: z.string().trim().min(1).max(80),
   quantity: z.number().int().positive().max(10_000),
+  // Optional product name/title exactly as shown on the storefront. We don't
+  // use it for matching (sku is the anchor) — it's carried through so that an
+  // order held for UNMAPPED_SKU can display a human-readable line ("Black Tee
+  // — Medium") in the admin while we still have no product of our own to name.
+  name: optionalString(200),
 });
 export type IntegrationOrderLine = z.infer<typeof integrationOrderLineSchema>;
 

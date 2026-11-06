@@ -269,14 +269,18 @@ describe("IntegrationOrderService.ingest (v2)", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Stock-hold auto-release (fired when inventory lands via PSN receive).
+  // Resolvable-hold auto-release — fired when the missing product/stock lands
+  // (PSN receive, product create/update, or the hourly sweep). Covers BOTH
+  // UNMAPPED_SKU (product created or storeSku mapped) and INSUFFICIENT_STOCK
+  // (inventory received). The two reasons depend on different products/SKUs,
+  // so one order still stuck must not stop the others (contrast with the funds
+  // sweep, which breaks on the first failure because all funds holds share one
+  // wallet).
   // ---------------------------------------------------------------------------
-  describe("releaseStockHoldsForVendor", () => {
-    it("re-checks only INSUFFICIENT_STOCK holds and releases each independently", async () => {
+  describe("releaseResolvableHoldsForVendor", () => {
+    it("re-checks both UNMAPPED_SKU and INSUFFICIENT_STOCK holds, releasing each independently", async () => {
       const findMany = jest.fn(async () => [{ id: "o1" }, { id: "o2" }, { id: "o3" }]);
-      // o2 is still short on a DIFFERENT sku — it must NOT stop o3 from
-      // releasing (contrast with the funds sweep, which breaks on the first
-      // failure because all funds holds share one wallet).
+      // o2 is still blocked (a different SKU) — it must NOT stop o3 releasing.
       const releaseHeldOrder = jest
         .fn()
         .mockResolvedValueOnce({ released: true, status: "PENDING_PACKING", holdReason: null })
@@ -290,11 +294,15 @@ describe("IntegrationOrderService.ingest (v2)", () => {
         releaseHeldOrder,
       });
 
-      const released = await svc.releaseStockHoldsForVendor(VENDOR);
+      const released = await svc.releaseResolvableHoldsForVendor(VENDOR);
 
       expect(findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { vendorId: VENDOR, status: "ON_HOLD", holdReason: "INSUFFICIENT_STOCK" },
+          where: {
+            vendorId: VENDOR,
+            status: "ON_HOLD",
+            holdReason: { in: ["UNMAPPED_SKU", "INSUFFICIENT_STOCK"] },
+          },
         }),
       );
       // All three were attempted — the loop did NOT break after o2 failed.
@@ -316,8 +324,35 @@ describe("IntegrationOrderService.ingest (v2)", () => {
         releaseHeldOrder,
       });
 
-      const released = await svc.releaseStockHoldsForVendor(VENDOR);
+      const released = await svc.releaseResolvableHoldsForVendor(VENDOR);
       expect(releaseHeldOrder).toHaveBeenCalledTimes(2);
+      expect(released).toBe(1);
+    });
+
+    it("releaseStockHoldsForVendor alias delegates to the broadened method", async () => {
+      const findMany = jest.fn(async () => [{ id: "o1" }]);
+      const releaseHeldOrder = jest
+        .fn()
+        .mockResolvedValueOnce({ released: true, status: "PENDING_PACKING", holdReason: null });
+
+      const svc = Object.create(IntegrationOrderService.prototype) as IntegrationOrderService;
+      Object.assign(svc, {
+        prisma: { order: { findMany } },
+        logger: { warn: jest.fn(), log: jest.fn() },
+        releaseHeldOrder,
+      });
+
+      const released = await svc.releaseStockHoldsForVendor(VENDOR);
+      // Same broadened filter as the canonical method.
+      expect(findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            vendorId: VENDOR,
+            status: "ON_HOLD",
+            holdReason: { in: ["UNMAPPED_SKU", "INSUFFICIENT_STOCK"] },
+          },
+        }),
+      );
       expect(released).toBe(1);
     });
   });

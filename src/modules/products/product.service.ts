@@ -24,6 +24,7 @@ import type {
   UpdateProductInput,
 } from "../../common/schemas/product.schema";
 import { AuditService } from "../audit/audit.service";
+import { IntegrationOrderService } from "../integration/integration-order.service";
 
 export interface PublicProduct {
   id: string;
@@ -69,7 +70,24 @@ export class ProductService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly integrationOrders: IntegrationOrderService,
   ) {}
+
+  /**
+   * Fire-and-forget: a storefront order can arrive before the product it
+   * references exists, parking ON_HOLD as UNMAPPED_SKU. The instant the
+   * vendor creates that product (or maps its storeSku), those holds become
+   * resolvable, so we re-run their allocation right away rather than waiting
+   * for the hourly sweep. Wrapped so a release hiccup never fails the
+   * product write that triggered it; the sweep is the backstop.
+   */
+  private releaseResolvableHolds(vendorId: string): void {
+    this.integrationOrders
+      .releaseResolvableHoldsForVendor(vendorId)
+      .catch(() => {
+        // Non-fatal — the hourly held-order sweep retries.
+      });
+  }
 
   async create(vendorId: string, actorId: string, input: CreateProductInput): Promise<PublicProduct> {
     try {
@@ -114,6 +132,9 @@ export class ProductService {
         resourceId: product.id,
         afterState: { code: product.code, name: product.name },
       });
+      // A new product can satisfy storefront orders parked as UNMAPPED_SKU
+      // (matched on code or storeSku). Release them now, not next sweep.
+      this.releaseResolvableHolds(vendorId);
       return this.toPublic(product);
     } catch (e) {
       // Prisma P2002 = unique constraint violation. Distinguish the two
@@ -310,6 +331,15 @@ export class ProductService {
       beforeState: this.diffSnapshot(before),
       afterState: this.diffSnapshot(updated),
     });
+    // Mapping a storeSku can resolve UNMAPPED_SKU holds whose storefront
+    // SKU now points at this product. Only bother when it actually changed.
+    const beforeStoreSku =
+      (before as unknown as { storeSku?: string | null }).storeSku ?? null;
+    const afterStoreSku =
+      (updated as unknown as { storeSku?: string | null }).storeSku ?? null;
+    if (afterStoreSku !== beforeStoreSku && afterStoreSku) {
+      this.releaseResolvableHolds(vendorId);
+    }
     // Always locked from the vendor's POV — the only fields this PATCH
     // accepted are `imageUrl` / `status`, which are intentionally outside
     // the lockable set. Returning `locked: true` keeps the form rendered

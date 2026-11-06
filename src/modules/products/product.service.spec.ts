@@ -15,6 +15,7 @@ import { Test, type TestingModule } from "@nestjs/testing";
 
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
+import { IntegrationOrderService } from "../integration/integration-order.service";
 
 import { ProductService } from "./product.service";
 
@@ -65,12 +66,16 @@ class FakePrisma {
       return row;
     },
     findFirst: async ({ where }: { where: { id?: string; vendorId?: string; status?: string } }) => {
-      return this.rows.find(
+      const hit = this.rows.find(
         (r) =>
           (where.id === undefined || r.id === where.id) &&
           (where.vendorId === undefined || r.vendorId === where.vendorId) &&
           (where.status === undefined || r.status === where.status),
-      ) ?? null;
+      );
+      // Return a COPY so a caller holding this as a "before" snapshot isn't
+      // aliased to the stored row that a subsequent update() mutates in place
+      // — real Prisma hands back distinct objects per query.
+      return hit ? { ...hit } : null;
     },
     findMany: async ({
       where,
@@ -119,6 +124,7 @@ describe("ProductService — tenant isolation (IDOR)", () => {
   let svc: ProductService;
   let prisma: FakePrisma;
   let audit: { log: jest.Mock };
+  let integrationOrders: { releaseResolvableHoldsForVendor: jest.Mock };
 
   const VENDOR_A = "vendor-a";
   const VENDOR_B = "vendor-b";
@@ -144,11 +150,17 @@ describe("ProductService — tenant isolation (IDOR)", () => {
   beforeEach(async () => {
     prisma = new FakePrisma();
     audit = { log: jest.fn() };
+    // Product create/update fires a fire-and-forget hold release; stub it so
+    // the service resolves without a real IntegrationOrderService.
+    integrationOrders = {
+      releaseResolvableHoldsForVendor: jest.fn().mockResolvedValue(0),
+    };
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         ProductService,
         { provide: PrismaService, useValue: prisma },
         { provide: AuditService, useValue: audit },
+        { provide: IntegrationOrderService, useValue: integrationOrders },
       ],
     }).compile();
     svc = moduleRef.get(ProductService);
@@ -221,5 +233,26 @@ describe("ProductService — tenant isolation (IDOR)", () => {
   it("the same vendor cannot register the same product code twice", async () => {
     await svc.create(VENDOR_A, ACTOR_A, validProduct);
     await expect(svc.create(VENDOR_A, ACTOR_A, validProduct)).rejects.toThrow(/already exists/);
+  });
+
+  // -------------------------------------------------------------------------
+  // Auto-release trigger — a new/mapped product unblocks held storefront
+  // orders (UNMAPPED_SKU) for that vendor.
+  // -------------------------------------------------------------------------
+
+  it("create() fires a resolvable-hold release for the vendor", async () => {
+    await svc.create(VENDOR_A, ACTOR_A, validProduct);
+    expect(
+      integrationOrders.releaseResolvableHoldsForVendor,
+    ).toHaveBeenCalledWith(VENDOR_A);
+  });
+
+  it("mapping a storeSku on update fires a resolvable-hold release", async () => {
+    const p = await svc.create(VENDOR_A, ACTOR_A, validProduct);
+    integrationOrders.releaseResolvableHoldsForVendor.mockClear();
+    await svc.update(VENDOR_A, ACTOR_A, p.id, { storeSku: "STORE-123" });
+    expect(
+      integrationOrders.releaseResolvableHoldsForVendor,
+    ).toHaveBeenCalledWith(VENDOR_A);
   });
 });

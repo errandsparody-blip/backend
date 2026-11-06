@@ -494,24 +494,25 @@ export class AdminPsnService {
     if (result.status === "RECEIVED" || result.status === "PARTIALLY_RECEIVED") {
       await this.referrals.rewardOnFirstPsn(result.vendorId);
 
-      // Auto-release storefront orders parked ON_HOLD for INSUFFICIENT_STOCK
-      // now that this vendor's inventory has landed. Fired AFTER the receive
-      // commits and wrapped so a release hiccup can never undo a completed
-      // receive — the hourly held-order sweep is the backstop either way.
+      // Auto-release storefront orders parked ON_HOLD now that this vendor's
+      // inventory has landed — both INSUFFICIENT_STOCK (stock is here) and
+      // UNMAPPED_SKU (the product the order referenced now exists and maps).
+      // Fired AFTER the receive commits and wrapped so a release hiccup can
+      // never undo a completed receive — the hourly sweep is the backstop.
       try {
-        const released = await this.integrationOrders.releaseStockHoldsForVendor(
+        const released = await this.integrationOrders.releaseResolvableHoldsForVendor(
           result.vendorId,
         );
         if (released > 0) {
           this.logger.log(
             { vendorId: result.vendorId, released, psnId: result.psnId },
-            "Released storefront stock-holds after PSN receive.",
+            "Released storefront holds after PSN receive.",
           );
         }
       } catch (err) {
         this.logger.warn(
           { err, vendorId: result.vendorId },
-          "Post-receive stock-hold release failed (non-fatal).",
+          "Post-receive hold release failed (non-fatal).",
         );
       }
     }

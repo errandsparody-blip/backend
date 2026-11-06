@@ -504,10 +504,28 @@ export class AdminOrderService {
       contains_lithium: false,
     };
 
+    // Held storefront orders carry NO OrderLines (allocation never ran), so
+    // the normal Lines table renders empty and an operator can't see what the
+    // order is even for. Reconstruct a read-only view of the lines from the
+    // stored sourcePayload and resolve each storefront SKU against the
+    // vendor's catalogue so we show the most useful identity we have:
+    //   - mapped to one of our products  → our code + name + variant (the
+    //     INSUFFICIENT_STOCK case, and UNMAPPED orders whose product now
+    //     exists but hasn't restocked yet);
+    //   - no matching product            → the storefront SKU + the name the
+    //     store sent (the UNMAPPED_SKU case, before any product/PSN exists).
+    // Empty for non-held orders — they use the real `lines` relation.
+    const pendingLines = await this.buildPendingLines(order);
+
     return {
       ...order,
       packagingLabel,
       workflowVersion,
+      // Surface the hold reason explicitly (it's a column on the row, but we
+      // name it here so the typed admin client can branch the held-order UI).
+      holdReason:
+        (order as unknown as { holdReason?: string | null }).holdReason ?? null,
+      pendingLines,
       insuranceRequested: addons.insurance_requested,
       signatureRequired: addons.signature_required,
       adultSignatureRequired: addons.adult_signature_required,
@@ -517,6 +535,91 @@ export class AdminOrderService {
       dryIceWeightOz: addons.dry_ice_weight_oz,
       containsLithium: addons.contains_lithium,
     };
+  }
+
+  /**
+   * Reconstruct the line view of a held storefront order from its stored
+   * sourcePayload. Returns [] for any order that isn't ON_HOLD or has no
+   * payload (manual orders, already-released orders). Best-effort: a resolve
+   * failure degrades to the storefront SKU rather than throwing.
+   */
+  private async buildPendingLines(order: {
+    status: string;
+    vendorId: string;
+    sourcePayload?: unknown;
+  }): Promise<
+    Array<{
+      storefrontSku: string;
+      storefrontName: string | null;
+      quantity: number;
+      mapped: boolean;
+      productCode: string | null;
+      productName: string | null;
+      variant: string | null;
+    }>
+  > {
+    if (order.status !== "ON_HOLD") return [];
+    const payload = (order as { sourcePayload?: unknown }).sourcePayload as
+      | { lines?: Array<{ sku?: string; quantity?: number; name?: string }> }
+      | null;
+    const lines = payload?.lines;
+    if (!Array.isArray(lines) || lines.length === 0) return [];
+
+    const codes = Array.from(
+      new Set(lines.map((l) => String(l.sku ?? "").trim()).filter(Boolean)),
+    );
+    // Match a storefront SKU on either our product `code` or the vendor's
+    // mapped `storeSku` — the same two keys the ingestion allocator uses.
+    const products = codes.length
+      ? await this.prisma.product.findMany({
+          where: {
+            vendorId: order.vendorId,
+            OR: [
+              { code: { in: codes } },
+              // storeSku cast — column exists at runtime (migration 0054);
+              // the sandbox Prisma client type may predate it.
+              ...(
+                [{ storeSku: { in: codes } }] as unknown as Prisma.ProductWhereInput[]
+              ),
+            ],
+          },
+          select: { code: true, name: true, variant: true },
+          // include storeSku via cast below
+        })
+      : [];
+
+    const byKey = new Map<
+      string,
+      { code: string; name: string; variant: string }
+    >();
+    for (const p of products) {
+      const prod = p as unknown as {
+        code: string;
+        name: string;
+        variant: string;
+        storeSku?: string | null;
+      };
+      byKey.set(prod.code, prod);
+      if (prod.storeSku) byKey.set(prod.storeSku, prod);
+    }
+
+    return lines.map((l) => {
+      const sku = String(l.sku ?? "").trim();
+      const qty =
+        typeof l.quantity === "number" && l.quantity > 0 ? l.quantity : 0;
+      const match = byKey.get(sku);
+      const name =
+        typeof l.name === "string" && l.name.trim() ? l.name.trim() : null;
+      return {
+        storefrontSku: sku,
+        storefrontName: name,
+        quantity: qty,
+        mapped: !!match,
+        productCode: match?.code ?? null,
+        productName: match?.name ?? null,
+        variant: match?.variant ?? null,
+      };
+    });
   }
 
   // ---------------------------------------------------------------------------

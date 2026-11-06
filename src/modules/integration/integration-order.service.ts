@@ -543,18 +543,31 @@ export class IntegrationOrderService {
   }
 
   /**
-   * Re-check every INSUFFICIENT_STOCK hold for a vendor — invoked after stock
-   * lands (a PSN is received, or an admin tops up a SKU) so queued storefront
-   * orders that were parked waiting for inventory release themselves into
-   * fulfilment. Unlike the funds sweep, holds here depend on DIFFERENT SKUs,
-   * so one order still short on stock must NOT stop the others — we continue
-   * through the whole queue. Best-effort and isolated: any single failure is
-   * logged and skipped, never thrown, so it can be called inline from the
-   * receive flow without risking the receive itself.
+   * Re-check every "resolvable" hold for a vendor — orders parked ON_HOLD for
+   * UNMAPPED_SKU or INSUFFICIENT_STOCK — and release any now fulfillable.
+   *
+   * These two reasons self-heal once the vendor supplies what was missing:
+   *   - UNMAPPED_SKU: the storefront sent a SKU code we had no product for.
+   *     Resolves when the vendor creates the product, or sets its `code` /
+   *     `storeSku` to match the code the store sends (re-run allocation then
+   *     maps the line).
+   *   - INSUFFICIENT_STOCK: the product existed but had no stock. Resolves
+   *     when a PSN is received (or an admin tops up the SKU).
+   *
+   * Invoked inline from the PSN-receive flow and the product create/update
+   * flow, plus the hourly sweep as a backstop. Unlike the funds sweep, holds
+   * here depend on DIFFERENT products/SKUs, so one order still unresolved must
+   * NOT stop the others — we continue through the whole queue. Best-effort and
+   * isolated: any single failure is logged and skipped, never thrown, so it's
+   * safe to call inline without risking the triggering operation.
    */
-  async releaseStockHoldsForVendor(vendorId: string): Promise<number> {
+  async releaseResolvableHoldsForVendor(vendorId: string): Promise<number> {
     const holds = await this.prisma.order.findMany({
-      where: { vendorId, status: "ON_HOLD", holdReason: "INSUFFICIENT_STOCK" },
+      where: {
+        vendorId,
+        status: "ON_HOLD",
+        holdReason: { in: ["UNMAPPED_SKU", "INSUFFICIENT_STOCK"] },
+      },
       select: { id: true },
       orderBy: { createdAt: "asc" }, // oldest first — fairest claim on new stock
     });
@@ -563,12 +576,18 @@ export class IntegrationOrderService {
       try {
         const r = await this.releaseHeldOrder(h.id, null);
         if (r.released) released++;
-        // Do NOT break: the next hold may need a different SKU that IS in stock.
+        // Do NOT break: the next hold may need a different product/SKU that
+        // IS now mapped / in stock.
       } catch (err) {
-        this.logger.warn({ err, orderId: h.id }, "Auto-release of stock hold failed.");
+        this.logger.warn({ err, orderId: h.id }, "Auto-release of resolvable hold failed.");
       }
     }
     return released;
+  }
+
+  /** @deprecated use releaseResolvableHoldsForVendor (now covers UNMAPPED_SKU too). */
+  async releaseStockHoldsForVendor(vendorId: string): Promise<number> {
+    return this.releaseResolvableHoldsForVendor(vendorId);
   }
 
   // ===========================================================================
