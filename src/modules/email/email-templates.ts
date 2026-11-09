@@ -322,7 +322,7 @@ export function orderDeliveredTemplate(args: { orderRef: string; orderId: string
     html: shell({
       eyebrow: "  Order delivered",
       title: `Order ${args.orderRef} was delivered`,
-      bodyHtml: `<p style="margin:0 0 12px 0;">The carrier marked the package delivered. If your customer reports they didn't receive it, open a return within 30 days.</p>`,
+      bodyHtml: `<p style="margin:0 0 12px 0;">The carrier marked the package delivered.</p>`,
       cta: { label: "View order", href: `${cfg.WEB_PUBLIC_URL}/orders/${encodeURIComponent(args.orderId)}` },
     }),
     text:
