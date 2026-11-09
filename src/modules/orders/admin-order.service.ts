@@ -130,6 +130,13 @@ export class AdminOrderService {
       "AWAITING_SHIPPING_SELECTION" as OrderStatus,
       "AWAITING_WALLET_FUNDING" as OrderStatus,
       "SHIPPING_PAID" as OrderStatus,
+      // Held storefront/integration orders. These never allocated, so they
+      // carry no OrderLines (the restock loop is a no-op) and $0 charged (no
+      // refund). Cancelling is the operator's escape hatch for a hold that
+      // can't resolve — e.g. a storefront SKU that will never map. The DB
+      // trigger already permits ON_HOLD -> CANCELLED via its side-state
+      // whitelist (migration 0075).
+      "ON_HOLD" as OrderStatus,
     ];
 
     return this.prisma.$transaction(async (tx): Promise<{ updated: Order; before: { status: OrderStatus; totalChargedCents: number }; vendorId: string; orderNumber: number; refundCents: number }> => {
