@@ -6,6 +6,7 @@
 import { Injectable } from "@nestjs/common";
 import type { LedgerEntry, LedgerEntryType, Prisma } from "@prisma/client";
 
+import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
 
 export interface PublicLedgerEntry {
@@ -16,6 +17,13 @@ export interface PublicLedgerEntry {
   description: string;
   referenceType: string | null;
   referenceId: string | null;
+  /**
+   * Human order reference (e.g. "#31356") for entries tagged to an order —
+   * fulfillment and shipping charges especially. Resolved from referenceId at
+   * read time so vendors can tell which order each charge was for; null for
+   * deposits, manual credits, and any entry not tied to an order.
+   */
+  orderRef: string | null;
   createdAt: Date;
 }
 
@@ -47,7 +55,8 @@ export class LedgerService {
       const next = items.pop();
       nextCursor = next?.id ?? null;
     }
-    return { items: items.map((e) => this.toPublic(e)), nextCursor };
+    const refs = await this.resolveOrderRefs(items);
+    return { items: items.map((e) => this.toPublic(e, refs)), nextCursor };
   }
 
   // ---------------------------------------------------------------------------
@@ -113,6 +122,8 @@ export class LedgerService {
       else chargesCents += e.amountCents;
     }
 
+    const refs = await this.resolveOrderRefs(entries);
+
     return {
       month,
       windowStart: start.toISOString(),
@@ -124,11 +135,50 @@ export class LedgerService {
       refundsCents,         // positive (cents refunded)
       entryCount: entries.length,
       byType,
-      entries: entries.map((e) => this.toPublic(e)),
+      entries: entries.map((e) => this.toPublic(e, refs)),
     };
   }
 
-  private toPublic(e: LedgerEntry): PublicLedgerEntry {
+  /**
+   * Batch-resolve the human order reference for every order-tagged entry in
+   * the set. One query, keyed by the order id already stored on each entry's
+   * referenceId. Entries that aren't order-tagged (deposits, manual credits)
+   * are simply absent from the map. Kept read-only — the stored ledger row is
+   * never mutated; the ref is attached in the public shape only.
+   */
+  private async resolveOrderRefs(
+    entries: Array<{ referenceType: string | null; referenceId: string | null }>,
+  ): Promise<Map<string, string>> {
+    const orderIds = Array.from(
+      new Set(
+        entries
+          .filter((e) => e.referenceType === "order" && !!e.referenceId)
+          .map((e) => e.referenceId as string),
+      ),
+    );
+    if (orderIds.length === 0) return new Map();
+    const orders = await this.prisma.order.findMany({
+      where: { id: { in: orderIds } },
+      select: { id: true, orderNumber: true },
+    });
+    const map = new Map<string, string>();
+    for (const o of orders) map.set(o.id, formatOrderRef(o.orderNumber));
+    return map;
+  }
+
+  private toPublic(e: LedgerEntry, refs?: Map<string, string>): PublicLedgerEntry {
+    const orderRef =
+      e.referenceType === "order" && e.referenceId
+        ? refs?.get(e.referenceId) ?? null
+        : null;
+    // Surface the order number inline in the description too, so it's visible
+    // wherever the raw description is shown (statement PDF/export, older web
+    // builds) — not only where a client reads the structured orderRef field.
+    // Idempotent: never double-appends if the ref is already present.
+    const description =
+      orderRef && !e.description.includes(orderRef)
+        ? `${e.description} · Order ${orderRef}`
+        : e.description;
     return {
       id: e.id,
       type: e.type,
@@ -138,9 +188,10 @@ export class LedgerService {
       // ever return vendor rows, which always carry a snapshot, but TS
       // can't see that — coerce null to 0 for the public shape.
       balanceAfterCents: e.balanceAfterCents ?? 0,
-      description: e.description,
+      description,
       referenceType: e.referenceType,
       referenceId: e.referenceId,
+      orderRef,
       createdAt: e.createdAt,
     };
   }

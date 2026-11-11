@@ -180,3 +180,58 @@ describe("createOrderSchema — label add-on defaults", () => {
     }
   });
 });
+
+describe("createOrderSchema — recipient requirements per fulfillment mode", () => {
+  const lines = [{ skuId: "UER-ABC-STD", quantity: 1 }];
+
+  it("PLATFORM_SHIP requires a full, valid address", () => {
+    const r = createOrderSchema.safeParse({
+      recipient: { recipientName: "Jane Buyer" }, // no address
+      lines,
+      fulfillmentMode: "PLATFORM_SHIP",
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      // The strict re-validation surfaces issues under the recipient.* path.
+      expect(
+        r.error.issues.some((i) => i.path[0] === "recipient"),
+      ).toBe(true);
+    }
+  });
+
+  it("VENDOR_CARRIER accepts a name-only recipient when a label is supplied", () => {
+    const r = createOrderSchema.safeParse({
+      recipient: { recipientName: "Jane Buyer" }, // no shipping address
+      lines,
+      fulfillmentMode: "VENDOR_CARRIER",
+      vendorCarrier: { vendorLabelUrl: "https://example.com/label.pdf" },
+    });
+    expect(r.success).toBe(true);
+    if (r.success) {
+      expect(r.data.recipient.recipientName).toBe("Jane Buyer");
+      expect(r.data.recipient.shipAddressLine1).toBeUndefined();
+    }
+  });
+
+  it("VENDOR_CARRIER still needs a label OR carrier+tracking", () => {
+    const r = createOrderSchema.safeParse({
+      recipient: { recipientName: "Jane Buyer" },
+      lines,
+      fulfillmentMode: "VENDOR_CARRIER",
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.path.includes("vendorCarrier"))).toBe(true);
+    }
+  });
+
+  it("VENDOR_CARRIER still requires at least a recipient name", () => {
+    const r = createOrderSchema.safeParse({
+      recipient: { recipientName: "" },
+      lines,
+      fulfillmentMode: "VENDOR_CARRIER",
+      vendorCarrier: { vendorLabelUrl: "https://example.com/label.pdf" },
+    });
+    expect(r.success).toBe(false);
+  });
+});

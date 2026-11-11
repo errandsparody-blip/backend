@@ -31,7 +31,7 @@
  */
 
 import { Injectable } from "@nestjs/common";
-import type { OrderStatus, VendorStatus } from "@prisma/client";
+import { Prisma, type OrderStatus, type VendorStatus } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
 
@@ -111,10 +111,100 @@ export interface SuperAdminSnapshot {
 }
 
 // ---------------------------------------------------------------------------
+// Fee breakdown — platform-wide fulfillment-fee and shipping spend over a
+// date window, bucketed daily / weekly / monthly. Mirrored on the frontend at
+//   usa-errands-web/src/lib/schemas/super-admin-dashboard.ts
+// ---------------------------------------------------------------------------
+
+export type FeeGranularity = "day" | "week" | "month";
+
+export interface FeeBreakdownBucket {
+  /** ISO timestamp of the bucket's start (UTC, truncated to the granularity). */
+  periodStart: string;
+  /** Gross fulfillment fees charged to vendors in this bucket (cents, ≥ 0). */
+  fulfillmentCents: number;
+  /** Gross shipping charged to vendors in this bucket (cents, ≥ 0). */
+  shippingCents: number;
+}
+
+export interface FeeBreakdown {
+  from: string;
+  to: string;
+  granularity: FeeGranularity;
+  buckets: FeeBreakdownBucket[];
+  totals: {
+    fulfillmentCents: number;
+    shippingCents: number;
+  };
+  generatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
 
 @Injectable()
 export class SuperAdminDashboardService {
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Platform-wide fulfillment and shipping spend, bucketed by the given
+   * granularity over [from, to). Reads the append-only ledger (every
+   * fulfillment / shipping charge is a row there), so the numbers match what
+   * vendors see on their own statements. Charges are stored as negative
+   * amounts; we flip the sign so the result is positive spend. Refunds
+   * (type REVERSAL) are a different ledger type and are NOT netted here — this
+   * is gross fees charged, which is what "fulfillment fees made" asks for.
+   */
+  async feeBreakdown(input: {
+    from: Date;
+    to: Date;
+    granularity: FeeGranularity;
+  }): Promise<FeeBreakdown> {
+    // Whitelist the granularity before interpolating it into date_trunc —
+    // never let a raw string reach SQL. (Belt: the type already constrains it.)
+    const unit: FeeGranularity =
+      input.granularity === "week"
+        ? "week"
+        : input.granularity === "month"
+          ? "month"
+          : "day";
+
+    const rows = await this.prisma.$queryRaw<
+      Array<{ bucket: Date; fulfillment_cents: bigint; shipping_cents: bigint }>
+    >(Prisma.sql`
+      SELECT date_trunc(${unit}, created_at) AS bucket,
+             COALESCE(SUM(CASE WHEN type = 'FULFILLMENT' THEN -amount_cents ELSE 0 END), 0)::bigint AS fulfillment_cents,
+             COALESCE(SUM(CASE WHEN type = 'SHIPPING' THEN -amount_cents ELSE 0 END), 0)::bigint AS shipping_cents
+      FROM ledger_entries
+      WHERE type IN ('FULFILLMENT', 'SHIPPING')
+        AND created_at >= ${input.from}
+        AND created_at < ${input.to}
+      GROUP BY bucket
+      ORDER BY bucket ASC
+    `);
+
+    let totalFulfillment = 0;
+    let totalShipping = 0;
+    const buckets: FeeBreakdownBucket[] = rows.map((r) => {
+      const f = Number(r.fulfillment_cents);
+      const s = Number(r.shipping_cents);
+      totalFulfillment += f;
+      totalShipping += s;
+      return {
+        periodStart: new Date(r.bucket).toISOString(),
+        fulfillmentCents: f,
+        shippingCents: s,
+      };
+    });
+
+    return {
+      from: input.from.toISOString(),
+      to: input.to.toISOString(),
+      granularity: unit,
+      buckets,
+      totals: { fulfillmentCents: totalFulfillment, shippingCents: totalShipping },
+      generatedAt: new Date().toISOString(),
+    };
+  }
 
   async snapshot(): Promise<SuperAdminSnapshot> {
     const now = new Date();

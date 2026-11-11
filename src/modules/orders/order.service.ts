@@ -582,15 +582,22 @@ export class OrderService {
     //    Follow-up (not in this phase): the wizard's address step could
     //    render the correction inline with an "Accept suggested" button
     //    so the vendor never gets a submit error at all.
-    const addressValidation = await this.verifyShipAddress({
-      line1: input.recipient.shipAddressLine1,
-      line2: input.recipient.shipAddressLine2,
-      city: input.recipient.shipCity,
-      state: input.recipient.shipState,
-      postalCode: input.recipient.shipPostalCode,
-      country: input.recipient.shipCountry,
-    });
-    if (addressValidation.outcome !== "ACCEPTED") {
+    // VENDOR_CARRIER (own-label) orders have no shipping address to validate —
+    // the vendor's own label carries the destination and USA Errands never
+    // buys a label for them. Skip deliverability validation entirely and mark
+    // the address as SKIPPED (mirrors the storefront vendor-carrier path).
+    const isVendorCarrierMode = input.fulfillmentMode === "VENDOR_CARRIER";
+    const addressValidation = isVendorCarrierMode
+      ? { outcome: "SKIPPED" as const, detail: null, normalized: null }
+      : await this.verifyShipAddress({
+          line1: input.recipient.shipAddressLine1 ?? "",
+          line2: input.recipient.shipAddressLine2,
+          city: input.recipient.shipCity ?? "",
+          state: input.recipient.shipState ?? "",
+          postalCode: input.recipient.shipPostalCode ?? "",
+          country: input.recipient.shipCountry,
+        });
+    if (!isVendorCarrierMode && addressValidation.outcome !== "ACCEPTED") {
       const suggested = addressValidation.normalized
         ? ` Suggested: ${addressValidation.normalized.line1}, ${addressValidation.normalized.city}, ${addressValidation.normalized.state} ${addressValidation.normalized.postalCode}.`
         : "";
@@ -813,11 +820,15 @@ export class OrderService {
           recipientName: input.recipient.recipientName,
           recipientPhone: input.recipient.recipientPhone ?? null,
           recipientEmail: input.recipient.recipientEmail ?? null,
-          shipAddressLine1: input.recipient.shipAddressLine1,
+          // Address columns are NOT NULL. A VENDOR_CARRIER order may omit the
+          // address (name-only recipient) — store empty strings; the vendor's
+          // own label carries the real destination and the warehouse only
+          // picks/packs and hands off.
+          shipAddressLine1: input.recipient.shipAddressLine1 ?? "",
           shipAddressLine2: input.recipient.shipAddressLine2 ?? null,
-          shipCity: input.recipient.shipCity,
-          shipState: input.recipient.shipState,
-          shipPostalCode: input.recipient.shipPostalCode,
+          shipCity: input.recipient.shipCity ?? "",
+          shipState: input.recipient.shipState ?? "",
+          shipPostalCode: input.recipient.shipPostalCode ?? "",
           shipCountry: input.recipient.shipCountry,
           addressValidationStatus: addressValidation.outcome,
           addressValidationDetail: addressValidation.detail

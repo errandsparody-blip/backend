@@ -272,6 +272,36 @@ export const vendorCarrierDetailsSchema = z.object({
 });
 export type VendorCarrierDetails = z.infer<typeof vendorCarrierDetailsSchema>;
 
+// Recipient shape accepted by CREATE. Looser than recipientAddressSchema:
+// only the name is always required. The shipping address is optional because
+// a VENDOR_CARRIER (own-label) order doesn't need one — the vendor's own label
+// already carries the destination, and USA Errands never buys a label or
+// validates deliverability for it. For PLATFORM_SHIP the full address is still
+// required; that's enforced in the createOrderSchema superRefine below by
+// re-validating through the strict recipientAddressSchema.
+export const createRecipientSchema = z.object({
+  recipientName: z
+    .string()
+    .trim()
+    .min(2, "Recipient name is too short.")
+    .max(120)
+    .refine((s) => /\s|[A-Za-z]{3,}/.test(s), "Use a real name (first + last)."),
+  recipientPhone: z
+    .string()
+    .trim()
+    .max(40)
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
+  recipientEmail: emailNullable,
+  shipAddressLine1: z.string().trim().max(120).optional().or(z.literal("").transform(() => undefined)),
+  shipAddressLine2: z.string().trim().max(120).optional().or(z.literal("").transform(() => undefined)),
+  shipCity: z.string().trim().max(80).optional().or(z.literal("").transform(() => undefined)),
+  shipState: z.string().trim().max(40).optional().or(z.literal("").transform(() => undefined)),
+  shipPostalCode: z.string().trim().max(12).optional().or(z.literal("").transform(() => undefined)),
+  shipCountry: shipCountrySchema.default("US"),
+});
+export type CreateRecipientInput = z.infer<typeof createRecipientSchema>;
+
 export const createOrderSchema = z.object({
   externalReference: z
     .string()
@@ -280,7 +310,7 @@ export const createOrderSchema = z.object({
     .max(80)
     .regex(/^[A-Za-z0-9_\-./#]+$/, "Reference can include letters, digits, and -_./#.")
     .optional(),
-  recipient: recipientAddressSchema,
+  recipient: createRecipientSchema,
   lines: z.array(orderLineInputSchema).min(1).max(50),
   // branches the order pipeline. Defaults to
   // PLATFORM_SHIP so existing API clients (older portal builds,
@@ -331,6 +361,24 @@ export const createOrderSchema = z.object({
           "Upload a shipping label, or enter both a carrier name and tracking number.",
         path: ["vendorCarrier"],
       });
+    }
+    // VENDOR_CARRIER needs only a recipient name — no shipping address. The
+    // vendor's own label carries the destination, so we don't require (or
+    // validate) one here.
+  } else {
+    // PLATFORM_SHIP — USA Errands buys the label, so the full, deliverable
+    // address is required. Re-validate the recipient through the strict
+    // address schema and surface any issue under the recipient.* path so the
+    // wizard can highlight the exact field.
+    const strict = recipientAddressSchema.safeParse(data.recipient);
+    if (!strict.success) {
+      for (const issue of strict.error.issues) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: issue.message,
+          path: ["recipient", ...issue.path],
+        });
+      }
     }
   }
 });
