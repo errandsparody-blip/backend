@@ -113,6 +113,46 @@ describe("computeOrderFees", () => {
     expect(r.shippingFeeCents).toBe(550); // default 10%
   });
 
+  describe("vendor flat fee (USA + Canada, migration 0080)", () => {
+    // $2.99 base + $0.99/extra, capped at $10.99 — a production-shaped schedule.
+    const capped: FeeSchedule = {
+      ...SCHEDULE,
+      fulfillment: { baseCents: 299, perAdditionalUnitCents: 99, maxCents: 1099 },
+    };
+    const feeFor = (units: number, flatFee?: { enabled: boolean; feeCents: number; maxUnits: number }) =>
+      computeOrderFees({
+        schedule: capped,
+        totalUnits: units,
+        carrierCostCents: 0,
+        declaredValueCents: 0,
+        insuranceRequested: false,
+        ...(flatFee ? { flatFee } : {}),
+      }).fulfillmentFeeCents;
+
+    const flat = { enabled: true, feeCents: 500, maxUnits: 10 };
+
+    it("charges the flat fee within the unit limit", () => {
+      expect(feeFor(1, flat)).toBe(500);
+      expect(feeFor(10, flat)).toBe(500); // exactly at the limit
+    });
+
+    it("falls back to the schedule's max cap above the unit limit", () => {
+      expect(feeFor(11, flat)).toBe(1099); // over limit → cap, not the flat fee
+      expect(feeFor(50, flat)).toBe(1099);
+    });
+
+    it("ignores the flat fee when disabled (normal schedule applies)", () => {
+      expect(feeFor(1, { enabled: false, feeCents: 500, maxUnits: 10 })).toBe(299);
+      expect(feeFor(3, { enabled: false, feeCents: 500, maxUnits: 10 })).toBe(299 + 2 * 99);
+    });
+
+    it("counts TOTAL units, so a flat fee can be cheaper than per-unit", () => {
+      // 8 units on the schedule = 299 + 7×99 = 992; flat fee of 500 is lower.
+      expect(feeFor(8)).toBe(299 + 7 * 99);
+      expect(feeFor(8, flat)).toBe(500);
+    });
+  });
+
   describe("fulfillment fee cap", () => {
     // Production-shaped schedule: $2.99 base + $0.99/extra, capped at $10.99.
     const capped: FeeSchedule = {

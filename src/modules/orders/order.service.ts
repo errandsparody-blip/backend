@@ -51,6 +51,12 @@ import {
   type OrderFeeBreakdown,
 } from "../../common/order-fees";
 import { PrismaService } from "../../common/prisma.service";
+import {
+  COUNTRY_ROUTING_CONFIG_KEY,
+  toFulfillmentCountry,
+} from "../../common/fulfillment-country";
+import { ConfigFlagService } from "../../common/services/config-flag.service";
+import { readVendorFlatFee } from "../../common/vendor-pricing";
 import type {
   CancelOrderInput,
   RequestCancellationInput,
@@ -262,6 +268,9 @@ export class OrderService {
     // summary reads "USPS Medium Flat Rate Box" rather than
     // "USPS_MediumFlatRateBox1".
     private readonly carrierRegistry: CarrierPackagingRegistryService,
+    // USA + Canada (0077/0078): reads the country-routing flag so a manual
+    // order can be guarded to same-country stock once Canada is live.
+    private readonly configFlags: ConfigFlagService,
   ) {}
 
   // ===========================================================================
@@ -472,6 +481,8 @@ export class OrderService {
       0,
     );
     const schedule = await loadFeeSchedule(this.prisma);
+    // Reflect the vendor's negotiated flat fee in the preview (0080).
+    const flatFee = await readVendorFlatFee(this.prisma, vendorId);
     const fees = computeOrderFees({
       schedule,
       totalUnits,
@@ -480,6 +491,7 @@ export class OrderService {
       // contains only handling + insurance — exactly what the wizard
       // displays as "Fulfillment cost".
       carrierCostCents: 0,
+      ...(flatFee ? { flatFee } : {}),
       declaredValueCents,
       insuranceRequested: input.insuranceRequested ?? false,
     });
@@ -636,6 +648,26 @@ export class OrderService {
     // 3. Resolve products (read-only). Reuses the legacy loader.
     const productsByCode = await this.loadProducts(vendorId, input.lines);
 
+    // USA + Canada routing guard (0077/0078). When routing is on, every
+    // selected SKU bucket must belong to the order's destination country — a
+    // Canada order can't ship from USA stock and vice-versa. Off by default
+    // (flag), so this is a no-op until the Canada rollout.
+    if (await this.configFlags.isEnabled(COUNTRY_ROUTING_CONFIG_KEY)) {
+      const wanted = toFulfillmentCountry(input.recipient.shipCountry);
+      const skuIds = Array.from(new Set(input.lines.map((l) => l.skuId)));
+      const rows = await this.prisma.$queryRaw<Array<{ id: string; country: string }>>(
+        Prisma.sql`SELECT id, country FROM skus WHERE id IN (${Prisma.join(skuIds)})`,
+      );
+      const mismatched = rows.filter((r) => toFulfillmentCountry(r.country) !== wanted);
+      if (mismatched.length > 0) {
+        throw new BadRequestException({
+          message: `This is a ${wanted} order, so it can only use ${wanted} stock. Some selected items are stocked in another country.`,
+          code: "order_country_mismatch",
+          skuIds: mismatched.map((r) => r.id),
+        });
+      }
+    }
+
     const totalUnits = input.lines.reduce((s, l) => s + l.quantity, 0);
     const declaredValueCents = input.lines.reduce((s, l) => {
       const sku = productsByCode.bySkuId.get(l.skuId);
@@ -650,13 +682,17 @@ export class OrderService {
 
     // 4. Compute the fulfillment fee. carrierCost=0 by definition in v2
     // (no shipping bought yet). Insurance is deferred to pack time.
+    // USA + Canada (0080): a vendor's negotiated flat fee, when enabled,
+    // overrides the per-unit schedule (within its unit limit).
     const schedule = await loadFeeSchedule(this.prisma);
+    const flatFee = await readVendorFlatFee(this.prisma, vendorId);
     const fees = computeOrderFees({
       schedule,
       totalUnits,
       carrierCostCents: 0,
       declaredValueCents,
       insuranceRequested: false,
+      ...(flatFee ? { flatFee } : {}),
     });
     const fulfillmentFeeCents = fees.fulfillmentFeeCents;
 
@@ -802,6 +838,8 @@ export class OrderService {
           // Tag with the order id so an admin cancel's ledger-sum refund picks
           // up the fulfillment fee. (Was undefined → never refunded.)
           referenceId: orderId,
+          // USA + Canada (0079): tag the entry with the order's country.
+          country: toFulfillmentCountry(input.recipient.shipCountry),
           actorId,
         },
         tx as unknown as Parameters<typeof this.wallet.debit>[1],

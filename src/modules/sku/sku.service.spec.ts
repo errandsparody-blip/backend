@@ -10,7 +10,37 @@
  * are easy to get wrong with mutating Date setters.
  */
 
-import { advanceBillingDate, computeFirstBillingDate } from "./sku.service";
+import { advanceBillingDate, computeFirstBillingDate, SkuService } from "./sku.service";
+
+describe("computeSkuId — country-aware bucket ids (migration 0077)", () => {
+  // computeSkuId is pure (no DB), so a bare instance is enough.
+  const svc = new SkuService(null as never, null as never);
+  const vendor = "11111111-2222-3333-4444-555555555555";
+
+  it("US keeps the legacy id format (no suffix) — backward compatible", () => {
+    const id = svc.computeSkuId(vendor, "DSH-BGS-004", "STD", "US");
+    expect(id).toBe("UER-111111-DSH-BGS-004-STD");
+  });
+
+  it("defaults to US when no country is given", () => {
+    expect(svc.computeSkuId(vendor, "DSH-BGS-004", "STD")).toBe(
+      svc.computeSkuId(vendor, "DSH-BGS-004", "STD", "US"),
+    );
+  });
+
+  it("CA gets a distinct bucket id (-CA suffix)", () => {
+    const us = svc.computeSkuId(vendor, "DSH-BGS-004", "STD", "US");
+    const ca = svc.computeSkuId(vendor, "DSH-BGS-004", "STD", "CA");
+    expect(ca).toBe(`${us}-CA`);
+    expect(ca).not.toBe(us);
+  });
+
+  it("is case-insensitive on the country input", () => {
+    expect(svc.computeSkuId(vendor, "DSH-BGS-004", "STD", "ca")).toBe(
+      svc.computeSkuId(vendor, "DSH-BGS-004", "STD", "CA"),
+    );
+  });
+});
 
 describe("computeFirstBillingDate — 30 days after receipt", () => {
   // Contract: the returned date is exactly 30 calendar days after the

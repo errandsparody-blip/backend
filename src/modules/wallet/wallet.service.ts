@@ -55,6 +55,12 @@ export interface DebitArgs {
   referenceId?: string;
   idempotencyKey?: string;
   actorId?: string;
+  /**
+   * USA + Canada (migration 0079). Country this charge belongs to (US / CA) so
+   * the vendor can filter their wallet by country. Optional — unset for
+   * country-neutral entries (deposits, top-ups, referral bonuses).
+   */
+  country?: string;
 }
 
 export interface CreditArgs {
@@ -74,6 +80,8 @@ export interface CreditArgs {
   referenceId?: string;
   idempotencyKey?: string;
   actorId?: string;
+  /** USA + Canada (migration 0079). Country this entry belongs to (US / CA). */
+  country?: string;
 }
 
 export interface WalletSnapshot {
@@ -172,6 +180,8 @@ export class WalletService {
           referenceId: args.referenceId ?? null,
           idempotencyKey: args.idempotencyKey ?? null,
           createdBy: args.actorId ?? null,
+          // USA + Canada (0079). Cast around the stale generated client.
+          ...(args.country ? ({ country: args.country } as Record<string, unknown>) : {}),
         },
       });
       await txc.wallet.update({
@@ -247,6 +257,8 @@ export class WalletService {
           referenceId: args.referenceId ?? null,
           idempotencyKey: args.idempotencyKey ?? null,
           createdBy: args.actorId ?? null,
+          // USA + Canada (0079). Cast around the stale generated client.
+          ...(args.country ? ({ country: args.country } as Record<string, unknown>) : {}),
         },
       });
       await txc.wallet.update({

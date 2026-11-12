@@ -21,9 +21,11 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Put,
 } from "@nestjs/common";
 import { Role } from "@prisma/client";
 import { Throttle } from "@nestjs/throttler";
+import { z } from "zod";
 
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { RequiresPage } from "../../common/decorators/requires-page.decorator";
@@ -45,6 +47,19 @@ import {
 // Prisma client may lag behind the schema in the sandbox. Runtime is
 // exact string equality so the reference is stable across envs.
 const ROLE_ADMIN = "ADMIN" as Role;
+
+// USA + Canada (0080) — per-vendor negotiated flat-rate fulfillment pricing.
+const setFlatFeeSchema = z
+  .object({
+    enabled: z.boolean(),
+    // Required + positive only when enabling; ignored (stored as 0) when off.
+    feeCents: z.number().int().nonnegative().max(1_000_000).optional(),
+    maxUnits: z.number().int().positive().max(100_000).optional(),
+  })
+  .refine((d) => !d.enabled || (d.feeCents !== undefined && d.maxUnits !== undefined), {
+    message: "feeCents and maxUnits are required when enabling the flat fee.",
+  });
+type SetFlatFeeInput = z.infer<typeof setFlatFeeSchema>;
 
 import { VendorService } from "../vendors/vendor.service";
 
@@ -136,6 +151,26 @@ export class AdminVendorController {
     @CurrentUser() actor: AuthenticatedUser,
   ) {
     return this.vendors.approveKyc(id, { actorId: actor.sub, notes: body.notes });
+  }
+
+  /**
+   * Set a vendor's negotiated flat-rate fulfillment pricing (SUPER_ADMIN).
+   * Applies to new orders only; existing charges are never re-priced.
+   */
+  @Roles(Role.SUPER_ADMIN)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Put(":id/flat-fee")
+  @HttpCode(HttpStatus.OK)
+  async setFlatFee(
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(setFlatFeeSchema)) body: SetFlatFeeInput,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.vendors.setFlatFee(actor.sub, id, {
+      enabled: body.enabled,
+      feeCents: body.feeCents ?? 0,
+      maxUnits: body.maxUnits ?? 0,
+    });
   }
 
   @Roles(Role.SUPER_ADMIN)

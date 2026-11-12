@@ -14,6 +14,8 @@ export const ledgerEntryTypes = [
 
 export const listLedgerSchema = z.object({
   type: z.enum(ledgerEntryTypes).optional(),
+  // USA + Canada: filter the statement to one country. Omit for All Countries.
+  country: z.enum(["US", "CA"]).optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().positive().max(200).default(50),
 });

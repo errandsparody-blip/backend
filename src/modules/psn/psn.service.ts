@@ -41,6 +41,8 @@ export interface PublicPsn {
   // detail view (loose / pallet / add-to-pallet) and the admin receive
   // page can show the matching badge.
   shippingMode: ShippingMode;
+  /** Destination country (US / CA) — migration 0077/0078. */
+  country: string;
   expectedArrivalDate: Date | null;
   carrier: string | null;
   masterTracking: string | null;
@@ -136,6 +138,9 @@ export class PsnService {
         // Falls back to the Prisma default (LOOSE) when omitted — preserves
         // pre-migration behaviour for any client still on the old payload.
         shippingMode: input.shippingMode ?? "LOOSE",
+        // USA + Canada destination (0077/0078). Cast around the stale client;
+        // defaults to US for old payloads. Received stock inherits this.
+        ...({ country: input.country ?? "US" } as Record<string, unknown>),
         expectedArrivalDate: input.expectedArrivalDate ?? null,
         carrier: input.carrier ?? null,
         masterTracking: input.masterTracking ?? null,
@@ -193,6 +198,11 @@ export class PsnService {
         where: { id },
         data: {
           ...(patch.shippingMode !== undefined ? { shippingMode: patch.shippingMode } : {}),
+          // USA + Canada destination — editable while the PSN is still a DRAFT.
+          // Cast around the stale generated client.
+          ...((patch as { country?: string }).country !== undefined
+            ? ({ country: (patch as { country?: string }).country } as Record<string, unknown>)
+            : {}),
           ...(patch.expectedArrivalDate !== undefined ? { expectedArrivalDate: patch.expectedArrivalDate } : {}),
           ...(patch.carrier !== undefined ? { carrier: patch.carrier } : {}),
           ...(patch.masterTracking !== undefined ? { masterTracking: patch.masterTracking } : {}),
@@ -410,6 +420,8 @@ export class PsnService {
       id: p.id,
       status: p.status,
       shippingMode: p.shippingMode,
+      // Cast-read (stale client); defaults to US for pre-0077 rows.
+      country: (p as unknown as { country?: string }).country ?? "US",
       expectedArrivalDate: p.expectedArrivalDate,
       carrier: p.carrier,
       masterTracking: p.masterTracking,

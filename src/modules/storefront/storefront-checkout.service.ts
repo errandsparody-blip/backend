@@ -755,7 +755,7 @@ export class StorefrontCheckoutService {
         FROM products p
         LEFT JOIN (
           SELECT product_id, SUM(quantity_available) AS avail
-          FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
+          FROM skus WHERE status = 'ACTIVE' AND country = 'US' GROUP BY product_id
         ) s ON s.product_id = p.id
         WHERE p.id = ${it.productId}::uuid AND p.vendor_id = ${vendorId}::uuid
           AND p.listed = true AND p.status = 'ACTIVE'
@@ -913,7 +913,7 @@ export class StorefrontCheckoutService {
       const skus = await tx.$queryRaw<Array<{ id: string; free: number }>>(Prisma.sql`
         SELECT id, quantity_available AS free
         FROM skus
-        WHERE product_id = ${item.productId}::uuid AND status = 'ACTIVE'
+        WHERE product_id = ${item.productId}::uuid AND status = 'ACTIVE' AND country = 'US'
           AND quantity_available > 0
         ORDER BY free DESC
         FOR UPDATE
@@ -951,7 +951,7 @@ export class StorefrontCheckoutService {
           let remaining = item.qty;
           const skus = await tx.$queryRaw<Array<{ id: string; reserved: number }>>(Prisma.sql`
             SELECT id, quantity_reserved AS reserved FROM skus
-            WHERE product_id = ${item.productId}::uuid AND status = 'ACTIVE' AND quantity_reserved > 0
+            WHERE product_id = ${item.productId}::uuid AND status = 'ACTIVE' AND country = 'US' AND quantity_reserved > 0
             ORDER BY quantity_reserved DESC
             FOR UPDATE
           `);

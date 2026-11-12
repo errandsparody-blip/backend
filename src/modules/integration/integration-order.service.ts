@@ -28,9 +28,15 @@ import type { Order, OrderLine, OrderStatus, PrismaClient } from "@prisma/client
 
 import { loadConfig } from "../../common/config";
 import { loadFeeSchedule } from "../../common/fees";
+import {
+  COUNTRY_ROUTING_CONFIG_KEY,
+  toFulfillmentCountry,
+} from "../../common/fulfillment-country";
 import { formatOrderRef } from "../../common/order-ref";
 import { aggregateParcel, computeOrderFees } from "../../common/order-fees";
 import { PrismaService } from "../../common/prisma.service";
+import { ConfigFlagService } from "../../common/services/config-flag.service";
+import { readVendorFlatFee } from "../../common/vendor-pricing";
 import type { IntegrationOrderInput } from "../../common/schemas/integration.schema";
 import { AuditService } from "../audit/audit.service";
 import { R2Service } from "../integrations/r2/r2.service";
@@ -128,6 +134,9 @@ export class IntegrationOrderService {
     private readonly opsAlerts: OpsAlertService,
     private readonly notifications: NotificationService,
     private readonly r2: R2Service,
+    // USA + Canada (0077/0078): reads the country-routing flag so allocation
+    // can constrain a line to same-country stock once Canada is live.
+    private readonly configFlags: ConfigFlagService,
   ) {}
 
   // ===========================================================================
@@ -217,7 +226,11 @@ export class IntegrationOrderService {
     | { kind: "PLACED"; order: Order & { lines: OrderLine[] } }
     | { kind: "HELD"; reason: HoldReason }
   > {
-    const mapping = await this.resolveLines(vendorId, input.lines);
+    const routeByCountry = await this.configFlags.isEnabled(COUNTRY_ROUTING_CONFIG_KEY);
+    const mapping = await this.resolveLines(vendorId, input.lines, {
+      routeByCountry,
+      country: toFulfillmentCountry(input.recipient.country),
+    });
     if (mapping.kind === "UNMAPPED") return { kind: "HELD", reason: "UNMAPPED_SKU" };
     const resolved = mapping.resolved;
 
@@ -245,6 +258,9 @@ export class IntegrationOrderService {
     const totalUnits = resolved.reduce((s, r) => s + r.quantity, 0);
     const declaredValueCents = resolved.reduce((s, r) => s + r.declaredValueCents, 0);
     const schedule = await loadFeeSchedule(this.prisma);
+    // USA + Canada (0080): a vendor's negotiated flat fee applies to API
+    // (storefront) orders too, within its unit limit.
+    const flatFee = await readVendorFlatFee(this.prisma, vendorId);
     // FULFILLMENT ONLY — no carrier cost, no insurance at intake.
     const fees = computeOrderFees({
       schedule,
@@ -252,6 +268,7 @@ export class IntegrationOrderService {
       carrierCostCents: 0,
       declaredValueCents,
       insuranceRequested: false,
+      ...(flatFee ? { flatFee } : {}),
     });
 
     const walletSnapshot = await this.wallet.get(vendorId);
@@ -422,6 +439,8 @@ export class IntegrationOrderService {
         description: `Storefront order ${input.externalReference} → ${input.recipient.city} (fulfillment)`,
         referenceType: "order",
         referenceId: orderId,
+        // USA + Canada (0079): tag the entry with the order's country.
+        country: toFulfillmentCountry(input.recipient.country),
         actorId: actorId ?? undefined,
       },
       tx as unknown as Parameters<typeof this.wallet.debit>[1],
@@ -619,7 +638,11 @@ export class IntegrationOrderService {
     | { kind: "HELD"; reason: HoldReason }
   > {
     // 1. Map each storefront line (product code) → an active SKU.
-    const mapping = await this.resolveLines(vendorId, input.lines);
+    const routeByCountry = await this.configFlags.isEnabled(COUNTRY_ROUTING_CONFIG_KEY);
+    const mapping = await this.resolveLines(vendorId, input.lines, {
+      routeByCountry,
+      country: toFulfillmentCountry(input.recipient.country),
+    });
     if (mapping.kind === "UNMAPPED") return { kind: "HELD", reason: "UNMAPPED_SKU" };
     const resolved = mapping.resolved;
 
@@ -687,12 +710,14 @@ export class IntegrationOrderService {
     }
 
     const schedule = await loadFeeSchedule(this.prisma);
+    const flatFee = await readVendorFlatFee(this.prisma, vendorId);
     const fees = computeOrderFees({
       schedule,
       totalUnits,
       carrierCostCents: chosen.costCents,
       declaredValueCents,
       insuranceRequested,
+      ...(flatFee ? { flatFee } : {}),
     });
 
     // 4. Funds pre-check (outside the tx for a friendly hold; the debit inside
@@ -973,8 +998,20 @@ export class IntegrationOrderService {
   private async resolveLines(
     vendorId: string,
     lines: IntegrationOrderInput["lines"],
+    // USA + Canada routing (0077/0078). When routeByCountry is on, only stock
+    // in `country` is considered — a Canada order never pulls USA stock. Off by
+    // default (flag), in which case all active buckets are eligible, exactly as
+    // before.
+    opts: { routeByCountry?: boolean; country?: "US" | "CA" } = {},
   ): Promise<{ kind: "OK"; resolved: ResolvedLine[] } | { kind: "UNMAPPED" }> {
     const codes = Array.from(new Set(lines.map((l) => l.sku)));
+    // When routing is on, restrict the eligible stock buckets to the order's
+    // country. Cast because `country` (migration 0077) may be absent from the
+    // stale generated client.
+    const skuWhere =
+      opts.routeByCountry && opts.country
+        ? ({ status: "ACTIVE", country: opts.country } as unknown as Prisma.SkuWhereInput)
+        : ({ status: "ACTIVE" } as Prisma.SkuWhereInput);
     // an incoming `sku` may be the vendor's own STORE SKU
     // (mapped via product.storeSku) OR our product code. Match either. The
     // `where` is cast for the stale-client pattern (store_sku exists in the
@@ -987,7 +1024,7 @@ export class IntegrationOrderService {
       } as unknown as Prisma.ProductWhereInput,
       include: {
         skus: {
-          where: { status: "ACTIVE" },
+          where: skuWhere,
           orderBy: { quantityAvailable: "desc" },
         },
       },

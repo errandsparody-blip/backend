@@ -319,6 +319,10 @@ export class AdminPsnService {
             psnId: psn.id,
             actorId,
             storageTier: product?.storageTier,
+            // Migration 0077 — received stock inherits the PSN's destination
+            // country so it lands in the right country bucket. Cast-read for
+            // the stale Prisma client; defaults to US for pre-0077 PSNs.
+            country: (psn as unknown as { country?: string }).country ?? "US",
           });
         } else if (acceptedDelta < 0 && skuId) {
           // Re-receive lowered the accepted count. Walk the SKU bucket
@@ -419,6 +423,8 @@ export class AdminPsnService {
         (updated.declaredBoxCounts ?? {}) as Record<string, number>,
         updated.receivedAt ?? new Date(),
         updated.shippingMode,
+        // USA + Canada (0081): boxes inherit the PSN's destination country.
+        (updated as unknown as { country?: string }).country ?? "US",
       );
 
       // Tier-correction billing. The StorageBox rows above were created at
@@ -556,6 +562,8 @@ export class AdminPsnService {
     declaredBoxCounts: Record<string, number>,
     receivedAt: Date,
     shippingMode: "LOOSE" | "PALLET" | "ADD_TO_PALLET" = "LOOSE",
+    // USA + Canada (0081): the country these boxes are stored in.
+    country: string = "US",
   ): Promise<void> {
     const existing = await tx.storageBox.count({ where: { psnId } });
     if (existing > 0) return;
@@ -611,6 +619,7 @@ export class AdminPsnService {
       vendorId: string;
       psnId: string;
       tier: Tier;
+      country: string;
       receivedAt: Date;
       nextBillingDate: Date | null;
       palletContentTier: Tier | null;
@@ -652,12 +661,14 @@ export class AdminPsnService {
           nextBillingDate: billDate,
           palletContentTier: contentTier,
           palletContentCount: contentCount,
+          country,
         });
       }
     }
 
     if (rows.length === 0) return;
-    await tx.storageBox.createMany({ data: rows });
+    // Cast: `country` (0081) may be absent from the stale generated client.
+    await tx.storageBox.createMany({ data: rows as unknown as Prisma.StorageBoxCreateManyInput[] });
   }
 
   // ---------------------------------------------------------------------------

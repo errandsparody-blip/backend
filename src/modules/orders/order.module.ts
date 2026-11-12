@@ -1,6 +1,8 @@
 import { forwardRef, Module } from "@nestjs/common";
 
 import { IdempotencyModule } from "../../common/idempotency.module";
+import { AdminScopeService } from "../../common/services/admin-scope.service";
+import { ConfigFlagService } from "../../common/services/config-flag.service";
 import { AuditModule } from "../audit/audit.module";
 import { IntegrationModule } from "../integration/integration.module";
 import { ShippoModule } from "../integrations/shippo/shippo.module";
@@ -46,7 +48,7 @@ import { OrderService } from "./order.service";
     forwardRef(() => ReturnModule),
   ],
   controllers: [OrderController, AdminOrderController, AdminOrderPackController],
-  providers: [OrderService, AdminOrderService, OrderPackService, OrderImportService],
+  providers: [OrderService, AdminOrderService, OrderPackService, OrderImportService, AdminScopeService, ConfigFlagService],
   exports: [OrderService, AdminOrderService, OrderPackService, OrderImportService],
 })
 export class OrderModule {}

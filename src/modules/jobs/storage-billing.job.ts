@@ -34,7 +34,7 @@
 
 import { Injectable, Logger } from "@nestjs/common";
 import { Cron } from "@nestjs/schedule";
-import type { Prisma, StorageTier } from "@prisma/client";
+import { Prisma, type StorageTier } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
@@ -79,15 +79,22 @@ export class StorageBillingJob {
     let skipped = 0;
 
     for (const v of vendors) {
-      const { totalCents, billableBoxes } = await this.computeVendorLiability(
-        v.id,
-        schedule,
-        today,
-      );
+      // USA + Canada (0081): one entry per country with due boxes. Each is
+      // debited and advanced on its own ledger line, so USA and Canada storage
+      // are collected separately (brief §5). All-USA vendors behave exactly as
+      // before — a single USA line.
+      const buckets = await this.computeVendorLiability(v.id, schedule, today);
+      if (buckets.length === 0) {
+        skipped++;
+        continue;
+      }
+      for (const { country, totalCents, billableBoxes } of buckets) {
       if (totalCents === 0 || billableBoxes.length === 0) {
         skipped++;
         continue;
       }
+      const countryLabel = country === "CA" ? "Canada" : "USA";
+      const monthLabel = today.toISOString().slice(0, 7); // YYYY-MM
       try {
         await this.prisma.$transaction(async (tx) => {
           await this.wallet.debit(
@@ -95,7 +102,9 @@ export class StorageBillingJob {
               vendorId: v.id,
               amountCents: totalCents,
               type: "STORAGE",
-              description: `Storage — ${today.toISOString().slice(0, 10)}`,
+              // Identifies country + billing month per brief §10.
+              description: `${countryLabel} Storage — ${monthLabel}`,
+              country,
             },
             tx as unknown as Parameters<typeof this.wallet.debit>[1],
           );
@@ -170,6 +179,7 @@ export class StorageBillingJob {
           this.logger.error({ err, vendorId: v.id }, "Storage billing threw — investigate");
         }
       }
+      } // end per-country bucket loop
     }
 
     this.logger.log({ billed, overdue, skipped, total: vendors.length }, "Daily storage billing complete");
@@ -194,7 +204,7 @@ export class StorageBillingJob {
     vendorId: string,
     schedule: FeeSchedule,
     today: Date,
-  ): Promise<{ totalCents: number; billableBoxes: BillableBox[] }> {
+  ): Promise<{ totalCents: number; billableBoxes: BillableBox[]; country: string }[]> {
     // Prisma's `lte` operator never matches NULL values (SQL standard
     // NULL semantics — any comparison with NULL is UNKNOWN, never true).
     // That means bundled boxes (nextBillingDate = NULL after migration
@@ -208,24 +218,45 @@ export class StorageBillingJob {
     };
     const eligible = await this.prisma.storageBox.findMany({
       where,
+      // country added in 0081; select via cast-friendly plain select.
       select: { id: true, tier: true, nextBillingDate: true },
     });
-    let totalCents = 0;
-    const billableBoxes: BillableBox[] = [];
+    // Read country alongside — one extra lightweight raw query keyed by the
+    // same ids avoids depending on the stale generated client's `country`.
+    const ids = eligible.map((b) => b.id);
+    const countryById = new Map<string, string>();
+    if (ids.length > 0) {
+      const crows = await this.prisma.$queryRaw<Array<{ id: string; country: string }>>(
+        Prisma.sql`SELECT id, country FROM storage_boxes WHERE id IN (${Prisma.join(ids)})`,
+      );
+      for (const r of crows) countryById.set(r.id, (r.country ?? "US").toUpperCase());
+    }
+
+    // USA + Canada (0081): group liability by country so each country is
+    // billed on its own ledger line. Canada currently uses the same rate
+    // schedule as USA until a Super Admin configures separate Canada rates.
+    const byCountry = new Map<string, { totalCents: number; billableBoxes: BillableBox[] }>();
     for (const box of eligible) {
       // The query already excludes null dates, but the column type is
       // now Date | null after migration 0036, so we narrow explicitly.
       if (box.nextBillingDate === null) continue;
       const per = schedule.monthlyStorage[box.tier];
       if (per === null || per === undefined) continue; // pallets are negotiated
-      totalCents += per;
-      billableBoxes.push({
+      const country = countryById.get(box.id) === "CA" ? "CA" : "US";
+      const bucket = byCountry.get(country) ?? { totalCents: 0, billableBoxes: [] };
+      bucket.totalCents += per;
+      bucket.billableBoxes.push({
         id: box.id,
         tier: box.tier,
         nextBillingDate: box.nextBillingDate,
       });
+      byCountry.set(country, bucket);
     }
-    return { totalCents, billableBoxes };
+    return Array.from(byCountry.entries()).map(([country, b]) => ({
+      country,
+      totalCents: b.totalCents,
+      billableBoxes: b.billableBoxes,
+    }));
   }
 
   private async loadSchedule(): Promise<FeeSchedule> {

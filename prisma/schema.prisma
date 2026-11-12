@@ -185,6 +185,17 @@ model User {
   vendorId            String?     @map("vendor_id") @db.Uuid
   vendor              Vendor?     @relation(fields: [vendorId], references: [id], onDelete: Cascade)
 
+  // Migration 0078 — USA + Canada. The country an operational ADMIN is scoped
+  // to (ISO 3166-1 alpha-2: US / CA). A USA Admin only ever sees USA records of
+  // their assigned vendors; a Canada Admin only Canada records. NULL for
+  // vendors, sub-users and SUPER_ADMIN (who is cross-country).
+  adminCountry        String?     @map("admin_country") @db.Char(2)
+
+  // Operational admins this user (SUPER_ADMIN) has assigned vendors to, and the
+  // assignments where this user is the operational admin.
+  vendorAssignmentsMade VendorAdminAssignment[] @relation("AssignmentAssignedBy")
+  vendorAssignments     VendorAdminAssignment[] @relation("AssignmentAdmin")
+
   // MFA / TOTP
   mfaEnrolled         Boolean     @default(false) @map("mfa_enrolled")
   mfaSecretEncrypted  String?     @map("mfa_secret_encrypted")
@@ -227,6 +238,42 @@ model User {
   @@index([vendorId])
   @@index([status])
   @@map("users")
+}
+
+// =============================================================================
+// VendorAdminAssignment — Migration 0078 (USA + Canada).
+//
+// Maps a vendor to the operational ADMIN who handles it, per country. A vendor
+// can have at most one operational admin per country (enforced by the unique
+// index), so there is a clear "who owns this" for USA and for Canada
+// independently. SUPER_ADMIN assigns and may reassign; SUPER_ADMIN always
+// retains full access regardless of assignment.
+// =============================================================================
+model VendorAdminAssignment {
+  id         String   @id @default(uuid()) @db.Uuid
+
+  vendorId   String   @map("vendor_id") @db.Uuid
+  vendor     Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  // ISO 3166-1 alpha-2 (US / CA). The country this assignment governs.
+  country    String   @db.Char(2)
+
+  // The operational admin user who handles this vendor for this country.
+  adminUserId String  @map("admin_user_id") @db.Uuid
+  adminUser   User    @relation("AssignmentAdmin", fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  // The SUPER_ADMIN who made (or last changed) the assignment — audit trail.
+  assignedById String? @map("assigned_by_id") @db.Uuid
+  assignedBy   User?   @relation("AssignmentAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
+
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  // One operational admin per vendor per country.
+  @@unique([vendorId, country])
+  @@index([adminUserId])
+  @@index([country])
+  @@map("vendor_admin_assignments")
 }
 
 // =============================================================================
@@ -379,12 +426,22 @@ model Vendor {
   storefrontFeePaidAt DateTime? @map("storefront_fee_paid_at")
   marketplaceFeatured Boolean  @default(false) @map("marketplace_featured")
 
+  // Migration 0080 — USA + Canada negotiated flat-rate fulfillment pricing.
+  // One pricing config covers both countries. OFF → the default fee schedule.
+  // ON → `flatFeeCents` per order up to `flatFeeMaxUnits` total units; orders
+  // larger than that fall back to the schedule's maximum fulfillment cap.
+  flatFeeEnabled      Boolean  @default(false) @map("flat_fee_enabled")
+  flatFeeCents        Int      @default(0) @map("flat_fee_cents")
+  flatFeeMaxUnits     Int      @default(0) @map("flat_fee_max_units")
+
   storefront          VendorStorefront?
   payoutAccounts      VendorPayoutAccount[]
   storefrontOrders    StorefrontOrder[]
   discountCodes       DiscountCode[]
   discountCodeVendors DiscountCodeVendor[]
   domains             VendorDomain[]
+  // Migration 0078 — per-country operational admin assignments.
+  adminAssignments    VendorAdminAssignment[]
 
   @@index([status])
   @@index([kycStatus])
@@ -644,6 +701,14 @@ model Sku {
 
   variant           String
 
+  // Fulfillment country for this stock bucket (ISO 3166-1 alpha-2: US / CA).
+  // Migration 0077 — USA + Canada backbone. Every existing bucket is USA;
+  // Canada stock lands in its own bucket (the SKU id carries the country, so
+  // the same product can hold separate US and CA inventory without collision).
+  // Allocation routes an order to same-country stock only — see the
+  // country-routing config flag, off until Canada rollout.
+  country           String      @default("US") @map("country") @db.Char(2)
+
   // Quantities in this SKU bucket. CHECK constraints enforce non-negativity.
   quantityAvailable Int         @default(0) @map("quantity_available")
   quantityReserved  Int         @default(0) @map("quantity_reserved")
@@ -719,6 +784,12 @@ model Psn {
   vendor              Vendor     @relation(fields: [vendorId], references: [id], onDelete: Cascade)
 
   status              PsnStatus  @default(DRAFT)
+
+  // Destination country for this inbound shipment (ISO 3166-1 alpha-2:
+  // US / CA). Migration 0077 — USA + Canada backbone. Stock received against
+  // this PSN inherits this country. Defaults to US; the vendor chooses the
+  // destination at submit once the Canada flow ships (Phase 2).
+  country             String     @default("US") @map("country") @db.Char(2)
 
   // Migration 0033 — explicit shipping mode. LOOSE is the historical
   // default and matches the pre-migration inferred behaviour for any
@@ -801,6 +872,11 @@ model StorageBox {
   psn                 Psn              @relation(fields: [psnId], references: [id], onDelete: Restrict)
 
   tier                StorageTier
+  // Migration 0081 — USA + Canada. Country this box is stored in (US / CA),
+  // inherited from its PSN. Storage is billed per country at that country's
+  // rate; the daily cron groups a vendor's boxes by country and debits each
+  // country separately. Defaults to US (all existing boxes are USA).
+  country             String           @default("US") @map("country") @db.Char(2)
   receivedAt          DateTime         @map("received_at")
   // Migration 0036 — null means "bundled with parent pallet, do not
   // bill independently". Used for ADD_TO_PALLET boxes; the parent
@@ -1104,6 +1180,11 @@ model LedgerEntry {
   referenceType     String?         @map("reference_type")
   referenceId       String?         @map("reference_id")
 
+  // Migration 0079 — USA + Canada. Country this entry belongs to (US / CA) so
+  // vendors can filter their wallet statement per country. NULL for
+  // country-neutral entries (deposits, top-ups, referral bonuses).
+  country           String?         @map("country") @db.Char(2)
+
   // Idempotency key used for the originating request, if any.
   idempotencyKey    String?         @map("idempotency_key")
 
@@ -1116,6 +1197,7 @@ model LedgerEntry {
   @@index([type, createdAt])
   @@index([referenceType, referenceId])
   @@index([shopperRequestId, createdAt])
+  @@index([vendorId, country, createdAt])
   @@map("ledger_entries")
 }
 
@@ -1285,6 +1367,14 @@ model Order {
   // service reads this and dispatches to the correct handler so the
   // two flows can coexist while old orders finish under old rules.
   workflowVersion          Int             @default(1) @map("workflow_version")
+
+  // Migration 0078 — USA + Canada operational control. Records which admin
+  // (or super admin) is actively processing this order, to attribute work and
+  // prevent two people handling the same order at once (a soft claim: set when
+  // an admin opens the order to work it, cleared when they finish or release).
+  // NULL = unclaimed. Not a hard DB lock — the service enforces single-claim.
+  processingUserId         String?         @map("processing_user_id") @db.Uuid
+  processingClaimedAt      DateTime?       @map("processing_claimed_at")
 
   // Cross-vendor cart consolidation (Migration 0065). When a storefront order
   // belongs to a multi-vendor cart, its fulfillment order carries the shared

@@ -36,6 +36,14 @@ export interface ComputeOrderFeesArgs {
   /** Sum of declared values across all order lines, in cents. */
   declaredValueCents: number;
   insuranceRequested: boolean;
+  /**
+   * USA + Canada (migration 0080) — per-vendor negotiated flat-rate fulfillment
+   * pricing. When `enabled`, the fulfillment fee is the flat `feeCents` for
+   * orders up to `maxUnits` total units; orders larger than that fall back to
+   * the schedule's maximum fulfillment cap. Omitted / disabled → the normal
+   * per-unit schedule applies, unchanged.
+   */
+  flatFee?: { enabled: boolean; feeCents: number; maxUnits: number };
 }
 
 export interface OrderFeeBreakdown {
@@ -78,7 +86,16 @@ export function computeOrderFees(args: ComputeOrderFeesArgs): OrderFeeBreakdown 
     args.schedule.fulfillment.maxCents > 0
       ? args.schedule.fulfillment.maxCents
       : DEFAULT_FULFILLMENT_MAX_CENTS;
-  const fulfillmentFeeCents = Math.min(uncappedFulfillmentCents, maxCents);
+  let fulfillmentFeeCents = Math.min(uncappedFulfillmentCents, maxCents);
+
+  // Per-vendor negotiated flat fee (migration 0080). Within the agreed unit
+  // limit the vendor pays the flat fee; above it, the schedule's max cap
+  // applies (never more than the cap). Counts TOTAL units, not distinct SKUs.
+  if (args.flatFee?.enabled) {
+    const flat = Math.max(0, Math.trunc(args.flatFee.feeCents));
+    fulfillmentFeeCents =
+      args.totalUnits <= args.flatFee.maxUnits ? flat : maxCents;
+  }
 
   // Insurance: 1.5% of declared value, only when requested.
   const insuranceFeeCents = args.insuranceRequested

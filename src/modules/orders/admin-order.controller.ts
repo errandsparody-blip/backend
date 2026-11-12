@@ -27,6 +27,7 @@ import {
   type RejectCancellationInput,
 } from "../../common/schemas/order.schema";
 
+import { AdminScopeService } from "../../common/services/admin-scope.service";
 import { IntegrationOrderService } from "../integration/integration-order.service";
 
 import { AdminOrderService } from "./admin-order.service";
@@ -78,6 +79,14 @@ const listSchema = z.object({
 });
 type ListInput = z.infer<typeof listSchema>;
 
+// Dashboard status-counts filter (Phase 6). Just a date window; country +
+// vendor scoping is applied server-side from the admin's own scope.
+const statusCountsSchema = z.object({
+  from: z.coerce.date().optional(),
+  to: z.coerce.date().optional(),
+});
+type StatusCountsInput = z.infer<typeof statusCountsSchema>;
+
 @Controller({ path: "admin/orders", version: "1" })
 // ADMIN added at class level. Default @RequiresPage
 // is `admin.orders.write`; GETs override to `admin.orders.read` so a
@@ -92,12 +101,60 @@ export class AdminOrderController {
     // resolving a storefront ON_HOLD order re-runs allocation
     // (re-maps SKUs, re-checks funds, reserves + debits) on the held row.
     private readonly integrationOrders: IntegrationOrderService,
+    // USA + Canada (0078): resolves an operational admin's country + assigned
+    // vendors so the queue shows only what they're allowed to see.
+    private readonly adminScope: AdminScopeService,
   ) {}
 
   @Get()
   @RequiresPage("admin.orders.read")
-  list(@Query(new ZodValidationPipe(listSchema)) q: ListInput) {
-    return this.orders.list(q);
+  async list(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query(new ZodValidationPipe(listSchema)) q: ListInput,
+  ) {
+    const scope = await this.adminScope.resolve(user);
+    return this.orders.list(q, scope.restricted ? scope : null);
+  }
+
+  /**
+   * Per-status order tallies for the admin dashboard (Phase 6), scoped to the
+   * operational admin's country + assigned vendors. Optional date window.
+   */
+  @Get("status-counts")
+  @RequiresPage("admin.orders.read")
+  async statusCounts(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query(new ZodValidationPipe(statusCountsSchema)) q: StatusCountsInput,
+  ) {
+    const scope = await this.adminScope.resolve(user);
+    return this.orders.statusCounts(q, scope.restricted ? scope : null);
+  }
+
+  /**
+   * Claim an order for processing. Prevents two admins working the same order
+   * at once and records who handled it (migration 0078). Idempotent for the
+   * same user; 409 if another admin already holds it.
+   */
+  @Post(":id/claim")
+  @HttpCode(HttpStatus.OK)
+  claim(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.orders.claimForProcessing(id, user.sub);
+  }
+
+  /**
+   * Release a processing claim. The holder releases their own; a SUPER_ADMIN
+   * can force-release someone else's (stuck claim).
+   */
+  @Post(":id/release-claim")
+  @HttpCode(HttpStatus.OK)
+  releaseClaim(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    return this.orders.releaseProcessing(id, user.sub, user.role === Role.SUPER_ADMIN);
   }
 
   // retry allocation on a held storefront order. Use after the

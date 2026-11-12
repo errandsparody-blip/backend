@@ -25,6 +25,7 @@ import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import { ShippoService } from "../integrations/shippo/shippo.service";
 import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
+import { ConfigFlagService } from "../../common/services/config-flag.service";
 import { ShippingPointService } from "../../common/services/shipping-point.service";
 import { OpsAlertService } from "../notifications/ops-alert.service";
 import { SmartyService } from "../integrations/smarty/smarty.service";
@@ -263,6 +264,11 @@ describe("OrderService — tenant isolation + address rejection", () => {
         { provide: OpsAlertService, useValue: opsAlerts },
         { provide: ShippingPointService, useValue: shippingPoints },
         { provide: CarrierPackagingRegistryService, useValue: carrierRegistry },
+        // Country routing OFF in these tests — single-pool behaviour.
+        {
+          provide: ConfigFlagService,
+          useValue: { isEnabled: jest.fn().mockResolvedValue(false) },
+        },
       ],
     }).compile();
     svc = moduleRef.get(OrderService);

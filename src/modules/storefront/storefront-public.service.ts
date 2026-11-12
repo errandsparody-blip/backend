@@ -213,7 +213,7 @@ export class StorefrontPublicService {
       FROM products p
       LEFT JOIN (
         SELECT product_id, SUM(quantity_available) AS avail
-        FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
+        FROM skus WHERE status = 'ACTIVE' AND country = 'US' GROUP BY product_id
       ) s ON s.product_id = p.id
       WHERE p.vendor_id = ${vendorId}::uuid
         AND p.listed = true
@@ -246,7 +246,7 @@ export class StorefrontPublicService {
       FROM products p
       LEFT JOIN (
         SELECT product_id, SUM(quantity_available) AS avail
-        FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
+        FROM skus WHERE status = 'ACTIVE' AND country = 'US' GROUP BY product_id
       ) s ON s.product_id = p.id
       WHERE p.id = ${productId}::uuid
         AND p.vendor_id = ${vendorId}::uuid
@@ -320,7 +320,7 @@ export class StorefrontPublicService {
       FROM products p
       LEFT JOIN (
         SELECT product_id, SUM(quantity_available) AS avail
-        FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
+        FROM skus WHERE status = 'ACTIVE' AND country = 'US' GROUP BY product_id
       ) s ON s.product_id = p.id
       WHERE ${groupFilter}
         AND p.vendor_id = ${vendorId}::uuid AND p.listed = true AND p.status = 'ACTIVE'
@@ -422,7 +422,7 @@ export class StorefrontPublicService {
       LEFT JOIN vendor_storefronts vs ON vs.vendor_id = v.id
       LEFT JOIN (
         SELECT product_id, SUM(quantity_available) AS avail
-        FROM skus WHERE status = 'ACTIVE' GROUP BY product_id
+        FROM skus WHERE status = 'ACTIVE' AND country = 'US' GROUP BY product_id
       ) st ON st.product_id = p.id
       WHERE v.storefront_enabled = true AND v.marketplace_featured = true
         AND p.listed = true AND p.status = 'ACTIVE' AND p.retail_price_cents IS NOT NULL

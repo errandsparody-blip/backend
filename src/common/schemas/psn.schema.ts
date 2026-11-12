@@ -23,11 +23,24 @@ export const declaredBoxCountsSchema = z
     message: "Declare at least one box.",
   });
 
+// Destination country for the inbound shipment (migration 0077/0078, USA +
+// Canada). Stock received against this PSN lands in this country's bucket.
+// Defaults to US so any client on the old payload keeps behaving identically.
+export const psnCountrySchema = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .pipe(z.enum(["US", "CA"], { errorMap: () => ({ message: "Choose US or CA." }) }))
+  .default("US");
+
 export const createPsnSchema = z.object({
   expectedArrivalDate: z.coerce.date().optional(),
   carrier: z.string().min(2).max(60).optional(),
   masterTracking: z.string().min(3).max(80).optional(),
   shippingMode: shippingModeSchema.default("LOOSE"),
+  // USA / Canada destination. Required-by-default via the "US" fallback so the
+  // vendor always has a country, but the UI surfaces an explicit choice.
+  country: psnCountrySchema,
   declaredBoxCounts: declaredBoxCountsSchema,
   notes: z.string().max(1000).optional(),
   lines: z.array(psnLineInputSchema).min(1, "At least one line is required."),

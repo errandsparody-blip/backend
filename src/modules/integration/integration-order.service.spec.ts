@@ -138,6 +138,9 @@ function makeService(overrides: {
       findUnique: jest.fn(async () => ({ businessName: "Acme" })),
     },
     $transaction: jest.fn(async (cb: (tx: unknown) => Promise<unknown>) => cb(txMock)),
+    // readVendorFlatFee() queries the vendor's flat-fee config. Return none so
+    // these tests exercise the default fee schedule.
+    $queryRaw: jest.fn(async () => []),
   };
 
   const wallet = {
@@ -166,6 +169,9 @@ function makeService(overrides: {
     putObject: jest.fn(async () => ({ publicUrl: "https://r2.example/label.pdf", key: "k" })),
   };
 
+  // Country routing OFF in these tests — behaviour matches the single-pool
+  // allocation they were written against.
+  const configFlags = { isEnabled: jest.fn().mockResolvedValue(false) };
   const svc = new IntegrationOrderService(
     prisma as never,
     wallet as never,
@@ -175,6 +181,7 @@ function makeService(overrides: {
     opsAlerts as never,
     notifications as never,
     r2 as never,
+    configFlags as never,
   );
   return { svc, prisma, wallet, smarty, shippo, r2, created, orderEvents, debits };
 }

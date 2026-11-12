@@ -24,7 +24,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { KycStatus, VendorStatus } from "@prisma/client";
+import { KycStatus, Prisma, VendorStatus } from "@prisma/client";
 
 import { loadFeeSchedule, type FeeSchedule } from "../../common/fees";
 import { PrismaService } from "../../common/prisma.service";
@@ -177,6 +177,46 @@ export class AdminVendorService {
     private readonly audit: AuditService,
     private readonly notifications: NotificationService,
   ) {}
+
+  /**
+   * USA + Canada (migration 0080) — set a vendor's negotiated flat-rate
+   * fulfillment pricing. One config covers both countries. When enabled, a
+   * fee and a max eligible unit quantity are required; disabling clears the
+   * vendor back to the default schedule. Applies to NEW orders only — charges
+   * already booked on existing orders are never re-priced.
+   */
+  async setFlatFee(
+    actorId: string,
+    vendorId: string,
+    input: { enabled: boolean; feeCents: number; maxUnits: number },
+  ): Promise<{ enabled: boolean; feeCents: number; maxUnits: number }> {
+    const vendor = await this.prisma.vendor.findUnique({
+      where: { id: vendorId },
+      select: { id: true },
+    });
+    if (!vendor) throw new NotFoundException("Vendor not found.");
+
+    // Normalise: a disabled config stores zeros so a stale fee can't linger.
+    const enabled = input.enabled;
+    const feeCents = enabled ? Math.max(0, Math.trunc(input.feeCents)) : 0;
+    const maxUnits = enabled ? Math.max(1, Math.trunc(input.maxUnits)) : 0;
+
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE vendors
+      SET flat_fee_enabled = ${enabled},
+          flat_fee_cents = ${feeCents},
+          flat_fee_max_units = ${maxUnits}
+      WHERE id = ${vendorId}::uuid
+    `);
+    await this.audit.log({
+      actorId,
+      action: "vendor.flat_fee_set",
+      resourceType: "vendor",
+      resourceId: vendorId,
+      afterState: { enabled, feeCents, maxUnits },
+    });
+    return { enabled, feeCents, maxUnits };
+  }
 
   // ---------------------------------------------------------------------------
   // Read

@@ -24,11 +24,15 @@ export interface PublicLedgerEntry {
    * deposits, manual credits, and any entry not tied to an order.
    */
   orderRef: string | null;
+  /** Country this entry belongs to (US / CA), or null if country-neutral. */
+  country: string | null;
   createdAt: Date;
 }
 
 export interface ListLedgerInput {
   type?: LedgerEntryType;
+  /** USA + Canada: filter to a single country (US / CA). Omit for all. */
+  country?: "US" | "CA";
   cursor?: string;
   limit: number;
 }
@@ -43,6 +47,11 @@ export class LedgerService {
   ): Promise<{ items: PublicLedgerEntry[]; nextCursor: string | null }> {
     const where: Prisma.LedgerEntryWhereInput = { vendorId };
     if (input.type) where.type = input.type;
+    // USA + Canada (0079): filter by the entry's country. Cast around the
+    // stale generated client (column added in 0079).
+    if (input.country) {
+      (where as unknown as { country?: string }).country = input.country;
+    }
 
     const items = await this.prisma.ledgerEntry.findMany({
       where,
@@ -192,6 +201,8 @@ export class LedgerService {
       referenceType: e.referenceType,
       referenceId: e.referenceId,
       orderRef,
+      // Cast-read (stale client); null for pre-0079 / country-neutral rows.
+      country: (e as unknown as { country?: string | null }).country ?? null,
       createdAt: e.createdAt,
     };
   }

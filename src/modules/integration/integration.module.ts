@@ -20,6 +20,7 @@ import { NotificationModule } from "../notifications/notification.module";
 import { WalletModule } from "../wallet/wallet.module";
 
 import { ApiKeyGuard } from "../../common/guards/api-key.guard";
+import { ConfigFlagService } from "../../common/services/config-flag.service";
 
 import { IntegrationController } from "./integration.controller";
 import { IntegrationOrderService } from "./integration-order.service";
@@ -36,7 +37,7 @@ import { VendorIntegrationController } from "./vendor-integration.controller";
     NotificationModule,
   ],
   controllers: [IntegrationController, VendorIntegrationController],
-  providers: [IntegrationOrderService, VendorApiKeyService, ApiKeyGuard],
+  providers: [IntegrationOrderService, VendorApiKeyService, ApiKeyGuard, ConfigFlagService],
   exports: [IntegrationOrderService],
 })
 export class IntegrationModule {}

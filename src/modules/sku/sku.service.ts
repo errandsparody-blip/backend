@@ -29,6 +29,8 @@ export interface PublicSku {
   id: string;
   productId: string;
   variant: string;
+  /** Fulfillment country (migration 0077): "US" or "CA". */
+  country: string;
   quantityAvailable: number;
   quantityReserved: number;
   storageTier: StorageTier;
@@ -108,18 +110,26 @@ export class SkuService {
       psnId: string;
       actorId: string;
       storageTier?: StorageTier;
+      /**
+       * Fulfillment country the received stock belongs to (migration 0077).
+       * Inherited from the PSN. Defaults to US so every existing receive path
+       * keeps landing stock in the USA bucket, unchanged.
+       */
+      country?: string;
     },
   ): Promise<string> {
     if (args.qty <= 0) {
       throw new ConflictException("Receive quantity must be positive.");
     }
 
+    const country = (args.country ?? "US").toUpperCase() === "CA" ? "CA" : "US";
+
     const product = await tx.product.findFirst({
       where: { id: args.productId, vendorId: args.vendorId },
     });
     if (!product) throw new NotFoundException("Product not found for this vendor.");
 
-    const skuId = this.computeSkuId(args.vendorId, product.code, args.variant);
+    const skuId = this.computeSkuId(args.vendorId, product.code, args.variant, country);
 
     // Upsert by id (deterministic). On insert, populate fields. On update,
     // increment quantity_available atomically.
@@ -131,6 +141,9 @@ export class SkuService {
           vendorId: args.vendorId,
           productId: args.productId,
           variant: args.variant,
+          // Cast around the stale Prisma client (country added in 0077;
+          // the generated client learns it on the next `prisma generate`).
+          ...({ country } as Record<string, unknown>),
           quantityAvailable: args.qty,
           quantityReserved: 0,
           storageTier: args.storageTier ?? "SMALL",
@@ -181,14 +194,27 @@ export class SkuService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Deterministic SKU id. Same (vendor, product, variant) → same id, so
-   * subsequent receiving events stack into the same bucket.
+   * Deterministic SKU id. Same (vendor, product, variant, country) → same id,
+   * so subsequent receiving events stack into the same bucket.
+   *
+   * Country (migration 0077, USA + Canada backbone): USA ids keep their exact
+   * historical format (`UER-<vendor>-<code>-<variant>`) so every existing
+   * reference stays valid, while Canada gets a distinct `-CA` bucket. This lets
+   * one product hold separate US and CA stock without a primary-key change.
    */
-  computeSkuId(vendorId: string, productCode: string, variant: string): string {
+  computeSkuId(
+    vendorId: string,
+    productCode: string,
+    variant: string,
+    country: string = "US",
+  ): string {
     const short = vendorId.replace(/-/g, "").slice(0, 6).toUpperCase();
     const code = productCode.replace(/[^A-Z0-9-]/gi, "").toUpperCase();
     const v = (variant || "STD").replace(/[^A-Z0-9-]/gi, "").toUpperCase().slice(0, 12);
-    return `UER-${short}-${code}-${v}`;
+    const base = `UER-${short}-${code}-${v}`;
+    // US keeps the legacy id verbatim; other countries get a suffix so their
+    // bucket is distinct. Only US and CA are supported today.
+    return (country ?? "US").toUpperCase() === "CA" ? `${base}-CA` : base;
   }
 
   private toPublic(s: Sku): PublicSku {
@@ -196,6 +222,9 @@ export class SkuService {
       id: s.id,
       productId: s.productId,
       variant: s.variant,
+      // Migration 0077 — fulfillment country. Cast-read against the stale
+      // Prisma client; pre-0077 rows (and the sandbox client) default to US.
+      country: (s as unknown as { country?: string }).country ?? "US",
       quantityAvailable: s.quantityAvailable,
       quantityReserved: s.quantityReserved,
       storageTier: s.storageTier,

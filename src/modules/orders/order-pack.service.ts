@@ -55,6 +55,7 @@ import {
 import { Prisma, type OrderStatus } from "@prisma/client";
 
 import { loadConfig } from "../../common/config";
+import { toFulfillmentCountry } from "../../common/fulfillment-country";
 import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
 import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
@@ -1569,9 +1570,10 @@ export class OrderPackService {
           workflow_version: number;
           vendor_id: string;
           fulfillment_mode: string | null;
+          ship_country: string | null;
         }>
       >(Prisma.sql`
-        SELECT id, status, workflow_version, vendor_id, fulfillment_mode
+        SELECT id, status, workflow_version, vendor_id, fulfillment_mode, ship_country
         FROM orders
         WHERE id = ${orderId}::uuid
         FOR UPDATE
@@ -1644,6 +1646,8 @@ export class OrderPackService {
             description: `Shipping · ${chosen.carrier} ${chosen.service}`,
             referenceType: "order",
             referenceId: orderId,
+            // USA + Canada (0079): tag the shipping charge with the order's country.
+            country: toFulfillmentCountry(locked.ship_country),
             actorId,
           },
           tx as unknown as Parameters<typeof this.wallet.debit>[1],

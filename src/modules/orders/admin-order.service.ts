@@ -393,7 +393,12 @@ export class AdminOrderService {
   // Read — operator queue
   // ---------------------------------------------------------------------------
 
-  async list(input: AdminOrderListInput) {
+  async list(
+    input: AdminOrderListInput,
+    // USA + Canada (0078): operational-admin scope. Omitted / null for
+    // SUPER_ADMIN and legacy admin roles → no restriction (behaviour unchanged).
+    scope?: { vendorIds: string[] | null; country: "US" | "CA" | null } | null,
+  ) {
     // Filter precedence:
     //   1. Explicit `status` → exact match (e.g. "show me all SHIPPED orders").
     //   2. `view=all`        → no filter, every order regardless of status.
@@ -410,6 +415,18 @@ export class AdminOrderService {
         ...(input.from ? { gte: input.from } : {}),
         ...(input.to ? { lte: input.to } : {}),
       };
+    }
+
+    // Operational-admin scoping. Restricts to the admin's assigned vendors and
+    // their country (a Canada admin sees only CA-destination orders; a USA
+    // admin sees everything non-CA). Unrestricted roles skip both.
+    if (scope?.vendorIds) {
+      where.vendorId = { in: scope.vendorIds };
+    }
+    if (scope?.country === "CA") {
+      where.shipCountry = "CA";
+    } else if (scope?.country === "US") {
+      where.shipCountry = { not: "CA" };
     }
 
     const orders = await this.prisma.order.findMany({
@@ -627,6 +644,97 @@ export class AdminOrderService {
         variant: match?.variant ?? null,
       };
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dashboard — status counts (migration 0078, Phase 6)
+  //
+  // Clickable per-status tallies for the admin order dashboard, scoped by the
+  // operational admin's country + assigned vendors (unrestricted roles see
+  // everything), with an optional date window. One grouped query.
+  // ---------------------------------------------------------------------------
+
+  async statusCounts(
+    input: { from?: Date; to?: Date },
+    scope?: { vendorIds: string[] | null; country: "US" | "CA" | null } | null,
+  ): Promise<{ byStatus: Record<string, number>; total: number }> {
+    const where: Prisma.OrderWhereInput = {};
+    if (input.from || input.to) {
+      where.createdAt = {
+        ...(input.from ? { gte: input.from } : {}),
+        ...(input.to ? { lte: input.to } : {}),
+      };
+    }
+    if (scope?.vendorIds) where.vendorId = { in: scope.vendorIds };
+    if (scope?.country === "CA") where.shipCountry = "CA";
+    else if (scope?.country === "US") where.shipCountry = { not: "CA" };
+
+    const groups = await this.prisma.order.groupBy({
+      by: ["status"],
+      where,
+      _count: { _all: true },
+    });
+    const byStatus: Record<string, number> = {};
+    let total = 0;
+    for (const g of groups) {
+      byStatus[g.status as string] = g._count._all;
+      total += g._count._all;
+    }
+    return { byStatus, total };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Processing claim / lock (migration 0078)
+  //
+  // A soft, single-owner claim so two admins can't work the same order at once,
+  // and so we record who processed it. An admin claims an order when they open
+  // it to work; the claim is theirs until they release it (or finish). The
+  // claim is advisory — the transition endpoints still run — but the UI uses it
+  // to warn "someone else is on this order" and to attribute the work.
+  // ---------------------------------------------------------------------------
+
+  async claimForProcessing(
+    orderId: string,
+    userId: string,
+  ): Promise<{ claimed: boolean; byUserId: string }> {
+    return this.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ processing_user_id: string | null }>>(
+        Prisma.sql`SELECT processing_user_id FROM orders WHERE id = ${orderId}::uuid FOR UPDATE`,
+      );
+      if (rows.length === 0) throw new NotFoundException();
+      const current = rows[0]!.processing_user_id;
+      if (current && current !== userId) {
+        throw new ConflictException({
+          message: "This order is already being processed by another admin.",
+          code: "order_processing_locked",
+          byUserId: current,
+        });
+      }
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE orders
+        SET processing_user_id = ${userId}::uuid, processing_claimed_at = CURRENT_TIMESTAMP
+        WHERE id = ${orderId}::uuid
+      `);
+      return { claimed: true, byUserId: userId };
+    });
+  }
+
+  /**
+   * Release a claim. Only the current holder clears it here; a SUPER_ADMIN
+   * override (force-release of someone else's claim) is gated at the controller
+   * and passes `force`.
+   */
+  async releaseProcessing(
+    orderId: string,
+    userId: string,
+    force = false,
+  ): Promise<{ released: boolean }> {
+    const res = await this.prisma.$executeRaw(
+      force
+        ? Prisma.sql`UPDATE orders SET processing_user_id = NULL, processing_claimed_at = NULL WHERE id = ${orderId}::uuid`
+        : Prisma.sql`UPDATE orders SET processing_user_id = NULL, processing_claimed_at = NULL WHERE id = ${orderId}::uuid AND processing_user_id = ${userId}::uuid`,
+    );
+    return { released: Number(res) > 0 };
   }
 
   // ---------------------------------------------------------------------------

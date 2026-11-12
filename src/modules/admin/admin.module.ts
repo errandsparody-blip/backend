@@ -44,6 +44,13 @@ import { AdminSkuService } from "./admin-sku.service";
 import { AdminStorageBoxController } from "./admin-storage-box.controller";
 import { AdminVendorController } from "./admin-vendor.controller";
 import { AdminVendorService } from "./admin-vendor.service";
+// USA + Canada (0078): SUPER_ADMIN manages vendor⇄operational-admin
+// assignments per country and sets an admin's country scope.
+import { VendorAssignmentController } from "./vendor-assignment.controller";
+import { VendorAssignmentService } from "./vendor-assignment.service";
+// USA + Canada (Phase 3): SUPER_ADMIN-gated country-routing cutover.
+import { MigrationController } from "./migration.controller";
+import { MigrationService } from "./migration.service";
 
 @Module({
   // VendorModule exports AgreementService (used by AdminConfigController to
@@ -112,11 +119,17 @@ import { AdminVendorService } from "./admin-vendor.service";
     // platform-wide SUPER_ADMIN dashboard (finance-sensitive
     // aggregates: revenue, wallet totals, warehouse KPIs).
     SuperAdminDashboardController,
+    // SUPER_ADMIN: per-country vendor⇄admin assignment management.
+    VendorAssignmentController,
+    // SUPER_ADMIN: USA + Canada cutover (country-routing switch-on).
+    MigrationController,
   ],
   providers: [
     AdminVendorService,
     AdminSkuService,
     SuperAdminDashboardService,
+    VendorAssignmentService,
+    MigrationService,
   ],
 })
 export class AdminModule {}
