@@ -18,6 +18,7 @@ import {
   Param,
   ParseUUIDPipe,
   Put,
+  Query,
 } from "@nestjs/common";
 import { Role } from "@prisma/client";
 import { z } from "zod";
@@ -73,9 +74,9 @@ export class VendorAssignmentController {
   @HttpCode(HttpStatus.OK)
   unassign(
     @CurrentUser() user: AuthenticatedUser,
-    @Body(new ZodValidationPipe(unassignSchema)) body: UnassignInput,
+    @Query(new ZodValidationPipe(unassignSchema)) query: UnassignInput,
   ) {
-    return this.assignments.unassign(user.sub, body.vendorId, body.country);
+    return this.assignments.unassign(user.sub, query.vendorId, query.country);
   }
 
   @Put("admins/:id/country")

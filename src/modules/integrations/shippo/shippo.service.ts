@@ -120,6 +120,26 @@ export interface RateRequest {
    * for domestic shipments.
    */
   customs?: CustomsDeclaration | undefined;
+  /**
+   * USA + Canada (migration 0082) — override the ship-from ("sender") address
+   * for this shipment with an admin's Shippo sender profile. When omitted the
+   * env warehouse address is used, exactly as before. Set at rate time so the
+   * purchased label inherits it.
+   */
+  senderOverride?: SenderOverride | undefined;
+}
+
+/** A full ship-from address (admin sender profile). */
+export interface SenderOverride {
+  name: string;
+  street1: string;
+  street2?: string | undefined;
+  city: string;
+  state: string;
+  zip: string;
+  country: string;
+  phone: string;
+  email: string;
 }
 
 /** One line on an international customs declaration. */
@@ -406,7 +426,7 @@ export class ShippoService {
    * separate `address_return`, so Shippo uses this same address (and phone)
    * as the return address too.
    */
-  getShipFromAddress(): {
+  getShipFromAddress(override?: SenderOverride): {
     name: string;
     street1: string;
     street2: string;
@@ -417,6 +437,21 @@ export class ShippoService {
     phone: string;
     email: string;
   } {
+    // USA + Canada (0082): an admin sender profile, when supplied, replaces the
+    // env warehouse address verbatim. Without one, behaviour is unchanged.
+    if (override) {
+      return {
+        name: override.name,
+        street1: override.street1,
+        street2: override.street2 ?? "",
+        city: override.city,
+        state: override.state,
+        zip: override.zip,
+        country: (override.country ?? "US").toUpperCase(),
+        phone: override.phone,
+        email: override.email,
+      };
+    }
     return {
       name: this.cfg.WAREHOUSE_FROM_NAME,
       street1: this.cfg.WAREHOUSE_FROM_STREET1,
@@ -459,7 +494,7 @@ export class ShippoService {
     // shipment payload. We pass them as objects rather than ID refs to
     // avoid the extra round-trip needed to pre-create address records.
     // Held in locals so the flat-rate shipments below can reuse them.
-    const addressFrom = this.getShipFromAddress();
+    const addressFrom = this.getShipFromAddress(req.senderOverride);
     const addressTo: Record<string, string> = {
       // Recipient name as printed on the label. Trim and fall back to a
       // placeholder only if the caller genuinely has no name on file —

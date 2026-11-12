@@ -30,6 +30,7 @@ import { AuditService } from "../audit/audit.service";
 import { ShippoService } from "../integrations/shippo/shippo.service";
 import { NotificationService } from "../notifications/notification.service";
 import { StorefrontShipmentSyncService } from "../storefront/storefront-shipment-sync.service";
+import { SenderProfileService } from "../admin/sender-profile.service";
 import { WalletService } from "../wallet/wallet.service";
 
 import { OrderPackService } from "./order-pack.service";
@@ -98,6 +99,12 @@ describe("OrderPackService — pre-flight validation", () => {
         {
           provide: StorefrontShipmentSyncService,
           useValue: storefrontShipmentSync,
+        },
+        // Sender-profile resolver (0082). No profiles in these tests → the
+        // env warehouse address is used, unchanged.
+        {
+          provide: SenderProfileService,
+          useValue: { resolveForOrder: jest.fn().mockResolvedValue(undefined) },
         },
       ],
     }).compile();

@@ -51,6 +51,12 @@ import { VendorAssignmentService } from "./vendor-assignment.service";
 // USA + Canada (Phase 3): SUPER_ADMIN-gated country-routing cutover.
 import { MigrationController } from "./migration.controller";
 import { MigrationService } from "./migration.service";
+// USA + Canada (Phase 10): Shippo sender profiles.
+import { SenderProfileController } from "./sender-profile.controller";
+import { SenderProfileService } from "./sender-profile.service";
+// USA + Canada (Phases 7 & 8): admin earnings + settlements.
+import { EarningsController } from "./earnings.controller";
+import { EarningsService } from "./earnings.service";
 
 @Module({
   // VendorModule exports AgreementService (used by AdminConfigController to
@@ -123,6 +129,10 @@ import { MigrationService } from "./migration.service";
     VendorAssignmentController,
     // SUPER_ADMIN: USA + Canada cutover (country-routing switch-on).
     MigrationController,
+    // SUPER_ADMIN: Shippo sender profiles.
+    SenderProfileController,
+    // Admin earnings + settlements (super admin manages, admin confirms).
+    EarningsController,
   ],
   providers: [
     AdminVendorService,
@@ -130,6 +140,8 @@ import { MigrationService } from "./migration.service";
     SuperAdminDashboardService,
     VendorAssignmentService,
     MigrationService,
+    SenderProfileService,
+    EarningsService,
   ],
 })
 export class AdminModule {}

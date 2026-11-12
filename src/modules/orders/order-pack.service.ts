@@ -58,6 +58,7 @@ import { loadConfig } from "../../common/config";
 import { toFulfillmentCountry } from "../../common/fulfillment-country";
 import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
+import { SenderProfileService } from "../admin/sender-profile.service";
 import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
 import { PackagingLibraryService } from "../../common/services/packaging-library.service";
 import { AuditService } from "../audit/audit.service";
@@ -232,6 +233,9 @@ export class OrderPackService {
     // Migration 0059 / Layer 9 — when a storefront-sourced order's label is
     // purchased, propagate tracking to the storefront order + email the buyer.
     private readonly storefrontShipmentSync: StorefrontShipmentSyncService,
+    // USA + Canada (0082): resolves the processing admin's Shippo sender
+    // profile for an order's label.
+    private readonly senderProfiles: SenderProfileService,
   ) {}
 
   // =========================================================================
@@ -1393,8 +1397,15 @@ export class OrderPackService {
 
     const customs = isInternational ? await this.buildOrderCustoms(orderId) : undefined;
 
+    // USA + Canada (0082): use the processing admin's Shippo sender profile for
+    // this order's label, falling back to the default profile, then the env
+    // warehouse address. Never throws — returns undefined to keep today's
+    // behaviour when no profiles are configured.
+    const senderOverride = await this.senderProfiles.resolveForOrder(orderId);
+
     const rateResponse = await this.shippo.getRates({
       fromAddress: this.warehouseOrigin,
+      ...(senderOverride ? { senderOverride } : {}),
       toAddress: {
         recipientName: order.recipientName,
         line1: order.shipAddressLine1,

@@ -195,6 +195,8 @@ model User {
   // assignments where this user is the operational admin.
   vendorAssignmentsMade VendorAdminAssignment[] @relation("AssignmentAssignedBy")
   vendorAssignments     VendorAdminAssignment[] @relation("AssignmentAdmin")
+  // Migration 0083 — earnings settlements where this user is the operational admin.
+  adminSettlements      AdminSettlement[]       @relation("AdminSettlementAdmin")
 
   // MFA / TOTP
   mfaEnrolled         Boolean     @default(false) @map("mfa_enrolled")
@@ -902,6 +904,80 @@ model StorageBox {
   @@index([status, nextBillingDate])
   @@index([psnId])
   @@map("storage_boxes")
+}
+
+// Migration 0083 — USA + Canada. Admin earnings settlements (Phases 7 & 8).
+// One row per admin + period + kind (fulfillment or storage). Captures the
+// computed amounts AND the fee rates in force when the settlement was created
+// (so historical payouts never change if a SUPER_ADMIN later edits the rates),
+// plus the payment-receipt lifecycle.
+enum AdminSettlementKind {
+  FULFILLMENT
+  STORAGE
+}
+
+enum AdminSettlementStatus {
+  PENDING             // computed, not yet paid
+  PAID_AWAITING       // SUPER_ADMIN marked paid + attached a receipt
+  CONFIRMED           // admin confirmed receipt
+  DISPUTED            // admin disputed
+}
+
+model AdminSettlement {
+  id             String                @id @default(uuid()) @db.Uuid
+  adminUserId    String                @map("admin_user_id") @db.Uuid
+  adminUser      User                  @relation("AdminSettlementAdmin", fields: [adminUserId], references: [id], onDelete: Cascade)
+
+  kind           AdminSettlementKind
+  periodStart    DateTime              @map("period_start")
+  periodEnd      DateTime              @map("period_end")
+
+  grossCents     Int                   @map("gross_cents")
+  platformFeeCents   Int               @default(0) @map("platform_fee_cents")
+  processingFeeCents Int               @default(0) @map("processing_fee_cents")
+  netCents       Int                   @map("net_cents")
+  // Rates (basis points) captured at creation so history is immutable.
+  platformFeeBps     Int               @default(0) @map("platform_fee_bps")
+  processingFeeBps   Int               @default(0) @map("processing_fee_bps")
+
+  status         AdminSettlementStatus @default(PENDING)
+  receiptUrl     String?               @map("receipt_url")
+  note           String?
+  paidAt         DateTime?             @map("paid_at")
+  confirmedAt    DateTime?             @map("confirmed_at")
+
+  createdById    String?               @map("created_by_id") @db.Uuid
+  createdAt      DateTime              @default(now()) @map("created_at")
+  updatedAt      DateTime              @updatedAt @map("updated_at")
+
+  @@index([adminUserId, kind, periodStart])
+  @@index([status])
+  @@map("admin_settlements")
+}
+
+// Migration 0082 — USA + Canada. Shippo sender ("ship from") profiles.
+// One row per operational admin (keyed by the admin's user id) plus a
+// "DEFAULT" row used when an order has no processing admin or no profile. The
+// label-buy path picks the processing admin's profile, falling back to DEFAULT,
+// then to the env warehouse address. SUPER_ADMIN edits these.
+model ShippoSenderProfile {
+  id         String   @id @default(uuid()) @db.Uuid
+  // Admin user id (as text) this sender belongs to, or the literal "DEFAULT".
+  key        String   @unique
+  label      String
+  name       String
+  phone      String
+  email      String
+  line1      String
+  line2      String?
+  city       String
+  state      String
+  postalCode String   @map("postal_code")
+  country    String   @default("US") @db.Char(2)
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@map("shippo_sender_profiles")
 }
 
 // Migration 0024 — sender of a PsnMessage.

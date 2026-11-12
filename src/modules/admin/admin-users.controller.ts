@@ -36,7 +36,7 @@ import {
   Patch,
   Query,
 } from "@nestjs/common";
-import { Role, UserStatus } from "@prisma/client";
+import { Prisma, Role, UserStatus } from "@prisma/client";
 import { z } from "zod";
 
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
@@ -129,7 +129,18 @@ export class AdminUsersController {
       const next = users.pop();
       nextCursor = next?.id ?? null;
     }
-    return { items: users, nextCursor };
+    // USA + Canada (0078): attach each admin's country scope. Read via raw
+    // SQL because `admin_country` may be absent from the stale generated client.
+    const ids = users.map((u) => u.id);
+    const countryById = new Map<string, string | null>();
+    if (ids.length > 0) {
+      const rows = await this.prisma.$queryRaw<Array<{ id: string; admin_country: string | null }>>(
+        Prisma.sql`SELECT id, admin_country FROM users WHERE id IN (${Prisma.join(ids)})`,
+      );
+      for (const r of rows) countryById.set(r.id, r.admin_country);
+    }
+    const items = users.map((u) => ({ ...u, adminCountry: countryById.get(u.id) ?? null }));
+    return { items, nextCursor };
   }
 
   /**
