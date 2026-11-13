@@ -73,6 +73,17 @@ const patchRoleSchema = z.object({
 });
 type PatchRoleInput = z.infer<typeof patchRoleSchema>;
 
+// The account statuses a SUPER_ADMIN may set from the admin console.
+// PENDING_EMAIL_VERIFICATION is deliberately excluded — it's a signup
+// lifecycle state the system owns, not something an operator assigns.
+const SETTABLE_STATUSES = ["ACTIVE", "SUSPENDED", "CLOSED"] as const;
+type SettableStatus = (typeof SETTABLE_STATUSES)[number];
+
+const patchStatusSchema = z.object({
+  status: z.enum(SETTABLE_STATUSES),
+});
+type PatchStatusInput = z.infer<typeof patchStatusSchema>;
+
 @Controller({ path: "admin/users", version: "1" })
 // SUPER_ADMIN only. Every endpoint here can move a user's role, so
 // we don't split read vs. write — a FINANCE_ADMIN listing admin
@@ -258,5 +269,78 @@ export class AdminUsersController {
       // will need to re-authenticate to pick up their new role.
       revokedSessions: true,
     };
+  }
+
+  /**
+   * Change a user's ACCOUNT STATUS (Active / Suspended / Closed).
+   * SUPER_ADMIN only — separate from role. Unlike role changes this is
+   * NOT restricted to admin-tier users: a Super Admin may suspend or
+   * close any account (e.g. a vendor-upgraded-to-admin still carries a
+   * vendorId). PENDING_EMAIL_VERIFICATION is not settable here.
+   *
+   * Rules (first violation wins):
+   *   1. Target must exist.
+   *   2. Actor can't change their own status — suspending/closing
+   *      yourself is a lock-out footgun; another SUPER_ADMIN must do it.
+   *
+   * SUSPENDED / CLOSED revoke every active session so the account can't
+   * keep acting on a live token; the user is locked out until a Super
+   * Admin reactivates them. Reactivating (ACTIVE) does not revoke —
+   * there's nothing to revoke and the user simply logs in again.
+   */
+  @Patch(":id/status")
+  @HttpCode(HttpStatus.OK)
+  async updateStatus(
+    @CurrentUser() actor: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body(new ZodValidationPipe(patchStatusSchema)) body: PatchStatusInput,
+  ) {
+    const target = await this.prisma.user.findUnique({
+      where: { id },
+      select: { id: true, email: true, status: true },
+    });
+    if (!target) {
+      throw new NotFoundException({ message: "User not found.", code: "user_not_found" });
+    }
+    if (target.id === actor.sub) {
+      throw new ForbiddenException({
+        message: "You can't change your own account status. Ask another SUPER_ADMIN.",
+        code: "status_self_change_forbidden",
+      });
+    }
+
+    const before = target.status as string;
+    const after: SettableStatus = body.status;
+    if (before === after) {
+      // No-op — don't touch sessions or the audit log. Keeps a double
+      // save on the UI harmless.
+      return { id: target.id, email: target.email, status: after, revokedSessions: false };
+    }
+
+    await this.prisma.user.update({
+      where: { id: target.id },
+      // Cast because the local Prisma client's UserStatus union is exact;
+      // runtime is exact string equality and Postgres validates the enum.
+      data: { status: after as UserStatus },
+    });
+
+    // Suspend / close lock the account out now, so kill live sessions.
+    const revoke = after === "SUSPENDED" || after === "CLOSED";
+    if (revoke) {
+      await this.tokens.revokeAllForUser(target.id, "status_changed_by_admin");
+    }
+
+    void this.audit
+      .log({
+        actorId: actor.sub,
+        action: "admin.user.status_changed",
+        resourceType: "user",
+        resourceId: target.id,
+        beforeState: { status: before },
+        afterState: { status: after },
+      })
+      .catch(() => undefined);
+
+    return { id: target.id, email: target.email, status: after, revokedSessions: revoke };
   }
 }
