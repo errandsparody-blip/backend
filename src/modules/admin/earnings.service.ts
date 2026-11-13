@@ -96,7 +96,7 @@ export class EarningsService {
     const rows = await this.prisma.$queryRaw<Array<{ gross: bigint }>>(Prisma.sql`
       SELECT COALESCE(SUM(-le.amount_cents), 0)::bigint AS gross
       FROM ledger_entries le
-      JOIN orders o ON o.id = le.reference_id::uuid
+      JOIN orders o ON o.id::text = le.reference_id
       WHERE le.type = 'FULFILLMENT' AND le.reference_type = 'order'
         AND o.processing_user_id = ${adminUserId}::uuid
         AND le.created_at >= ${from} AND le.created_at < ${to}

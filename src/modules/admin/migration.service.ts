@@ -67,7 +67,7 @@ export class MigrationService {
       FROM orders o
       JOIN vendors v ON v.id = o.vendor_id
       WHERE o.ship_country = 'CA'
-        AND o.status NOT IN (${Prisma.join(IN_FLIGHT_EXCLUDED)})
+        AND o.status::text NOT IN (${Prisma.join(IN_FLIGHT_EXCLUDED)})
       GROUP BY o.vendor_id, v.business_name
     `);
 

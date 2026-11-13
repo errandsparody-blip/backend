@@ -135,7 +135,9 @@ export class AdminUsersController {
     const countryById = new Map<string, string | null>();
     if (ids.length > 0) {
       const rows = await this.prisma.$queryRaw<Array<{ id: string; admin_country: string | null }>>(
-        Prisma.sql`SELECT id, admin_country FROM users WHERE id IN (${Prisma.join(ids)})`,
+        Prisma.sql`SELECT id, admin_country FROM users WHERE id IN (${Prisma.join(
+          ids.map((id) => Prisma.sql`${id}::uuid`),
+        )})`,
       );
       for (const r of rows) countryById.set(r.id, r.admin_country);
     }

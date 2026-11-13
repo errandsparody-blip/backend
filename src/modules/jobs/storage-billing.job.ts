@@ -227,7 +227,9 @@ export class StorageBillingJob {
     const countryById = new Map<string, string>();
     if (ids.length > 0) {
       const crows = await this.prisma.$queryRaw<Array<{ id: string; country: string }>>(
-        Prisma.sql`SELECT id, country FROM storage_boxes WHERE id IN (${Prisma.join(ids)})`,
+        Prisma.sql`SELECT id, country FROM storage_boxes WHERE id IN (${Prisma.join(
+          ids.map((id) => Prisma.sql`${id}::uuid`),
+        )})`,
       );
       for (const r of crows) countryById.set(r.id, (r.country ?? "US").toUpperCase());
     }
