@@ -320,11 +320,15 @@ export class ShippoWebhookController {
       });
     });
 
-    // Customer-facing tracking emails (to the ORDER RECIPIENT). Fire on the
-    // first in-transit event ("shipped") and on delivery. Idempotency keys
-    // make repeated webhooks send at most one of each. Storefront orders are
-    // skipped inside the helper (they're emailed by the storefront sync).
-    if (targetStatus === "IN_TRANSIT") {
+    // Customer-facing tracking emails (to the ORDER RECIPIENT). The client
+    // wants EXACTLY one email on ship and one on delivery — never one per
+    // carrier movement. The email idempotency key is only honoured by the
+    // provider for ~24h, so a multi-day shipment that emits an in-transit
+    // webhook every day would otherwise re-send the "shipped" email daily.
+    // Gate on the FIRST in-transit transition instead: `order.shippedAt` is
+    // the pre-update value, so it's null only on the very first in-transit
+    // event (we set it in the same update above). Later movements are skipped.
+    if (targetStatus === "IN_TRANSIT" && !order.shippedAt) {
       void this.notifyCustomerTracking(order, "shipped").catch(() => undefined);
     }
     if (targetStatus === "DELIVERED") {
