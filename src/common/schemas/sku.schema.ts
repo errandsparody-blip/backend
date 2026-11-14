@@ -18,6 +18,8 @@ export const adminListSkusSchema = listSkusSchema.extend({
   storageTier: z.enum(["SMALL", "MEDIUM", "LARGE", "X_LARGE", "PALLET"]).optional(),
   /** When true, only return rows where quantityAvailable + quantityReserved is 0. */
   zeroOnly: z.coerce.boolean().optional(),
+  /** USA + Canada: filter stock-on-hand by fulfillment country (US / CA toggle). */
+  country: z.enum(["US", "CA"]).optional(),
 });
 export type AdminListSkusInput = z.infer<typeof adminListSkusSchema>;
 

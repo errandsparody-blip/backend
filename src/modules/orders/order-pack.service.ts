@@ -58,6 +58,7 @@ import { loadConfig } from "../../common/config";
 import { toFulfillmentCountry } from "../../common/fulfillment-country";
 import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
+import { orderScopeWhere, type ScopeLike } from "../../common/services/admin-scope.service";
 import { SenderProfileService } from "../admin/sender-profile.service";
 import { CarrierPackagingRegistryService } from "../../common/services/carrier-packaging-registry";
 import { PackagingLibraryService } from "../../common/services/packaging-library.service";
@@ -270,7 +271,7 @@ export class OrderPackService {
     return rows.length > 0;
   }
 
-  async listPackQueue(input: { limit: number }): Promise<
+  async listPackQueue(input: { limit: number }, scope?: ScopeLike): Promise<
     Array<{
       id: string;
       orderNumber: number;
@@ -287,6 +288,9 @@ export class OrderPackService {
       where: {
         status: "PENDING_PACKING" as OrderStatus,
         ...(siblingIds.length ? { id: { notIn: siblingIds } } : {}),
+        // USA + Canada (0078): operational-admin scope — only assigned
+        // vendors and the admin's own country. Unrestricted roles pass no scope.
+        ...orderScopeWhere(scope ?? null),
       },
       orderBy: { createdAt: "asc" },
       take: input.limit,
@@ -313,7 +317,7 @@ export class OrderPackService {
    * AWAITING_WALLET_FUNDING so admins can re-fetch or re-attempt the
    * selection once the vendor tops up.
    */
-  async listRateQueue(input: { limit: number }): Promise<
+  async listRateQueue(input: { limit: number }, scope?: ScopeLike): Promise<
     Array<{
       id: string;
       orderNumber: number;
@@ -333,6 +337,7 @@ export class OrderPackService {
       where: {
         status: { in: targetStatuses },
         ...(siblingIds.length ? { id: { notIn: siblingIds } } : {}),
+        ...orderScopeWhere(scope ?? null),
       },
       orderBy: { updatedAt: "asc" },
       take: input.limit,

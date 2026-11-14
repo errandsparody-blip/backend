@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 
+import { AdminScopeService } from "../../common/services/admin-scope.service";
 import { AuditModule } from "../audit/audit.module";
 import { IntegrationModule } from "../integration/integration.module";
 import { ReferralModule } from "../referral/referral.module";
@@ -15,7 +16,7 @@ import { PsnService } from "./psn.service";
 @Module({
   imports: [AuditModule, SkuModule, WalletModule, ReferralModule, IntegrationModule],
   controllers: [PsnController, AdminPsnController],
-  providers: [PsnService, AdminPsnService, PsnMessageService],
+  providers: [PsnService, AdminPsnService, PsnMessageService, AdminScopeService],
   exports: [PsnService, AdminPsnService, PsnMessageService],
 })
 export class PsnModule {}

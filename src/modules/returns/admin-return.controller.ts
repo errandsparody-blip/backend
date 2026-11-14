@@ -24,6 +24,7 @@ import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
+import { AdminScopeService } from "../../common/services/admin-scope.service";
 
 // ADMIN role reference.
 const ROLE_ADMIN = "ADMIN" as Role;
@@ -55,12 +56,18 @@ export class AdminReturnController {
   constructor(
     private readonly returns: ReturnService,
     private readonly r2: R2Service,
+    // USA + Canada (0078): operational-admin scope for the returns list.
+    private readonly adminScope: AdminScopeService,
   ) {}
 
   @Get()
   @RequiresPage("admin.returns.read")
-  list(@Query(new ZodValidationPipe(listReturnsSchema)) q: ListReturnsInput) {
-    return this.returns.adminList(q);
+  async list(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query(new ZodValidationPipe(listReturnsSchema)) q: ListReturnsInput,
+  ) {
+    const scope = await this.adminScope.resolve(user);
+    return this.returns.adminList(q, scope.restricted ? scope : null);
   }
 
   /**

@@ -29,6 +29,7 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { IdempotencyService } from "../../common/idempotency.service";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
+import { AdminScopeService } from "../../common/services/admin-scope.service";
 
 // ADMIN role reference.
 const ROLE_ADMIN = "ADMIN" as Role;
@@ -56,11 +57,17 @@ export class AdminSkuController {
   constructor(
     private readonly skus: AdminSkuService,
     private readonly idempotency: IdempotencyService,
+    // USA + Canada (0078): operational-admin scope for the stock-on-hand list.
+    private readonly adminScope: AdminScopeService,
   ) {}
 
   @Get()
-  list(@Query(new ZodValidationPipe(adminListSkusSchema)) q: AdminListSkusInput) {
-    return this.skus.list(q);
+  async list(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query(new ZodValidationPipe(adminListSkusSchema)) q: AdminListSkusInput,
+  ) {
+    const scope = await this.adminScope.resolve(user);
+    return this.skus.list(q, scope.restricted ? scope : null);
   }
 
   @Get(":id")

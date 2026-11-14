@@ -48,6 +48,7 @@ import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
+import { AdminScopeService } from "../../common/services/admin-scope.service";
 
 import { OrderPackService } from "./order-pack.service";
 
@@ -136,7 +137,12 @@ type FetchRatesInput = z.infer<typeof fetchRatesSchema>;
 @Roles(Role.WAREHOUSE_OPERATOR, Role.FINANCE_ADMIN, Role.SUPER_ADMIN, ROLE_ADMIN)
 @RequiresPage("admin.orders.write")
 export class AdminOrderPackController {
-  constructor(private readonly pack: OrderPackService) {}
+  constructor(
+    private readonly pack: OrderPackService,
+    // USA + Canada (0078): resolves an operational admin's country + assigned
+    // vendors so the pack queues show only what they may work on.
+    private readonly adminScope: AdminScopeService,
+  ) {}
 
   // -------------------------------------------------------------------------
   // Reads
@@ -144,14 +150,24 @@ export class AdminOrderPackController {
 
   @Get("queue")
   @RequiresPage("admin.orders.read")
-  listPackQueue(@Query(new ZodValidationPipe(listSchema)) q: ListInput) {
-    return this.pack.listPackQueue({ limit: q.limit }).then((items) => ({ items }));
+  async listPackQueue(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query(new ZodValidationPipe(listSchema)) q: ListInput,
+  ) {
+    const scope = await this.adminScope.resolve(user);
+    const items = await this.pack.listPackQueue({ limit: q.limit }, scope.restricted ? scope : null);
+    return { items };
   }
 
   @Get("rate-queue")
   @RequiresPage("admin.orders.read")
-  listRateQueue(@Query(new ZodValidationPipe(listSchema)) q: ListInput) {
-    return this.pack.listRateQueue({ limit: q.limit }).then((items) => ({ items }));
+  async listRateQueue(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query(new ZodValidationPipe(listSchema)) q: ListInput,
+  ) {
+    const scope = await this.adminScope.resolve(user);
+    const items = await this.pack.listRateQueue({ limit: q.limit }, scope.restricted ? scope : null);
+    return { items };
   }
 
   @Get(":id/rate-options")

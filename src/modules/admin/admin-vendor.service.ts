@@ -190,6 +190,39 @@ export class AdminVendorService {
     vendorId: string,
     input: { enabled: boolean; feeCents: number; maxUnits: number },
   ): Promise<{ enabled: boolean; feeCents: number; maxUnits: number }> {
+    return this.setFlatFeeImpl(actorId, vendorId, input);
+  }
+
+  /**
+   * List every vendor currently on a negotiated flat fee (USA + Canada,
+   * migration 0080). Powers the "who's on a flat fee" table on the USA &
+   * Canada page so the Super Admin can see at a glance who is off the
+   * standard schedule. Everyone not listed is on the default schedule.
+   */
+  async listFlatFees(): Promise<
+    Array<{ id: string; businessName: string; feeCents: number; maxUnits: number }>
+  > {
+    const rows = await this.prisma.$queryRaw<
+      Array<{ id: string; business_name: string; flat_fee_cents: number; flat_fee_max_units: number }>
+    >(Prisma.sql`
+      SELECT id, business_name, flat_fee_cents, flat_fee_max_units
+      FROM vendors
+      WHERE flat_fee_enabled = true
+      ORDER BY business_name ASC
+    `);
+    return rows.map((r) => ({
+      id: r.id,
+      businessName: r.business_name,
+      feeCents: Number(r.flat_fee_cents),
+      maxUnits: Number(r.flat_fee_max_units),
+    }));
+  }
+
+  private async setFlatFeeImpl(
+    actorId: string,
+    vendorId: string,
+    input: { enabled: boolean; feeCents: number; maxUnits: number },
+  ): Promise<{ enabled: boolean; feeCents: number; maxUnits: number }> {
     const vendor = await this.prisma.vendor.findUnique({
       where: { id: vendorId },
       select: { id: true },

@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 
 import { IdempotencyModule } from "../../common/idempotency.module";
+import { AdminScopeService } from "../../common/services/admin-scope.service";
 import { AuditModule } from "../audit/audit.module";
 import { AuthModule } from "../auth/auth.module";
 import { EmailModule } from "../email/email.module";
@@ -142,6 +143,7 @@ import { EarningsService } from "./earnings.service";
     MigrationService,
     SenderProfileService,
     EarningsService,
+    AdminScopeService,
   ],
 })
 export class AdminModule {}

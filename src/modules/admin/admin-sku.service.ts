@@ -25,6 +25,7 @@ import {
 import type { Prisma } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
+import { stockScopeWhere, type ScopeLike } from "../../common/services/admin-scope.service";
 import type {
   AdminAdjustSkuInput,
   AdminListMovementsInput,
@@ -90,12 +91,23 @@ export class AdminSkuService {
 
   async list(
     input: AdminListSkusInput,
+    scope?: ScopeLike,
   ): Promise<{ items: AdminSkuRow[]; nextCursor: string | null }> {
     const where: Prisma.SkuWhereInput = {};
     if (input.status) where.status = input.status;
     if (input.productId) where.productId = input.productId;
     if (input.vendorId) where.vendorId = input.vendorId;
     if (input.storageTier) where.storageTier = input.storageTier;
+    // USA + Canada (0078): operational-admin scope wins over any caller vendor
+    // filter. For unrestricted roles the helper is a no-op and the US/CA toggle
+    // (`input.country`) applies instead.
+    const sc = stockScopeWhere(scope ?? null);
+    if (sc.vendorId) where.vendorId = sc.vendorId;
+    // `country` (migration 0077) may be absent from the stale generated client
+    // at typecheck time; cast at the assignment boundary. Runtime is a valid
+    // CHAR(2) column so Postgres filters correctly.
+    if (sc.country) (where as Record<string, unknown>).country = sc.country;
+    else if (input.country) (where as Record<string, unknown>).country = input.country;
     if (input.zeroOnly) {
       where.AND = [
         { quantityAvailable: { lte: 0 } },

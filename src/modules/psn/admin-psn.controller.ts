@@ -16,6 +16,7 @@ import { RequiresPage } from "../../common/decorators/requires-page.decorator";
 import { Roles } from "../../common/decorators/roles.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 import { ZodValidationPipe } from "../../common/pipes/zod-validation.pipe";
+import { AdminScopeService } from "../../common/services/admin-scope.service";
 
 // ADMIN role reference.
 const ROLE_ADMIN = "ADMIN" as Role;
@@ -55,12 +56,18 @@ export class AdminPsnController {
     private readonly admin: AdminPsnService,
     private readonly messages: PsnMessageService,
     private readonly r2: R2Service,
+    // USA + Canada (0078): operational-admin scope for the incoming-PSN list.
+    private readonly adminScope: AdminScopeService,
   ) {}
 
   @Get()
   @RequiresPage("admin.psn.read")
-  list(@Query(new ZodValidationPipe(listPsnsSchema)) q: ListPsnsInput) {
-    return this.admin.listIncoming(q);
+  async list(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query(new ZodValidationPipe(listPsnsSchema)) q: ListPsnsInput,
+  ) {
+    const scope = await this.adminScope.resolve(user);
+    return this.admin.listIncoming(q, scope.restricted ? scope : null);
   }
 
   @Get(":id")

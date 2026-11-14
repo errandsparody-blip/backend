@@ -112,12 +112,14 @@ export class AdminUsersController {
     // sandbox because the local Prisma client may not include the
     // new enum member yet.
     const adminRoles = ["ADMIN", "FINANCE_ADMIN", "WAREHOUSE_OPERATOR", "SUPER_ADMIN"] as unknown as Role[];
-    const where = {
-      role: { in: adminRoles },
-      ...(q.search
-        ? { email: { contains: q.search, mode: "insensitive" as const } }
-        : {}),
-    };
+    // Default view: admin-tier users only. But when the Super Admin is
+    // SEARCHING by email, widen to EVERY account so they can find a vendor
+    // (or any other) account and promote it to an admin role — the four
+    // operational admins are created this way. (Approved by product: a
+    // vendor account may be promoted; updateRole allows it below.)
+    const where = q.search
+      ? { email: { contains: q.search, mode: "insensitive" as const } }
+      : { role: { in: adminRoles } };
     const users = await this.prisma.user.findMany({
       where,
       take: q.limit + 1,
@@ -186,22 +188,12 @@ export class AdminUsersController {
     if (!target) {
       throw new NotFoundException({ message: "User not found.", code: "user_not_found" });
     }
-    if (target.vendorId !== null) {
-      throw new BadRequestException({
-        message: "Vendor-scoped users cannot be assigned an admin role here.",
-        code: "user_is_vendor_scoped",
-      });
-    }
-    // Guard against changing NON-admin users through this path even
-    // if vendorId is null (defence in depth; there aren't any today
-    // but a future migration might create one). Only ADMIN-tier
-    // users are movable here.
-    if (!(ASSIGNABLE_ROLES as readonly string[]).includes(target.role as string)) {
-      throw new BadRequestException({
-        message: "This endpoint only reassigns admin-tier users.",
-        code: "user_role_not_admin_tier",
-      });
-    }
+    // Product decision (USA + Canada rollout): a Super Admin may promote ANY
+    // account — including a vendor-scoped one — to an admin role, so the four
+    // operational admins can be set up from existing accounts. The user keeps
+    // their vendorId; AdminScopeService resolves ADMINs by admin_country +
+    // assignments and ignores vendorId, so tenant data stays intact. The old
+    // "vendor-scoped" and "admin-tier only" refusals are intentionally gone.
     if (target.id === actor.sub && body.role !== target.role) {
       throw new ForbiddenException({
         message:

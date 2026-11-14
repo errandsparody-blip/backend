@@ -30,6 +30,7 @@ import {
   type DeclaredBoxCounts,
 } from "../../common/fees";
 import { PrismaService } from "../../common/prisma.service";
+import { stockScopeWhere, type ScopeLike } from "../../common/services/admin-scope.service";
 import type { CompleteReceivingInput, ListPsnsInput } from "../../common/schemas/psn.schema";
 import { ShippingPointService } from "../../common/services/shipping-point.service";
 import { AuditService } from "../audit/audit.service";
@@ -87,7 +88,7 @@ export class AdminPsnService {
    * single vendor's history without losing the cross-vendor query
    * surface. Without it, every vendor's PSNs are returned.
    */
-  async listIncoming(input: ListPsnsInput) {
+  async listIncoming(input: ListPsnsInput, scope?: ScopeLike) {
     // Normalise status into a Prisma filter regardless of whether the
     // caller passed a single value (legacy single-string form) or a
     // comma-list (history-tab multi-status form). When the caller
@@ -109,6 +110,9 @@ export class AdminPsnService {
     const where: Prisma.PsnWhereInput = {
       status: statusFilter,
       ...(input.vendorId ? { vendorId: input.vendorId } : {}),
+      // USA + Canada (0078): operational-admin scope — assigned vendors and
+      // the admin's own country only. Unrestricted roles pass no scope.
+      ...stockScopeWhere(scope ?? null),
       // Optional createdAt date-range filter (admin Audit page pattern).
       ...(input.from || input.to
         ? {

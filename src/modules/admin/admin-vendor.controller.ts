@@ -80,6 +80,15 @@ export class AdminVendorController {
   // Read
   // ---------------------------------------------------------------------------
 
+  // Vendors currently on a negotiated flat fee (USA + Canada). SUPER_ADMIN
+  // only. Declared BEFORE `@Get(":id")` so the literal path isn't captured as
+  // an :id (which would 400 on the UUID pipe).
+  @Roles(Role.SUPER_ADMIN)
+  @Get("flat-fees")
+  async listFlatFees() {
+    return { items: await this.vendors.listFlatFees() };
+  }
+
   // ADMIN can be granted vendor read access via the
   // admin.vendors.read page key. FINANCE_ADMIN + SUPER_ADMIN keep their
   // compiled-in access (no config toggle for them).

@@ -49,6 +49,45 @@ interface AuthLike {
   role: Role;
 }
 
+/**
+ * A resolved scope (or null for unrestricted). Accepts the full AdminScope or
+ * the trimmed `{ vendorIds, country }` shape passed around the order service.
+ */
+export type ScopeLike = { vendorIds: string[] | null; country: FulfillmentCountry | null } | null;
+
+/**
+ * Prisma `where` fragment for ORDER-shaped tables (filter by the recipient
+ * country via `shipCountry`). A CA admin sees only CA-destination orders of
+ * their assigned vendors; a US admin sees everything that isn't CA.
+ */
+export function orderScopeWhere(scope: ScopeLike): {
+  vendorId?: { in: string[] };
+  shipCountry?: "CA" | { not: "CA" };
+} {
+  if (!scope) return {};
+  const w: { vendorId?: { in: string[] }; shipCountry?: "CA" | { not: "CA" } } = {};
+  if (scope.vendorIds) w.vendorId = { in: scope.vendorIds };
+  if (scope.country === "CA") w.shipCountry = "CA";
+  else if (scope.country === "US") w.shipCountry = { not: "CA" };
+  return w;
+}
+
+/**
+ * Prisma `where` fragment for STOCK-shaped tables (SKUs, PSNs, returns) whose
+ * own `country` column holds where the stock lives. A CA admin sees only CA
+ * stock of their assigned vendors.
+ */
+export function stockScopeWhere(scope: ScopeLike): {
+  vendorId?: { in: string[] };
+  country?: string;
+} {
+  if (!scope) return {};
+  const w: { vendorId?: { in: string[] }; country?: string } = {};
+  if (scope.vendorIds) w.vendorId = { in: scope.vendorIds };
+  if (scope.country) w.country = scope.country;
+  return w;
+}
+
 @Injectable()
 export class AdminScopeService {
   constructor(private readonly prisma: PrismaService) {}

@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 
+import { AdminScopeService } from "../../common/services/admin-scope.service";
 import { AuditModule } from "../audit/audit.module";
 import { WalletModule } from "../wallet/wallet.module";
 
@@ -12,7 +13,7 @@ import { ReturnService } from "./return.service";
 @Module({
   imports: [AuditModule, WalletModule],
   controllers: [ReturnController, AdminReturnController],
-  providers: [ReturnService],
+  providers: [ReturnService, AdminScopeService],
   exports: [ReturnService],
 })
 export class ReturnModule {}

@@ -33,6 +33,7 @@ import type { PrismaClient, Return, ReturnStatus } from "@prisma/client";
 import { loadFeeSchedule } from "../../common/fees";
 import { formatOrderRef } from "../../common/order-ref";
 import { PrismaService } from "../../common/prisma.service";
+import { type ScopeLike } from "../../common/services/admin-scope.service";
 import type {
   CreateReturnInput,
   FinalizeReturnInput,
@@ -671,12 +672,16 @@ export class ReturnService {
     return ret;
   }
 
-  async adminList(input: ListReturnsInput) {
+  async adminList(input: ListReturnsInput, scope?: ScopeLike) {
     const where: Prisma.ReturnWhereInput = {};
     // Cast for the stale Prisma client: the enum union in the Zod schema
     // includes INSTRUCTED/DONATED before the generated client is
     // regenerated on deploy.
     if (input.status) where.status = input.status as unknown as ReturnStatus;
+    // USA + Canada (0078): operational-admin scope — assigned vendors only.
+    // Returns carry no country column of their own, so we scope by vendor
+    // (country separation follows from the vendor's own stock).
+    if (scope?.vendorIds) where.vendorId = { in: scope.vendorIds };
     if (input.from || input.to) {
       where.createdAt = {
         ...(input.from ? { gte: input.from } : {}),
