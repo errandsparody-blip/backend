@@ -1406,7 +1406,7 @@ export class OrderPackService {
     // this order's label, falling back to the default profile, then the env
     // warehouse address. Never throws — returns undefined to keep today's
     // behaviour when no profiles are configured.
-    const senderOverride = await this.senderProfiles.resolveForOrder(orderId);
+    const senderOverride = await this.senderProfiles.resolveForOrder(orderId, actorId);
 
     const rateResponse = await this.shippo.getRates({
       fromAddress: this.warehouseOrigin,

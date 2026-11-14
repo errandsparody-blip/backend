@@ -89,22 +89,36 @@ export class SenderProfileService {
    * if present, else the DEFAULT profile, else undefined (caller uses the env
    * warehouse address). Never throws — a lookup failure just falls back.
    */
-  async resolveForOrder(orderId: string): Promise<SenderOverride | undefined> {
+  async resolveForOrder(
+    orderId: string,
+    actingUserId?: string | null,
+  ): Promise<SenderOverride | undefined> {
     try {
       const rows = await this.prisma.$queryRaw<Array<{ processing_user_id: string | null }>>(
         Prisma.sql`SELECT processing_user_id FROM orders WHERE id = ${orderId}::uuid`,
       );
       const processingUserId = rows[0]?.processing_user_id ?? null;
-      const keys = processingUserId ? [processingUserId, DEFAULT_KEY] : [DEFAULT_KEY];
+      // Priority: the admin ACTING on this order right now (e.g. fetching
+      // rates / packing) → the admin who claimed it (processing_user_id) →
+      // the DEFAULT profile → env warehouse. Using the acting admin's profile
+      // means a Canada admin's Canadian ship-from is used even before the
+      // order is formally claimed — which is what makes Shippo quote Canadian
+      // (CAD) rates instead of US/international.
+      const keys = [...new Set(
+        [actingUserId, processingUserId, DEFAULT_KEY].filter((k): k is string => !!k),
+      )];
       const profiles = await this.prisma.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
         SELECT key, label, name, phone, email, line1, line2, city, state, postal_code, country
-        FROM shippo_sender_profiles WHERE key IN (${Prisma.join(keys)})
+        FROM shippo_sender_profiles WHERE key IN (${Prisma.join(
+          keys.map((k) => Prisma.sql`${k}`),
+        )})
       `);
       if (profiles.length === 0) return undefined;
-      // Prefer the processing admin's profile over DEFAULT.
       const byKey = new Map(profiles.map((p) => [String(p.key), this.toProfile(p)]));
       const chosen =
-        (processingUserId ? byKey.get(processingUserId) : undefined) ?? byKey.get(DEFAULT_KEY);
+        (actingUserId ? byKey.get(actingUserId) : undefined) ??
+        (processingUserId ? byKey.get(processingUserId) : undefined) ??
+        byKey.get(DEFAULT_KEY);
       if (!chosen) return undefined;
       return {
         name: chosen.name,
