@@ -5,7 +5,7 @@
  */
 
 import { Injectable, Logger, NotFoundException } from "@nestjs/common";
-import type { Notification, NotificationSeverity, Prisma } from "@prisma/client";
+import { Prisma, type Notification, type NotificationSeverity } from "@prisma/client";
 
 import { PrismaService } from "../../common/prisma.service";
 import { EmailService, type EmailMessage } from "../email/email.service";
@@ -52,6 +52,34 @@ export class NotificationService {
    * is provided, fan an email out as well; the email path is also
    * isolated — a delivery failure does not break the in-app row.
    */
+  /**
+   * USA + Canada: notify the operational ADMIN assigned to this vendor for the
+   * given country (via vendor_admin_assignments). No-op when no admin is
+   * assigned. Best-effort — never throws. Used so admins get a bell for the
+   * vendors + country they actually manage (new PSN to receive, etc.).
+   */
+  async emitToVendorAdmin(
+    vendorId: string,
+    country: string,
+    args: Omit<EmitArgs, "vendorId" | "userId">,
+  ): Promise<void> {
+    try {
+      const c = (country ?? "US").toUpperCase() === "CA" ? "CA" : "US";
+      const rows = await this.prisma.$queryRaw<Array<{ admin_user_id: string }>>(
+        Prisma.sql`
+          SELECT admin_user_id FROM vendor_admin_assignments
+          WHERE vendor_id = ${vendorId}::uuid AND country = ${c}
+          LIMIT 1
+        `,
+      );
+      const adminUserId = rows[0]?.admin_user_id;
+      if (!adminUserId) return;
+      await this.emit({ ...args, userId: adminUserId });
+    } catch (err) {
+      this.logger.warn({ vendorId, err: `${err}` }, "emitToVendorAdmin failed");
+    }
+  }
+
   async emit(args: EmitArgs): Promise<void> {
     if (!args.vendorId && !args.userId) {
       this.logger.warn({ type: args.type }, "emit called with neither vendorId nor userId");

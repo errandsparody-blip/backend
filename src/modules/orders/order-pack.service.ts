@@ -1184,6 +1184,24 @@ export class OrderPackService {
     return { orderId, status: "PENDING_PACKING" as OrderStatus };
   }
 
+  /**
+   * USD per 1 CAD — the Super-Admin-configured exchange rate used to convert
+   * Canadian-carrier (CAD) label costs into the USD the vendor wallet holds.
+   * Stored in the `configuration` table under `cad_to_usd_rate` as { rate }.
+   * Falls back to a conservative default if unset or invalid.
+   */
+  private async getUsdPerCad(): Promise<number> {
+    const DEFAULT = 0.72;
+    try {
+      const row = await this.prisma.configuration.findUnique({ where: { key: "cad_to_usd_rate" } });
+      const v = row?.value as { rate?: number } | number | null | undefined;
+      const rate = typeof v === "number" ? v : v?.rate;
+      return typeof rate === "number" && rate > 0 && rate < 100 ? rate : DEFAULT;
+    } catch {
+      return DEFAULT;
+    }
+  }
+
   // =========================================================================
   // WRITE — fetchRates
   // =========================================================================
@@ -1407,9 +1425,12 @@ export class OrderPackService {
     // warehouse address. Never throws — returns undefined to keep today's
     // behaviour when no profiles are configured.
     const senderOverride = await this.senderProfiles.resolveForOrder(orderId, actorId);
+    // USA + Canada: CAD rates (Canadian carriers) → USD via the Super-Admin FX.
+    const usdPerCad = await this.getUsdPerCad();
 
     const rateResponse = await this.shippo.getRates({
       fromAddress: this.warehouseOrigin,
+      usdPerCad,
       ...(senderOverride ? { senderOverride } : {}),
       toAddress: {
         recipientName: order.recipientName,
@@ -1822,6 +1843,7 @@ export class OrderPackService {
       label = await this.shippo.purchaseLabel({
         shipmentId: inner.shipmentProviderRef,
         rateId: inner.rateProviderRef,
+        usdPerCad: await this.getUsdPerCad(),
         ...(insuranceCents > 0 ? { insuranceCents } : {}),
       });
     } catch (labelErr) {
@@ -1849,16 +1871,34 @@ export class OrderPackService {
       let statusErr: string | undefined;
 
       try {
-        await this.wallet.credit({
-          vendorId: inner.vendorId,
-          amountCents: inner.shippingCostCents,
-          type: "REFUND",
-          description: `Refund · label purchase failed for ${inner.carrier} ${inner.service}`,
-          referenceType: "order",
-          referenceId: orderId,
-          actorId,
+        // Idempotent: if a refund for THIS order already exists (a prior
+        // compensation attempt committed, or an operator refunded manually),
+        // don't credit again — treat it as already refunded. Prevents the
+        // double-refund the old flow could cause when a committed refund was
+        // mis-reported as failed and then refunded by hand.
+        const already = await this.prisma.ledgerEntry.findFirst({
+          where: {
+            vendorId: inner.vendorId,
+            referenceType: "order",
+            referenceId: orderId,
+            type: "REFUND" as unknown as Prisma.LedgerEntryWhereInput["type"],
+          },
+          select: { id: true },
         });
-        refundOk = true;
+        if (already) {
+          refundOk = true;
+        } else {
+          await this.wallet.credit({
+            vendorId: inner.vendorId,
+            amountCents: inner.shippingCostCents,
+            type: "REFUND",
+            description: `Refund · label purchase failed for ${inner.carrier} ${inner.service}`,
+            referenceType: "order",
+            referenceId: orderId,
+            actorId,
+          });
+          refundOk = true;
+        }
       } catch (err) {
         refundErr = this.extractErrorDetail(err);
         this.logger.error(

@@ -102,12 +102,13 @@ export function isPageKey(value: unknown): value is PageKey {
  * least privilege.
  */
 export const ADMIN_DEFAULT_PERMISSIONS: readonly PageKey[] = [
-  // The ADMIN role is a warehouse/fulfillment operator. Its six functions —
-  // Receiving, Orders, Inventory, Pack (v2), Returns, Shopper — map to these
-  // keys. Deliberately excludes dashboard, vendors, finance, notifications
-  // and audit; those stay SUPER_ADMIN / legacy-admin territory. A SUPER_ADMIN
-  // can still widen or narrow this per deployment via the admin-role
-  // permissions config, which overrides these defaults key-by-key.
+  // The ADMIN role is a warehouse/fulfillment operator. Its five functions —
+  // Receiving, Orders, Inventory, Pack (v2), Returns — map to these keys.
+  // Deliberately excludes dashboard, vendors, finance, notifications, audit
+  // and SHOPPER; those stay SUPER_ADMIN / legacy-admin territory. (Shopper was
+  // removed per client request — operational admins don't process shopper
+  // requests.) A SUPER_ADMIN can still widen or narrow this per deployment via
+  // the admin-role permissions config, which overrides these defaults.
   "admin.psn.read", // Receiving queue
   "admin.psn.write", // actually receive inbound stock
   "admin.orders.read", // Orders queue
@@ -115,8 +116,7 @@ export const ADMIN_DEFAULT_PERMISSIONS: readonly PageKey[] = [
   "admin.inventory.read", // Inventory (SKU-level)
   "admin.returns.read", // Returns queue
   "admin.returns.write", // inspect / process RMAs
-  "admin.shopper.read", // Shopper pipeline
-  "admin.shopper.write", // act on shopper requests
+  "admin.notifications.read", // the notification bell (scoped to their own userId)
 ];
 
 /**

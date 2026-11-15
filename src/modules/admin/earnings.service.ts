@@ -113,10 +113,17 @@ export class EarningsService {
     );
     const country = cRows[0]?.admin_country ? toFulfillmentCountry(cRows[0].admin_country) : "US";
 
+    // Storage AND receiving income for the admin's assigned vendors. STORAGE
+    // is country-tagged (0079); ONBOARDING (the receive/onboarding fee charged
+    // when a PSN is received) is not, so we also count untagged onboarding
+    // rows — scoped to this admin's assigned vendors, which keeps attribution
+    // correct in the normal one-admin-per-vendor-per-country case. This is what
+    // credits an admin for the PSNs they received (previously showed 0).
     const rows = await this.prisma.$queryRaw<Array<{ gross: bigint }>>(Prisma.sql`
       SELECT COALESCE(SUM(-le.amount_cents), 0)::bigint AS gross
       FROM ledger_entries le
-      WHERE le.type = 'STORAGE' AND le.country = ${country}
+      WHERE le.type::text IN ('STORAGE', 'ONBOARDING', 'RECEIVING_HOLD_FEE')
+        AND (le.country = ${country} OR le.country IS NULL)
         AND le.vendor_id IN (
           SELECT vendor_id FROM vendor_admin_assignments
           WHERE admin_user_id = ${adminUserId}::uuid AND country = ${country}

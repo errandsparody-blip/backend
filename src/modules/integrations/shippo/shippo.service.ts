@@ -85,6 +85,12 @@ export interface RateRequest {
     email?: string | undefined;
   };
   parcel: RateRequestParcel;
+  /**
+   * USD per 1 CAD (Super-Admin-set FX rate). Applied to any Canadian-carrier
+   * rate (Shippo quotes CAD) so the USD wallet is charged the true USD cost.
+   * Defaults to 1 (no conversion) when omitted — US shipments are unaffected.
+   */
+  usdPerCad?: number;
   /** Total declared value in cents — informs insurance / customs. */
   declaredValueCents: number;
   insuranceRequested: boolean;
@@ -179,7 +185,11 @@ export interface ShippingRate {
   carrier: string;
   service: string;
   estimatedDeliveryDays: number;
+  /** Cost in USD cents. Canadian-carrier rates (quoted in CAD by Shippo) are
+   *  converted to USD here so the vendor's USD wallet is charged correctly. */
   costCents: number;
+  /** The carrier's original quote currency (e.g. "USD" or "CAD"), for display. */
+  currency?: string;
 }
 
 /**
@@ -238,6 +248,8 @@ export interface PurchaseLabelRequest {
   shipmentId: string;
   rateId: string;
   insuranceCents?: number;
+  /** USD per 1 CAD — converts the purchased label's CAD cost to USD cents. */
+  usdPerCad?: number;
 }
 
 export interface LabelResponse {
@@ -563,13 +575,16 @@ export class ShippoService {
       });
     }
 
+    const usdPerCad = req.usdPerCad ?? 1;
     const rates: ShippingRate[] = ship.rates.map((r) => ({
       rateId: r.object_id,
       shipmentId: ship.object_id,
       carrier: r.provider,
       service: r.servicelevel?.name ?? r.servicelevel?.token ?? "Standard",
       estimatedDeliveryDays: this.normalizeDeliveryDays(r.estimated_days),
-      costCents: this.dollarsToCents(r.amount),
+      // USD cents (CAD rates converted via the Super-Admin FX rate).
+      costCents: this.amountToUsdCents(r.amount, r.currency, usdPerCad),
+      currency: (r.currency ?? "USD").toUpperCase(),
     }));
 
     // Flat-rate options live in their own per-container shipments (a Shippo
@@ -662,7 +677,8 @@ export class ShippoService {
               carrier: r.provider,
               service: `Priority Mail Flat Rate · ${c.label}`,
               estimatedDeliveryDays: this.normalizeDeliveryDays(r.estimated_days),
-              costCents: this.dollarsToCents(r.amount),
+              costCents: this.amountToUsdCents(r.amount, r.currency, req.usdPerCad ?? 1),
+              currency: (r.currency ?? "USD").toUpperCase(),
             }));
         } catch (err) {
           this.log.warn({ msg: "flat-rate lookup failed", template: c.template, err: `${err}` });
@@ -754,6 +770,7 @@ export class ShippoService {
         service: "Priority Mail",
         estimatedDeliveryDays: 3,
         costCents: baseUSPS,
+        currency: "USD",
       },
       {
         rateId: `rate_stub_ups_ground_${shipmentId}`,
@@ -762,6 +779,7 @@ export class ShippoService {
         service: "Ground",
         estimatedDeliveryDays: 4,
         costCents: baseUPS,
+        currency: "USD",
       },
       {
         rateId: `rate_stub_fedex_home_${shipmentId}`,
@@ -770,6 +788,7 @@ export class ShippoService {
         service: "Home Delivery",
         estimatedDeliveryDays: 5,
         costCents: baseFedEx,
+        currency: "USD",
       },
     ];
 
@@ -791,6 +810,7 @@ export class ShippoService {
         service: meta.service,
         estimatedDeliveryDays: 3,
         costCents: meta.cents,
+        currency: "USD",
       });
     }
 
@@ -908,10 +928,13 @@ export class ShippoService {
         tx.selected_rate?.servicelevel?.name ??
         tx.servicelevel?.name ??
         "Standard",
+      // USD cents — convert the purchased label's cost if the carrier quoted
+      // CAD (Canada), using the Super-Admin FX rate, so recorded cost matches
+      // what the USD wallet was charged.
       costCents: rateExpanded
-        ? this.dollarsToCents(rateExpanded.amount)
+        ? this.amountToUsdCents(rateExpanded.amount, rateExpanded.currency, req.usdPerCad ?? 1)
         : tx.selected_rate
-          ? this.dollarsToCents(tx.selected_rate.amount)
+          ? this.amountToUsdCents(tx.selected_rate.amount, tx.selected_rate.currency, req.usdPerCad ?? 1)
           : 0,
     };
   }
@@ -1371,6 +1394,20 @@ export class ShippoService {
    * cents without float arithmetic — "8.41" can't be represented exactly as
    * a JS number.
    */
+  /**
+   * Convert a Shippo rate amount (a dollar string in the carrier's currency)
+   * to USD cents. Vendor wallets are USD; Canadian carriers (Canada Post, UPS
+   * Canada) quote in CAD, so a CAD amount is multiplied by the Super-Admin FX
+   * rate (usdPerCad). USD (or any non-CAD) amounts pass through unchanged.
+   */
+  private amountToUsdCents(amount: string, currency: string | undefined, usdPerCad: number): number {
+    const cents = this.dollarsToCents(amount);
+    if ((currency ?? "USD").toUpperCase() === "CAD") {
+      return Math.max(0, Math.round(cents * (usdPerCad > 0 ? usdPerCad : 1)));
+    }
+    return cents;
+  }
+
   private dollarsToCents(dollars: string): number {
     const m = /^(\d+)(?:\.(\d{1,2}))?$/.exec(dollars.trim());
     if (!m) {

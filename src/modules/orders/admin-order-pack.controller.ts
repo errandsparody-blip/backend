@@ -65,6 +65,8 @@ const ROLE_ADMIN = "ADMIN" as Role;
 
 const listSchema = z.object({
   limit: z.coerce.number().int().positive().max(200).default(50),
+  // SUPER_ADMIN-only country focus (operational admins are already scoped).
+  country: z.enum(["US", "CA"]).optional(),
 });
 type ListInput = z.infer<typeof listSchema>;
 
@@ -155,7 +157,12 @@ export class AdminOrderPackController {
     @Query(new ZodValidationPipe(listSchema)) q: ListInput,
   ) {
     const scope = await this.adminScope.resolve(user);
-    const items = await this.pack.listPackQueue({ limit: q.limit }, scope.restricted ? scope : null);
+    const effectiveScope = scope.restricted
+      ? scope
+      : q.country
+        ? { vendorIds: null, country: q.country }
+        : null;
+    const items = await this.pack.listPackQueue({ limit: q.limit }, effectiveScope);
     return { items };
   }
 
@@ -166,7 +173,12 @@ export class AdminOrderPackController {
     @Query(new ZodValidationPipe(listSchema)) q: ListInput,
   ) {
     const scope = await this.adminScope.resolve(user);
-    const items = await this.pack.listRateQueue({ limit: q.limit }, scope.restricted ? scope : null);
+    const effectiveScope = scope.restricted
+      ? scope
+      : q.country
+        ? { vendorIds: null, country: q.country }
+        : null;
+    const items = await this.pack.listRateQueue({ limit: q.limit }, effectiveScope);
     return { items };
   }
 

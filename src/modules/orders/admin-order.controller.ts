@@ -76,6 +76,9 @@ const listSchema = z.object({
   to: z.coerce.date().optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().positive().max(100).default(50),
+  // USA + Canada: SUPER_ADMIN-only country focus (operational admins are
+  // already country-scoped, so this is ignored for them).
+  country: z.enum(["US", "CA"]).optional(),
 });
 type ListInput = z.infer<typeof listSchema>;
 
@@ -113,7 +116,14 @@ export class AdminOrderController {
     @Query(new ZodValidationPipe(listSchema)) q: ListInput,
   ) {
     const scope = await this.adminScope.resolve(user);
-    return this.orders.list(q, scope.restricted ? scope : null);
+    // Operational admins: their own vendor+country scope. Unrestricted roles
+    // (SUPER_ADMIN): optional country focus from the ?country filter.
+    const effectiveScope = scope.restricted
+      ? scope
+      : q.country
+        ? { vendorIds: null, country: q.country }
+        : null;
+    return this.orders.list(q, effectiveScope);
   }
 
   /**

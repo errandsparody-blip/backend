@@ -47,15 +47,19 @@ import { PrismaService } from "../../common/prisma.service";
 import { AuditService } from "../audit/audit.service";
 import { TokenService } from "../auth/token.service";
 
-// The roles a SUPER_ADMIN is allowed to move a user INTO. Vendor
-// roles are excluded (tenant-scoped). Sanitised via z.enum so a
-// malformed request fails at the validation layer, not deep in the
-// service.
+// The roles a SUPER_ADMIN is allowed to move a user INTO. VENDOR is
+// included so a vendor who was promoted to an admin role can be sent
+// back — but updateRole only permits VENDOR when the target still
+// carries a vendorId (a pure admin has no tenant to return to; that
+// case is refused below). VENDOR_SUB_USER stays out: those are created
+// through the vendor team-invite flow, not re-roled here. Sanitised via
+// z.enum so a malformed request fails at the validation layer.
 const ASSIGNABLE_ROLES = [
   "ADMIN",
   "FINANCE_ADMIN",
   "WAREHOUSE_OPERATOR",
   "SUPER_ADMIN",
+  "VENDOR",
 ] as const;
 type AssignableRole = (typeof ASSIGNABLE_ROLES)[number];
 
@@ -130,6 +134,10 @@ export class AdminUsersController {
         email: true,
         role: true,
         status: true,
+        // Tenant binding — present when the account is (or was, before a
+        // promotion) a vendor. The UI uses this to offer "demote to Vendor"
+        // only for accounts that have a vendor to return to.
+        vendorId: true,
         // MFA enrollment date doubles as "have they
         // completed setup". No `lastLoginAt` on the User model
         // today; adding one is out of scope for this migration.
@@ -154,7 +162,12 @@ export class AdminUsersController {
       );
       for (const r of rows) countryById.set(r.id, r.admin_country);
     }
-    const items = users.map((u) => ({ ...u, adminCountry: countryById.get(u.id) ?? null }));
+    const items = users.map(({ vendorId, ...u }) => ({
+      ...u,
+      adminCountry: countryById.get(u.id) ?? null,
+      // Expose only whether a tenant binding exists — never the raw id.
+      hasVendorBinding: vendorId != null,
+    }));
     return { items, nextCursor };
   }
 
@@ -199,6 +212,20 @@ export class AdminUsersController {
         message:
           "You can't change your own role. Ask another SUPER_ADMIN to do it.",
         code: "role_self_change_forbidden",
+      });
+    }
+    // Demotion back to VENDOR is only valid for an account that still
+    // carries its tenant binding (a vendor who was promoted to an admin
+    // role keeps its vendorId). A pure admin has no vendor to return to,
+    // so making it a VENDOR would create a tenant-less vendor account —
+    // refuse. Restoring VENDOR on a bound account simply gives them their
+    // vendor portal back; the admin_country / assignment rows are ignored
+    // for non-admin roles, so they go dormant without extra cleanup.
+    if (body.role === "VENDOR" && !target.vendorId) {
+      throw new BadRequestException({
+        message:
+          "Only an account that already has a vendor can be set back to Vendor. This account has no vendor to return to.",
+        code: "role_vendor_requires_binding",
       });
     }
     // Refuse suspended/closed users to avoid resurrecting a

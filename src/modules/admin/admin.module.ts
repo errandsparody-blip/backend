@@ -31,6 +31,7 @@ import { AdminEmailTestController } from "./admin-email-test.controller";
 // import here is needed.
 import { AdminPackagingController } from "./admin-packaging.controller";
 import { AdminDashboardController } from "./admin-dashboard.controller";
+import { AdminOverviewController } from "./admin-overview.controller";
 import { AdminFinanceController } from "./admin-finance.controller";
 import { AdminProductController } from "./admin-product.controller";
 import { AdminRolePermissionsController } from "./admin-role-permissions.controller";
@@ -85,6 +86,7 @@ import { EarningsService } from "./earnings.service";
   ],
   controllers: [
     AdminDashboardController,
+    AdminOverviewController,
     AdminFinanceController,
     AdminVendorController,
     AdminAuditController,

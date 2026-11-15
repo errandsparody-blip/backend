@@ -6,7 +6,7 @@
  *   POST /v1/admin/migration/disable-routing   — reverse the switch
  */
 
-import { Body, Controller, Get, HttpCode, HttpStatus, Post } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, Put } from "@nestjs/common";
 import { Role } from "@prisma/client";
 import { z } from "zod";
 
@@ -22,6 +22,9 @@ const enableSchema = z.object({
   acknowledgePendingCanada: z.boolean().optional(),
 });
 type EnableInput = z.infer<typeof enableSchema>;
+
+const fxSchema = z.object({ usdPerCad: z.coerce.number().positive().max(100) });
+type FxInput = z.infer<typeof fxSchema>;
 
 @Controller({ path: "admin/migration", version: "1" })
 @Roles(Role.SUPER_ADMIN)
@@ -46,5 +49,21 @@ export class MigrationController {
   @HttpCode(HttpStatus.OK)
   disable(@CurrentUser() user: AuthenticatedUser) {
     return this.migration.disableCountryRouting(user.sub);
+  }
+
+  // USA + Canada: CAD→USD exchange rate used to charge USD wallets for
+  // Canadian (CAD) shipping labels.
+  @Get("fx-rate")
+  fxRate() {
+    return this.migration.getFxRate();
+  }
+
+  @Put("fx-rate")
+  @HttpCode(HttpStatus.OK)
+  setFxRate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body(new ZodValidationPipe(fxSchema)) body: FxInput,
+  ) {
+    return this.migration.setFxRate(user.sub, body.usdPerCad);
   }
 }

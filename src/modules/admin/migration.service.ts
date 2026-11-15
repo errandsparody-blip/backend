@@ -160,6 +160,31 @@ export class MigrationService {
     return { enabled: false };
   }
 
+  /** Read the Super-Admin CAD→USD exchange rate (USD per 1 CAD). */
+  async getFxRate(): Promise<{ usdPerCad: number }> {
+    const row = await this.prisma.configuration.findUnique({ where: { key: "cad_to_usd_rate" } });
+    const v = row?.value as { rate?: number } | number | null | undefined;
+    const rate = typeof v === "number" ? v : v?.rate;
+    return { usdPerCad: typeof rate === "number" && rate > 0 ? rate : 0.72 };
+  }
+
+  /** Set the CAD→USD exchange rate used to charge USD wallets for CAD labels. */
+  async setFxRate(actorId: string, usdPerCad: number): Promise<{ usdPerCad: number }> {
+    await this.prisma.configuration.upsert({
+      where: { key: "cad_to_usd_rate" },
+      create: { key: "cad_to_usd_rate", value: { rate: usdPerCad } },
+      update: { value: { rate: usdPerCad } },
+    });
+    await this.audit.log({
+      actorId,
+      action: "config.fx_rate_set",
+      resourceType: "configuration",
+      resourceId: "cad_to_usd_rate",
+      afterState: { usdPerCad },
+    });
+    return { usdPerCad };
+  }
+
   private flagEnabled(raw: unknown): boolean {
     if (raw === true) return true;
     if (raw && typeof raw === "object" && "enabled" in raw) {

@@ -193,18 +193,23 @@ export class WalletService {
 
     const result = tx ? await run(tx) : await this.prisma.$transaction(run);
 
-    await this.audit.log({
-      actorId: args.actorId ?? null,
-      action: `wallet.debit.${args.type.toLowerCase()}`,
-      resourceType: "wallet",
-      resourceId: args.vendorId,
-      afterState: {
-        amountCents: args.amountCents,
-        balanceAfterCents: result.balanceAfterCents,
-        referenceType: args.referenceType ?? null,
-        referenceId: args.referenceId ?? null,
-      },
-    });
+    // Best-effort audit — the money movement already committed above, so a
+    // failed audit write must NOT bubble up and make a successful debit look
+    // like it failed (which would trigger erroneous compensation/refunds).
+    await this.audit
+      .log({
+        actorId: args.actorId ?? null,
+        action: `wallet.debit.${args.type.toLowerCase()}`,
+        resourceType: "wallet",
+        resourceId: args.vendorId,
+        afterState: {
+          amountCents: args.amountCents,
+          balanceAfterCents: result.balanceAfterCents,
+          referenceType: args.referenceType ?? null,
+          referenceId: args.referenceId ?? null,
+        },
+      })
+      .catch(() => undefined);
 
     if (crossedLowBalance) {
       const vendor = await this.prisma.vendor.findUnique({
@@ -282,18 +287,22 @@ export class WalletService {
 
     const result = tx ? await run(tx) : await this.prisma.$transaction(run);
 
-    await this.audit.log({
-      actorId: args.actorId ?? null,
-      action: `wallet.credit.${args.type.toLowerCase()}`,
-      resourceType: "wallet",
-      resourceId: args.vendorId,
-      afterState: {
-        amountCents: args.amountCents,
-        balanceAfterCents: result.balanceAfterCents,
-        referenceType: args.referenceType ?? null,
-        referenceId: args.referenceId ?? null,
-      },
-    });
+    // Best-effort audit — the credit already committed; a failed audit write
+    // must never make a successful refund/credit report as failed.
+    await this.audit
+      .log({
+        actorId: args.actorId ?? null,
+        action: `wallet.credit.${args.type.toLowerCase()}`,
+        resourceType: "wallet",
+        resourceId: args.vendorId,
+        afterState: {
+          amountCents: args.amountCents,
+          balanceAfterCents: result.balanceAfterCents,
+          referenceType: args.referenceType ?? null,
+          referenceId: args.referenceId ?? null,
+        },
+      })
+      .catch(() => undefined);
     return result;
   }
 

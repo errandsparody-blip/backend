@@ -337,6 +337,20 @@ export class PsnService {
       email: { subject: tpl.subject, html: tpl.html, text: tpl.text },
     });
 
+    // USA + Canada: give the operational admin assigned to this vendor+country
+    // a bell for the new inbound shipment to receive.
+    await this.notifications.emitToVendorAdmin(
+      vendorId,
+      (updated as unknown as { country?: string }).country ?? "US",
+      {
+        type: "psn.submitted",
+        severity: "INFO",
+        title: `New PSN to receive — ${id.slice(0, 8)}`,
+        body: `${updated.lines.length} line(s) inbound. Open Receiving to accept.`,
+        href: `/admin/psn/${id}/receive`,
+      },
+    );
+
     // Ops alert — fetch business name for the subject line.
     const vendor = await this.prisma.vendor.findUnique({
       where: { id: vendorId },

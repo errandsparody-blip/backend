@@ -28,6 +28,9 @@ import { AuditService } from "../audit/audit.service";
 export interface PublicSku {
   id: string;
   productId: string;
+  /** Product display name + image (so vendors recognise stock without the SKU id). */
+  productName: string | null;
+  productImageUrl: string | null;
   variant: string;
   /** Fulfillment country (migration 0077): "US" or "CA". */
   country: string;
@@ -60,6 +63,9 @@ export class SkuService {
     const where: Prisma.SkuWhereInput = { vendorId };
     if (input.status) where.status = input.status;
     if (input.productId) where.productId = input.productId;
+    // USA + Canada country filter (migration 0077 — column may lag the stale
+    // generated client, so cast at the assignment boundary).
+    if (input.country) (where as Record<string, unknown>).country = input.country;
     if (input.search) {
       where.OR = [
         { id: { contains: input.search, mode: "insensitive" } },
@@ -73,6 +79,16 @@ export class SkuService {
       take: input.limit + 1,
       orderBy: { createdAt: "desc" },
       ...(input.cursor ? { cursor: { id: input.cursor }, skip: 1 } : {}),
+      // Pull the product name + image so vendors recognise stock without the
+      // raw SKU id. imageUrl (0022) may lag the stale client — cast the select.
+      include: {
+        product: {
+          select: { id: true, name: true, code: true, imageUrl: true } as unknown as {
+            id: true;
+            name: true;
+          },
+        },
+      },
     });
 
     let nextCursor: string | null = null;
@@ -218,9 +234,12 @@ export class SkuService {
   }
 
   private toPublic(s: Sku): PublicSku {
+    const prod = (s as unknown as { product?: { name?: string; imageUrl?: string | null } }).product;
     return {
       id: s.id,
       productId: s.productId,
+      productName: prod?.name ?? null,
+      productImageUrl: prod?.imageUrl ?? null,
       variant: s.variant,
       // Migration 0077 — fulfillment country. Cast-read against the stale
       // Prisma client; pre-0077 rows (and the sandbox client) default to US.
