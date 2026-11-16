@@ -105,11 +105,17 @@ export class MfaService {
    * and unused; marks it as used in the same transaction.
    */
   async consumeRecoveryCode(userId: string, code: string): Promise<boolean> {
+    // Recovery codes are generated lowercase and hashed as-is. Normalize the
+    // submitted code (trim + lowercase) so an uppercase entry or a mobile
+    // keyboard that auto-capitalizes still matches the stored hash. Without
+    // this, a correctly-typed-but-capitalized code failed with "Invalid
+    // recovery code."
+    const normalized = code.trim().toLowerCase();
     const codes = await this.prisma.recoveryCode.findMany({
       where: { userId, usedAt: null },
     });
     for (const stored of codes) {
-      const matches = await argon2.verify(stored.codeHash, code);
+      const matches = await argon2.verify(stored.codeHash, normalized);
       if (matches) {
         await this.prisma.recoveryCode.update({
           where: { id: stored.id },
