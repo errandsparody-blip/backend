@@ -46,6 +46,12 @@ export interface AccessTokenPayload {
    * issued before this field existed.
    */
   sessionId?: string;
+  /**
+   * Set ONLY on impersonation tokens: the super-admin user id who is acting
+   * as this user. Lets audit attribute actions taken while impersonating,
+   * and the frontend show a "viewing as" banner. Absent on normal tokens.
+   */
+  impersonatedBy?: string;
 }
 
 @Injectable()
@@ -90,6 +96,40 @@ export class TokenService {
     });
     const expiresAt = new Date(Date.now() + cfg.JWT_ACCESS_TTL_SECONDS * 1000);
     return { token, expiresAt };
+  }
+
+  /**
+   * Mint a short-lived IMPERSONATION access token so a super-admin can act as
+   * another user (e.g. open a vendor's dashboard) without their password.
+   *
+   * Deliberately NOT bound to a session row (no sessionId claim): it rides the
+   * strategy's legacy "no session check" path, so it can't accidentally revoke
+   * or rotate the target's real sessions, and it simply stops working when it
+   * expires. The admin's own refresh cookie is never touched, so "Exit" is just
+   * a normal /auth/refresh back to the admin. The `impersonatedBy` claim records
+   * who is acting, for audit + the frontend banner. Short TTL by design.
+   */
+  signImpersonationToken(
+    user: Pick<User, "id" | "vendorId" | "role">,
+    impersonatorId: string,
+  ): { token: string; expiresAt: Date } {
+    const cfg = loadConfig();
+    const ttlSeconds = 30 * 60; // 30 minutes — long enough to work, short enough to be safe.
+    const payload: AccessTokenPayload = {
+      sub: user.id,
+      vendorId: user.vendorId ?? null,
+      role: user.role,
+      // Treat as MFA-fresh so step-up-gated screens are reachable while
+      // impersonating; the super-admin already authenticated with MFA.
+      acr: "2",
+      impersonatedBy: impersonatorId,
+    };
+    const token = this.jwt.sign(payload, {
+      secret: Buffer.from(cfg.JWT_ACCESS_SECRET, "base64"),
+      algorithm: "HS256",
+      expiresIn: ttlSeconds,
+    });
+    return { token, expiresAt: new Date(Date.now() + ttlSeconds * 1000) };
   }
 
   // ---------------------------------------------------------------------------

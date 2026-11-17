@@ -34,6 +34,7 @@ import {
   Param,
   ParseUUIDPipe,
   Patch,
+  Post,
   Query,
 } from "@nestjs/common";
 import { Prisma, Role, UserStatus } from "@prisma/client";
@@ -361,5 +362,90 @@ export class AdminUsersController {
       .catch(() => undefined);
 
     return { id: target.id, email: target.email, status: after, revokedSessions: revoke };
+  }
+
+  /**
+   * Impersonate a user — mint a short-lived access token so the super-admin can
+   * open that user's dashboard (e.g. a vendor's portal) WITHOUT their password.
+   *
+   * Full-access by design (the operator can act as the user), so it's locked
+   * down hard:
+   *   - SUPER_ADMIN only (controller-level @Roles).
+   *   - Can't impersonate yourself or another SUPER_ADMIN.
+   *   - Only ACTIVE accounts.
+   *   - Every impersonation is audit-logged with the real operator's id.
+   *
+   * Returns an access token (no refresh cookie is set — the admin's own session
+   * is untouched, so exiting is just a normal /auth/refresh back to admin). The
+   * token carries an `impersonatedBy` claim and expires on its own.
+   */
+  @Post(":id/impersonate")
+  @HttpCode(HttpStatus.OK)
+  async impersonate(
+    @CurrentUser() actor: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    const target = await this.prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        vendorId: true,
+        status: true,
+        mfaEnrolledAt: true,
+        emailVerified: true,
+      },
+    });
+    if (!target) {
+      throw new NotFoundException({ message: "User not found.", code: "user_not_found" });
+    }
+    if (target.id === actor.sub) {
+      throw new BadRequestException({
+        message: "You can't impersonate yourself.",
+        code: "impersonate_self",
+      });
+    }
+    if ((target.role as Role) === Role.SUPER_ADMIN) {
+      throw new ForbiddenException({
+        message: "You can't impersonate another super admin.",
+        code: "impersonate_super_admin",
+      });
+    }
+    if (target.status !== UserStatus.ACTIVE) {
+      throw new BadRequestException({
+        message: "Reactivate the account before impersonating it.",
+        code: "impersonate_inactive",
+      });
+    }
+
+    const { token, expiresAt } = this.tokens.signImpersonationToken(
+      { id: target.id, vendorId: target.vendorId, role: target.role },
+      actor.sub,
+    );
+
+    void this.audit
+      .log({
+        actorId: actor.sub,
+        action: "admin.user.impersonated",
+        resourceType: "user",
+        resourceId: target.id,
+        afterState: { email: target.email, role: target.role },
+      })
+      .catch(() => undefined);
+
+    return {
+      accessToken: token,
+      expiresAt: expiresAt.toISOString(),
+      user: {
+        id: target.id,
+        email: target.email,
+        role: target.role,
+        vendorId: target.vendorId,
+        mfaEnrolled: target.mfaEnrolledAt != null,
+        emailVerified: target.emailVerified,
+        impersonatedBy: actor.sub,
+      },
+    };
   }
 }

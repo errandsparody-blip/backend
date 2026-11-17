@@ -35,6 +35,11 @@ export interface AuthenticatedUser {
    * row check skipped" so the upgrade is non-breaking on rollout.
    */
   sessionId?: string;
+  /**
+   * Present only on impersonation tokens: the super-admin user id acting as
+   * this user. Lets handlers attribute actions to the real operator for audit.
+   */
+  impersonatedBy?: string;
   /** ISO time when the access token was issued. */
   iat: number;
   /** ISO time when the access token expires. */
