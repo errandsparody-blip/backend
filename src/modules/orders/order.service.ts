@@ -585,15 +585,11 @@ export class OrderService {
     //      * NEEDS_VERIFICATION   — partially valid; suggested correction
     //      * REJECTED             — undeliverable / not found
     //
-    //    We hard-block only REJECTED (undeliverable / not found). A
-    //    NEEDS_VERIFICATION address — deliverable but with a suggested
-    //    tidy-up — is ALLOWED through: too many legitimate real addresses
-    //    (apartments, slightly-off ZIPs) come back that way, and blocking
-    //    them stranded real orders. This matches the storefront/API path,
-    //    which has always only held on REJECTED. The outcome is still
-    //    recorded on the order (addressValidationStatus below), so the
-    //    warehouse sees the "needs verification" flag at pack time, and
-    //    Shippo re-validates again when the label is actually purchased.
+    //    Both non-ACCEPTED outcomes hard-block the submit. A typo like
+    //    "160 tuker lane" comes back NEEDS_VERIFICATION with a suggested
+    //    "tucker lane" correction; letting it through risks shipping to an
+    //    incomplete/wrong address (misdelivery + returns), so we 400 with
+    //    the suggested correction surfaced so the vendor knows what to fix.
     // VENDOR_CARRIER (own-label) orders have no shipping address to validate —
     // the vendor's own label carries the destination and USA Errands never
     // buys a label for them. Skip deliverability validation entirely and mark
@@ -609,14 +605,20 @@ export class OrderService {
           postalCode: input.recipient.shipPostalCode ?? "",
           country: input.recipient.shipCountry,
         });
-    if (!isVendorCarrierMode && addressValidation.outcome === "REJECTED") {
+    if (!isVendorCarrierMode && addressValidation.outcome !== "ACCEPTED") {
       const suggested = addressValidation.normalized
         ? ` Suggested: ${addressValidation.normalized.line1}, ${addressValidation.normalized.city}, ${addressValidation.normalized.state} ${addressValidation.normalized.postalCode}.`
         : "";
       const detail = addressValidation.detail ?? "invalid";
       throw new BadRequestException({
-        message: `Address rejected: ${detail}.${suggested}`,
-        code: "address_rejected",
+        message:
+          addressValidation.outcome === "REJECTED"
+            ? `Address rejected: ${detail}.${suggested}`
+            : `Address needs verification (${detail}).${suggested} Please correct it before submitting.`,
+        code:
+          addressValidation.outcome === "REJECTED"
+            ? "address_rejected"
+            : "address_needs_verification",
       });
     }
 
@@ -1225,8 +1227,17 @@ export class OrderService {
         data: {
           status: "CANCELLED",
           cancelReason: input.reason,
-          cancelNote: input.note ?? null,
+          // Preserve the original reference in the note so it's still visible
+          // on the cancelled order, since we clear the live field below.
+          cancelNote:
+            (input.note ?? "") +
+            (before.externalReference ? ` [ref: ${before.externalReference}]` : ""),
           cancelledAt: new Date(),
+          // Free the external reference: a cancelled order must not keep
+          // "owning" its reference, or the vendor can't re-create the same
+          // order (the unique index would 409 with order_external_ref_duplicate).
+          // NULLs don't collide in the unique index, so this releases it.
+          externalReference: null,
         },
         include: { lines: { include: { sku: { select: { product: { select: { weightOz: true } } } } } }, packagingOption: true } as Prisma.OrderInclude,
       });

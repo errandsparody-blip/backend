@@ -249,8 +249,11 @@ export class AdminOrderService {
           // this on their order timeline). The `order.force_cancelled`
           // orderEvent below keeps the action grep-able for support.
           cancelReason: "OTHER",
-          cancelNote: reason,
+          cancelNote: reason + (before.externalReference ? ` [ref: ${before.externalReference}]` : ""),
           cancelledAt: new Date(),
+          // Free the external reference so the vendor can re-create the same
+          // order without a duplicate-reference 409 (see order.service cancel).
+          externalReference: null,
           // Resolve a pending vendor cancellation request as approved.
           ...(hadRequest
             ? {

@@ -333,13 +333,11 @@ describe("OrderService — tenant isolation + address rejection", () => {
     expect(audit.log).not.toHaveBeenCalled();
   });
 
-  // NEEDS_VERIFICATION (deliverable but with a suggested tidy-up) is ALLOWED
-  // through — too many real addresses come back that way, and hard-blocking
-  // them stranded legitimate orders. Only REJECTED (undeliverable) is blocked.
-  // So a NEEDS_VERIFICATION address must clear the validation gate; it may still
-  // fail later in this mock harness (the fake Shippo returns an empty rate
-  // list), but it must NOT be the address hard-block anymore.
-  it("create: NEEDS_VERIFICATION address clears validation (no address block)", async () => {
+  // NEEDS_VERIFICATION (deliverable but with a suggested correction) is a hard
+  // block too — letting a typo'd / incomplete address through risks shipping to
+  // the wrong place. Both non-ACCEPTED outcomes 400 with the suggested
+  // correction (when Shippo returns one) so the vendor knows what to fix.
+  it("create: NEEDS_VERIFICATION address → BadRequest, no wallet debit", async () => {
     smarty.verifyUS.mockResolvedValueOnce({
       outcome: "NEEDS_VERIFICATION",
       detail: "Street name unrecognised — did you mean 'tucker lane'?",
@@ -362,10 +360,14 @@ describe("OrderService — tenant isolation + address rejection", () => {
         fulfillmentMode: "PLATFORM_SHIP",
       })
       .catch((e: unknown) => e);
-    // It got PAST address validation — so it is never the address hard-block.
-    if (err instanceof BadRequestException) {
-      const body = err.getResponse() as { code?: string };
-      expect(body.code).not.toBe("address_needs_verification");
-    }
+    expect(err).toBeInstanceOf(BadRequestException);
+    const body = (err as BadRequestException).getResponse() as {
+      code: string;
+      message: string;
+    };
+    expect(body.code).toBe("address_needs_verification");
+    expect(body.message).toContain("160 Tucker Ln");
+    expect(wallet.debit).not.toHaveBeenCalled();
+    expect(prisma.orders).toHaveLength(0);
   });
 });
