@@ -2624,3 +2624,35 @@ model PricingGuideLead {
   @@index([createdAt])
   @@map("pricing_guide_leads")
 }
+
+// =============================================================================
+// Vendor error telemetry
+// =============================================================================
+
+/// Client-side error log. The web app posts a compact record whenever a
+/// signed-in user hits an error in the browser (a failed/blocked API call, a
+/// page crash, or an uncaught JS error), so a super-admin can see what a vendor
+/// experienced without logging into their account. Append-only; independent of
+/// every other table. Written via raw SQL from the ingest endpoint (the
+/// generated client may lag this model), read back by the admin viewer.
+model ClientErrorLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String?  @map("user_id") @db.Uuid
+  vendorId   String?  @map("vendor_id") @db.Uuid
+  role       String?
+  /// 'api_error' | 'blocked_action' | 'render_error' | 'window_error' | 'unhandled_rejection'
+  kind       String
+  message    String   @db.Text
+  code       String?
+  statusCode Int?     @map("status_code")
+  path       String?  @db.Text
+  stack      String?  @db.Text
+  context    Json?
+  userAgent  String?  @map("user_agent") @db.Text
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([vendorId, createdAt])
+  @@index([createdAt])
+  @@index([kind])
+  @@map("client_error_logs")
+}

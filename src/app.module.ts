@@ -55,6 +55,7 @@ import { ReturnModule } from "./modules/returns/return.module";
 import { ShopperModule } from "./modules/shopper/shopper.module";
 import { SkuModule } from "./modules/sku/sku.module";
 import { TeamModule } from "./modules/team/team.module";
+import { TelemetryModule } from "./modules/telemetry/telemetry.module";
 import { TrackingModule } from "./modules/tracking/tracking.module";
 import { VendorModule } from "./modules/vendors/vendor.module";
 import { WalletModule } from "./modules/wallet/wallet.module";
@@ -144,6 +145,7 @@ import { WalletModule } from "./modules/wallet/wallet.module";
     ExportModule,
     FeesModule,
     TeamModule,
+    TelemetryModule,
     TrackingModule,
     KycModule,
     R2Module,

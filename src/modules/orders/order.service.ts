@@ -585,15 +585,15 @@ export class OrderService {
     //      * NEEDS_VERIFICATION   — partially valid; suggested correction
     //      * REJECTED             — undeliverable / not found
     //
-    //    Previously we let NEEDS_VERIFICATION through silently. That
-    //    meant a typo like "tuker lane" would submit even though Shippo
-    //    suggested "tucker lane". Now both non-ACCEPTED outcomes 400
-    //    with the suggested correction (if any) surfaced in the error
-    //    detail so the vendor knows what to change.
-    //
-    //    Follow-up (not in this phase): the wizard's address step could
-    //    render the correction inline with an "Accept suggested" button
-    //    so the vendor never gets a submit error at all.
+    //    We hard-block only REJECTED (undeliverable / not found). A
+    //    NEEDS_VERIFICATION address — deliverable but with a suggested
+    //    tidy-up — is ALLOWED through: too many legitimate real addresses
+    //    (apartments, slightly-off ZIPs) come back that way, and blocking
+    //    them stranded real orders. This matches the storefront/API path,
+    //    which has always only held on REJECTED. The outcome is still
+    //    recorded on the order (addressValidationStatus below), so the
+    //    warehouse sees the "needs verification" flag at pack time, and
+    //    Shippo re-validates again when the label is actually purchased.
     // VENDOR_CARRIER (own-label) orders have no shipping address to validate —
     // the vendor's own label carries the destination and USA Errands never
     // buys a label for them. Skip deliverability validation entirely and mark
@@ -609,20 +609,14 @@ export class OrderService {
           postalCode: input.recipient.shipPostalCode ?? "",
           country: input.recipient.shipCountry,
         });
-    if (!isVendorCarrierMode && addressValidation.outcome !== "ACCEPTED") {
+    if (!isVendorCarrierMode && addressValidation.outcome === "REJECTED") {
       const suggested = addressValidation.normalized
         ? ` Suggested: ${addressValidation.normalized.line1}, ${addressValidation.normalized.city}, ${addressValidation.normalized.state} ${addressValidation.normalized.postalCode}.`
         : "";
       const detail = addressValidation.detail ?? "invalid";
       throw new BadRequestException({
-        message:
-          addressValidation.outcome === "REJECTED"
-            ? `Address rejected: ${detail}.${suggested}`
-            : `Address needs verification (${detail}).${suggested} Please correct it before submitting.`,
-        code:
-          addressValidation.outcome === "REJECTED"
-            ? "address_rejected"
-            : "address_needs_verification",
+        message: `Address rejected: ${detail}.${suggested}`,
+        code: "address_rejected",
       });
     }
 
