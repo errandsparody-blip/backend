@@ -13,10 +13,23 @@ import {
   HttpException,
   HttpStatus,
   Logger,
+  Optional,
 } from "@nestjs/common";
 import type { Request, Response } from "express";
 
+import { ClientErrorService } from "../../modules/telemetry/client-error.service";
 import { Sentry } from "../sentry";
+
+/**
+ * 4xx statuses that are high-volume noise rather than real, actionable
+ * failures — we don't persist these to the vendor error log or they'd bury
+ * the errors a super-admin actually needs to see:
+ *   401 — expired/absent token, fires constantly on normal refresh cycles
+ *   404 — not-found probes, favicons, stale links
+ *   429 — rate-limit throttling
+ * Everything else (400, 402, 403, 409, 422, …) and every 5xx IS persisted.
+ */
+const UNLOGGED_STATUSES = new Set<number>([401, 404, 429]);
 
 interface ProblemDetails {
   type: string;
@@ -33,6 +46,11 @@ interface ProblemDetails {
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  // @Optional so the filter still works if the telemetry service can't be
+  // resolved for any reason — error capture must never prevent the error
+  // response itself from being sent.
+  constructor(@Optional() private readonly clientErrors?: ClientErrorService) {}
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const ctx = host.switchToHttp();
@@ -89,6 +107,37 @@ export class AllExceptionsFilter implements ExceptionFilter {
         const authed = (req as Request & { user?: { sub?: string; vendorId?: string } }).user;
         if (authed?.sub) scope.setUser({ id: authed.sub });
         Sentry.captureException(exception);
+      });
+    }
+
+    // Persist the error to the vendor error log AT THE SOURCE. This is the
+    // authoritative capture: it runs for every request that throws, regardless
+    // of whether the browser later reports it. Without this, the log only ever
+    // saw errors the browser managed to POST back — so backend failures a
+    // vendor hit (a 409 duplicate reference, a PSN validation reject, a 500)
+    // were invisible to a super-admin unless they logged into the account.
+    // Fire-and-forget; record() is best-effort and never throws.
+    if (this.clientErrors && !UNLOGGED_STATUSES.has(status)) {
+      const authed = (
+        req as Request & { user?: { sub?: string; vendorId?: string; role?: string } }
+      ).user;
+      const stack =
+        exception instanceof Error && !(exception instanceof HttpException)
+          ? exception.stack ?? null
+          : null;
+      void this.clientErrors.record({
+        userId: authed?.sub ?? null,
+        vendorId: authed?.vendorId ?? null,
+        role: authed?.role ?? null,
+        kind: status >= 500 ? "server_error" : "api_error",
+        message: detail || title,
+        code: code ?? null,
+        statusCode: status,
+        path: req.originalUrl ?? req.url ?? null,
+        stack,
+        context: { source: "server", method: req.method ?? null, title },
+        userAgent:
+          typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : null,
       });
     }
 
