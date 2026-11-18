@@ -448,4 +448,53 @@ export class AdminUsersController {
       },
     };
   }
+
+  /**
+   * Force-log-out a user everywhere — revoke every active session so their
+   * next request 401s and they're bounced to a fresh login.
+   *
+   * Why this helps: a vendor stuck on a repeating error is often sitting on
+   * stale client state (an in-memory cache, a half-dead session). Logging them
+   * out server-side forces the browser back through login, which reloads the
+   * app clean. It does NOT delete any of their data; it only ends their
+   * sessions. The account stays ACTIVE — this is not a suspension.
+   *
+   * SUPER_ADMIN only. Works for any account (search the users list by email to
+   * reach a vendor). You can't force-log-out yourself — that's just the normal
+   * Log out button, and doing it here would be a confusing self-kick.
+   */
+  @Post(":id/force-logout")
+  @HttpCode(HttpStatus.OK)
+  async forceLogout(
+    @CurrentUser() actor: AuthenticatedUser,
+    @Param("id", new ParseUUIDPipe()) id: string,
+  ) {
+    const target = await this.prisma.user.findUnique({
+      where: { id },
+      select: { id: true, email: true },
+    });
+    if (!target) {
+      throw new NotFoundException({ message: "User not found.", code: "user_not_found" });
+    }
+    if (target.id === actor.sub) {
+      throw new BadRequestException({
+        message: "Use the normal Log out to end your own session.",
+        code: "force_logout_self",
+      });
+    }
+
+    await this.tokens.revokeAllForUser(target.id, "force_logout_by_admin");
+
+    void this.audit
+      .log({
+        actorId: actor.sub,
+        action: "admin.user.force_logout",
+        resourceType: "user",
+        resourceId: target.id,
+        afterState: { email: target.email },
+      })
+      .catch(() => undefined);
+
+    return { id: target.id, email: target.email, loggedOut: true };
+  }
 }
