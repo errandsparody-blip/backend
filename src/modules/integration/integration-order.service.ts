@@ -171,6 +171,10 @@ export class IntegrationOrderService {
 
     // Couldn't place yet → header-only hold carrying the normalized payload.
     const held = await this.createHoldOrder(vendorId, null, normalized, outcome.reason);
+    // Tell the vendor immediately (and ops), naming the exact out-of-stock or
+    // unmatched items so they know what to restock/fix. Fire-and-forget — the
+    // hold itself must never depend on the notification succeeding.
+    void this.alertHold(held, vendorId, outcome.reason, normalized);
     return this.toResult(held);
   }
 
@@ -250,7 +254,13 @@ export class IntegrationOrderService {
         postalCode: input.recipient.postalCode,
         country: input.recipient.country,
       });
-      if (addr.outcome === "REJECTED") return { kind: "HELD", reason: "ADDRESS_INVALID" };
+      // Policy (per client): NEVER hold a storefront order on a bad address.
+      // Let it flow into the queue and let the warehouse correct the address
+      // before the shipping label is bought. We still RECORD the validation
+      // outcome ("REJECTED"/"NEEDS_VERIFICATION") on the order so the operator
+      // sees it needs a review and the address-fix UI can flag it. A genuinely
+      // undeliverable address simply fails (visibly) at label-buy, where the
+      // operator can correct it — rather than silently holding the whole order.
       addressOutcome = addr.outcome;
       addressDetail = addr.detail ?? null;
     }
@@ -1144,7 +1154,72 @@ export class IntegrationOrderService {
     }
   }
 
-  private async alertHold(order: Order, vendorId: string, reason: HoldReason): Promise<void> {
+  /**
+   * Work out which specific items caused a hold, so the vendor is told exactly
+   * what to fix instead of a vague "not enough stock". Best-effort: any failure
+   * just yields an empty list and the notification falls back to the generic
+   * reason. INSUFFICIENT_STOCK → the product names whose available stock is
+   * below what the order needs; UNMAPPED_SKU → the store codes that don't match
+   * a product (or whose product has no received SKU yet).
+   */
+  private async describeHoldItems(
+    vendorId: string,
+    input: IntegrationOrderInput,
+    reason: HoldReason,
+  ): Promise<string[]> {
+    try {
+      if (reason === "INSUFFICIENT_STOCK") {
+        const routeByCountry = await this.configFlags.isEnabled(COUNTRY_ROUTING_CONFIG_KEY);
+        const mapping = await this.resolveLines(vendorId, input.lines, {
+          routeByCountry,
+          country: toFulfillmentCountry(input.recipient.country),
+        });
+        if (mapping.kind !== "OK") return [];
+        return mapping.resolved
+          .filter((r) => r.quantityAvailable < r.quantity)
+          .map((r) => `${r.productName} (need ${r.quantity}, ${r.quantityAvailable} in stock)`);
+      }
+      if (reason === "UNMAPPED_SKU") {
+        const codes = Array.from(new Set(input.lines.map((l) => l.sku)));
+        const products = await this.prisma.product.findMany({
+          where: {
+            vendorId,
+            status: "ACTIVE",
+            OR: [{ code: { in: codes } }, { storeSku: { in: codes } }],
+          } as unknown as Prisma.ProductWhereInput,
+          include: { skus: { where: { status: "ACTIVE" } } },
+        });
+        const keyed = new Map<string, (typeof products)[number]>();
+        for (const p of products) {
+          const ss = (p as unknown as { storeSku?: string | null }).storeSku;
+          if (ss) keyed.set(ss, p);
+          keyed.set(p.code, p);
+        }
+        // Unmapped = no matching product, OR a product that has no active SKU
+        // bucket yet (nothing has been received against it).
+        return Array.from(
+          new Set(
+            input.lines
+              .filter((l) => {
+                const p = keyed.get(l.sku);
+                return !p || p.skus.length === 0;
+              })
+              .map((l) => l.sku),
+          ),
+        );
+      }
+      return [];
+    } catch {
+      return [];
+    }
+  }
+
+  private async alertHold(
+    order: Order,
+    vendorId: string,
+    reason: HoldReason,
+    input?: IntegrationOrderInput,
+  ): Promise<void> {
     const ref = formatOrderRef(order.orderNumber);
     const human: Record<HoldReason, string> = {
       INSUFFICIENT_FUNDS: "your wallet balance is too low to cover the fee",
@@ -1152,6 +1227,24 @@ export class IntegrationOrderService {
       INSUFFICIENT_STOCK: "there isn't enough stock on hand",
       ADDRESS_INVALID: "the shipping address couldn't be verified",
     };
+    const action: Record<HoldReason, string> = {
+      INSUFFICIENT_FUNDS: "It will ship automatically once you top up your wallet.",
+      INSUFFICIENT_STOCK:
+        "It will ship automatically once you restock these items (send a PSN).",
+      UNMAPPED_SKU: "Map the product code, then it releases automatically.",
+      ADDRESS_INVALID: "Please resolve it to continue.",
+    };
+
+    // Name the exact problem items when we can, so the vendor knows precisely
+    // what to restock / fix.
+    const items = input ? await this.describeHoldItems(vendorId, input, reason) : [];
+    const itemLine =
+      items.length === 0
+        ? ""
+        : reason === "UNMAPPED_SKU"
+          ? ` Unmatched product code(s): ${items.join(", ")}.`
+          : ` Out of stock: ${items.join("; ")}.`;
+
     // Vendor in-app notification.
     void this.notifications
       .emit({
@@ -1159,7 +1252,7 @@ export class IntegrationOrderService {
         type: "order.held",
         severity: "WARNING",
         title: `Storefront order ${ref} is on hold`,
-        body: `We received order ${order.externalReference} from your store but ${human[reason]}. ${reason === "INSUFFICIENT_FUNDS" ? "It will ship automatically once you top up your wallet." : "Please resolve it to continue."}`,
+        body: `We received order ${order.externalReference} from your store but ${human[reason]}.${itemLine} ${action[reason]}`,
         href: `/orders/${order.id}`,
       })
       .catch(() => undefined);
@@ -1168,8 +1261,8 @@ export class IntegrationOrderService {
       await this.opsAlerts.send({
         type: "ops.order.held",
         subject: `Storefront order ${ref} held — ${reason}`,
-        html: `<p>Order <strong>${ref}</strong> (ext ${order.externalReference}) was ingested but held: <strong>${reason}</strong>.</p>`,
-        text: `Order ${ref} held: ${reason}.`,
+        html: `<p>Order <strong>${ref}</strong> (ext ${order.externalReference}) was ingested but held: <strong>${reason}</strong>.${items.length ? ` ${itemLine}` : ""}</p>`,
+        text: `Order ${ref} held: ${reason}.${itemLine}`,
         idempotencyKey: `ops:order:held:${order.id}`,
         href: `/admin/orders/${order.id}`,
       });

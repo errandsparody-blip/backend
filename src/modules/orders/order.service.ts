@@ -236,6 +236,22 @@ export interface PublicOrder {
     declaredValueCents: number;
     allocationStatus: string;
   }>;
+  /** Machine reason the order is parked. Set only while status = ON_HOLD. */
+  holdReason: string | null;
+  /**
+   * For an ON_HOLD storefront order: the items it's waiting on, with this
+   * vendor's current stock in the order's DESTINATION country (US and CA are
+   * separate buckets). `short` = available < needed, or the code didn't match a
+   * product. Lets the vendor self-diagnose exactly what to restock / fix.
+   * Empty for every non-held order.
+   */
+  heldItems: Array<{
+    name: string;
+    quantity: number;
+    available: number | null;
+    mapped: boolean;
+    short: boolean;
+  }>;
 }
 
 @Injectable()
@@ -1130,7 +1146,18 @@ export class OrderService {
       include: { lines: { include: { sku: { select: { product: { select: { weightOz: true } } } } } }, packagingOption: true } as Prisma.OrderInclude,
     });
     if (!order) throw new NotFoundException();
-    return this.toPublic(order);
+    const pub = this.toPublic(order);
+    if (pub.status === "ON_HOLD") {
+      pub.heldItems = await this.heldItemsForOrder(
+        order as unknown as {
+          status: string;
+          vendorId: string;
+          shipCountry: string;
+          sourcePayload?: unknown;
+        },
+      );
+    }
+    return pub;
   }
 
   // ===========================================================================
@@ -1626,6 +1653,85 @@ export class OrderService {
         declaredValueCents: l.declaredValueCents,
         allocationStatus: l.allocationStatus,
       })),
+      holdReason: (o as unknown as { holdReason?: string | null }).holdReason ?? null,
+      // Populated by get() for ON_HOLD orders (needs an async stock lookup);
+      // default empty here so toPublic stays synchronous for list paths.
+      heldItems: [],
     };
+  }
+
+  /**
+   * For an ON_HOLD storefront order, reconstruct the line items it's waiting on
+   * from the stored sourcePayload and annotate each with this vendor's current
+   * available stock in the order's DESTINATION country, plus a `short` flag
+   * (available < needed, or the code didn't map to a product). Lets the vendor
+   * see exactly what to restock / fix. Best-effort — any gap degrades to the
+   * storefront name with no stock number rather than throwing.
+   */
+  private async heldItemsForOrder(order: {
+    status: string;
+    vendorId: string;
+    shipCountry: string;
+    sourcePayload?: unknown;
+  }): Promise<PublicOrder["heldItems"]> {
+    if (order.status !== "ON_HOLD") return [];
+    const payload = (order.sourcePayload ?? null) as {
+      lines?: Array<{ sku?: string; quantity?: number; name?: string }>;
+    } | null;
+    const raw = Array.isArray(payload?.lines) ? payload!.lines! : [];
+    const lines = raw
+      .map((l) => ({
+        sku: String(l.sku ?? "").trim(),
+        quantity: typeof l.quantity === "number" && l.quantity > 0 ? l.quantity : 0,
+        name: typeof l.name === "string" && l.name.trim() ? l.name.trim() : null,
+      }))
+      .filter((l) => l.sku);
+    if (lines.length === 0) return [];
+    const country = (order.shipCountry || "US").toUpperCase() === "CA" ? "CA" : "US";
+    const codes = Array.from(new Set(lines.map((l) => l.sku)));
+
+    const products = (await this.prisma.product.findMany({
+      where: {
+        vendorId: order.vendorId,
+        OR: [
+          { code: { in: codes } },
+          ...([{ storeSku: { in: codes } }] as unknown as Prisma.ProductWhereInput[]),
+        ],
+      } as unknown as Prisma.ProductWhereInput,
+      select: {
+        code: true,
+        name: true,
+        storeSku: true,
+        skus: { select: { quantityAvailable: true, status: true, country: true } },
+      } as unknown as Prisma.ProductSelect,
+    })) as unknown as Array<{
+      code: string;
+      name: string;
+      storeSku?: string | null;
+      skus: Array<{ quantityAvailable: number; status: string; country?: string | null }>;
+    }>;
+
+    const byKey = new Map<string, (typeof products)[number]>();
+    for (const p of products) {
+      byKey.set(p.code, p);
+      if (p.storeSku) byKey.set(p.storeSku, p);
+    }
+
+    return lines.map((l) => {
+      const p = byKey.get(l.sku);
+      if (!p) {
+        return { name: l.name ?? l.sku, quantity: l.quantity, available: null, mapped: false, short: true };
+      }
+      const active = (p.skus ?? []).filter((s) => s.status === "ACTIVE");
+      const match = active.find((s) => (s.country || "US").toUpperCase() === country) ?? active[0];
+      const available = match ? match.quantityAvailable : 0;
+      return {
+        name: p.name ?? l.name ?? l.sku,
+        quantity: l.quantity,
+        available,
+        mapped: true,
+        short: available < l.quantity,
+      };
+    });
   }
 }

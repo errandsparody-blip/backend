@@ -448,7 +448,136 @@ export class AdminOrderService {
       const next = orders.pop();
       nextCursor = next?.id ?? null;
     }
-    return { items: orders, nextCursor };
+
+    // Attach a compact per-item summary to held rows so the operator sees, at a
+    // glance, which product(s) a storefront order is waiting on — without
+    // opening it. Batched into two queries total regardless of how many held
+    // rows are on the page. Each item carries its available stock and a `short`
+    // flag (available < needed, or unmapped), so short items can be highlighted.
+    const heldItems = await this.heldItemsByOrder(
+      orders as unknown as Array<{
+        id: string;
+        status: string;
+        vendorId: string;
+        shipCountry: string;
+        sourcePayload?: unknown;
+      }>,
+    );
+    const items = orders.map((o) => ({
+      ...o,
+      heldItems: heldItems.get(o.id) ?? [],
+    }));
+
+    return { items, nextCursor };
+  }
+
+  /**
+   * Batch-summarize the line items of held (ON_HOLD) storefront orders from
+   * their stored sourcePayload, annotating each with current available stock
+   * for the order's destination country and a `short` flag. Two queries total:
+   * one for products+SKUs, none per row. Best-effort — any gap degrades to the
+   * storefront name with no stock number rather than throwing.
+   */
+  private async heldItemsByOrder(
+    orders: Array<{ id: string; status: string; vendorId: string; shipCountry: string; sourcePayload?: unknown }>,
+  ): Promise<
+    Map<
+      string,
+      Array<{ name: string; quantity: number; available: number | null; mapped: boolean; short: boolean }>
+    >
+  > {
+    const out = new Map<
+      string,
+      Array<{ name: string; quantity: number; available: number | null; mapped: boolean; short: boolean }>
+    >();
+    const held = orders.filter((o) => o.status === "ON_HOLD");
+    if (held.length === 0) return out;
+
+    const allCodes = new Set<string>();
+    const perOrder: Array<{
+      id: string;
+      vendorId: string;
+      country: "US" | "CA";
+      lines: Array<{ sku: string; quantity: number; name: string | null }>;
+    }> = [];
+    for (const o of held) {
+      const payload = (o.sourcePayload ?? null) as {
+        lines?: Array<{ sku?: string; quantity?: number; name?: string }>;
+      } | null;
+      const raw = Array.isArray(payload?.lines) ? payload!.lines! : [];
+      const lines = raw
+        .map((l) => ({
+          sku: String(l.sku ?? "").trim(),
+          quantity: typeof l.quantity === "number" && l.quantity > 0 ? l.quantity : 0,
+          name: typeof l.name === "string" && l.name.trim() ? l.name.trim() : null,
+        }))
+        .filter((l) => l.sku);
+      if (lines.length === 0) continue;
+      for (const l of lines) allCodes.add(l.sku);
+      perOrder.push({
+        id: o.id,
+        vendorId: o.vendorId,
+        country: (o.shipCountry || "US").toUpperCase() === "CA" ? "CA" : "US",
+        lines,
+      });
+    }
+    if (allCodes.size === 0) return out;
+
+    const vendorIds = Array.from(new Set(perOrder.map((p) => p.vendorId)));
+    const codeList = Array.from(allCodes);
+    const products = (await this.prisma.product.findMany({
+      where: {
+        vendorId: { in: vendorIds },
+        OR: [
+          { code: { in: codeList } },
+          ...([{ storeSku: { in: codeList } }] as unknown as Prisma.ProductWhereInput[]),
+        ],
+      } as unknown as Prisma.ProductWhereInput,
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        vendorId: true,
+        storeSku: true,
+        skus: {
+          select: { quantityAvailable: true, status: true, country: true },
+        },
+      } as unknown as Prisma.ProductSelect,
+    })) as unknown as Array<{
+      code: string;
+      name: string;
+      vendorId: string;
+      storeSku?: string | null;
+      skus: Array<{ quantityAvailable: number; status: string; country?: string | null }>;
+    }>;
+
+    const byVendorKey = new Map<string, (typeof products)[number]>();
+    for (const p of products) {
+      byVendorKey.set(`${p.vendorId}::${p.code}`, p);
+      if (p.storeSku) byVendorKey.set(`${p.vendorId}::${p.storeSku}`, p);
+    }
+
+    for (const po of perOrder) {
+      const items = po.lines.map((l) => {
+        const p = byVendorKey.get(`${po.vendorId}::${l.sku}`);
+        if (!p) {
+          return { name: l.name ?? l.sku, quantity: l.quantity, available: null, mapped: false, short: true };
+        }
+        const active = (p.skus ?? []).filter((s) => s.status === "ACTIVE");
+        const match =
+          active.find((s) => (s.country || "US").toUpperCase() === po.country) ?? active[0];
+        const available = match ? match.quantityAvailable : 0;
+        return {
+          name: p.name ?? l.name ?? l.sku,
+          quantity: l.quantity,
+          available,
+          mapped: true,
+          short: available < l.quantity,
+        };
+      });
+      out.set(po.id, items);
+    }
+    return out;
   }
 
   async get(id: string) {
