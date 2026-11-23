@@ -72,4 +72,41 @@ export class SuperAdminDashboardController {
 
     return this.service.feeBreakdown({ from: lo, to: hi, granularity: g });
   }
+
+  /**
+   * Per-order fulfillment activity — fulfillment price, the admin who packed
+   * (processed) the order, and the date, with filters by admin, date and
+   * country. Keyset-paginated via `before` (ISO packed_at of the last row).
+   * Garbage params fall back to "no filter" rather than 400-ing.
+   */
+  @Get("fulfillment-activity")
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  async fulfillmentActivity(
+    @Query("adminId") adminId?: string,
+    @Query("country") country?: string,
+    @Query("from") from?: string,
+    @Query("to") to?: string,
+    @Query("before") before?: string,
+    @Query("limit") limit?: string,
+  ) {
+    const parse = (s: string | undefined): Date | null => {
+      if (!s) return null;
+      const d = new Date(s);
+      return Number.isNaN(d.getTime()) ? null : d;
+    };
+    const uuidRe =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const n = Number(limit);
+    const lim = Number.isFinite(n) && n > 0 && n <= 100 ? Math.floor(n) : 50;
+
+    return this.service.fulfillmentActivity({
+      adminId: adminId && uuidRe.test(adminId) ? adminId : null,
+      country: country === "US" || country === "CA" ? country : null,
+      from: parse(from),
+      to: parse(to),
+      before: parse(before),
+      limit: lim,
+    });
+  }
 }

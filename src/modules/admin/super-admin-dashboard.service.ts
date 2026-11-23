@@ -441,4 +441,114 @@ export class SuperAdminDashboardService {
       generatedAt: now.toISOString(),
     };
   }
+
+  /**
+   * Fulfillment activity — one row per order that an admin has PACKED, showing
+   * the fulfillment price charged, the admin who processed (packed) it, the
+   * date, destination country, vendor and status. Filterable by processing
+   * admin, date window (on packed_at) and country. Keyset-paginated on
+   * packed_at descending. Also returns totals (count + summed fulfillment fee)
+   * across the WHOLE filter, not just the current page.
+   *
+   * Spec: §1 "record the actual processing user … filter orders by processing
+   * Admin … and date" and §6 processing-activity filters. "Processed" is keyed
+   * to the pack step (packed_by_user_id + packed_at), which is the durable
+   * attribution of fulfillment work to a human admin.
+   */
+  async fulfillmentActivity(input: {
+    from: Date | null;
+    to: Date | null;
+    adminId: string | null;
+    country: "US" | "CA" | null;
+    before: Date | null;
+    limit: number;
+  }): Promise<{
+    items: Array<{
+      orderId: string;
+      orderNumber: number;
+      vendorName: string | null;
+      country: string;
+      fulfillmentFeeCents: number;
+      processedByUserId: string | null;
+      processedByEmail: string | null;
+      packedAt: string;
+      status: string;
+    }>;
+    nextBefore: string | null;
+    totals: { count: number; fulfillmentFeeCents: number };
+  }> {
+    const { from, to, adminId, country, before } = input;
+
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        id: string;
+        order_number: number;
+        ship_country: string;
+        fulfillment_fee_cents: number;
+        packed_by_user_id: string | null;
+        packed_at: Date;
+        status: string;
+        vendor_name: string | null;
+        packer_email: string | null;
+      }>
+    >(Prisma.sql`
+      SELECT o.id, o.order_number, o.ship_country, o.fulfillment_fee_cents,
+             o.packed_by_user_id, o.packed_at, o.status,
+             v.business_name AS vendor_name, u.email AS packer_email
+      FROM orders o
+      LEFT JOIN vendors v ON v.id = o.vendor_id
+      LEFT JOIN users u ON u.id = o.packed_by_user_id
+      WHERE o.packed_at IS NOT NULL
+        AND o.packed_by_user_id IS NOT NULL
+        AND (${adminId}::uuid IS NULL OR o.packed_by_user_id = ${adminId}::uuid)
+        AND (${country}::text IS NULL OR o.ship_country = ${country})
+        AND (${from}::timestamp IS NULL OR o.packed_at >= ${from})
+        AND (${to}::timestamp IS NULL OR o.packed_at < ${to})
+        AND (${before}::timestamp IS NULL OR o.packed_at < ${before})
+      ORDER BY o.packed_at DESC
+      LIMIT ${input.limit + 1}
+    `);
+
+    let nextBefore: string | null = null;
+    if (rows.length > input.limit) {
+      rows.pop();
+      const last = rows[rows.length - 1];
+      nextBefore = last ? last.packed_at.toISOString() : null;
+    }
+
+    // Totals across the full filter (ignore the keyset cursor).
+    const totalRows = await this.prisma.$queryRaw<
+      Array<{ cnt: bigint; sum_cents: bigint }>
+    >(Prisma.sql`
+      SELECT COUNT(*)::bigint AS cnt,
+             COALESCE(SUM(o.fulfillment_fee_cents), 0)::bigint AS sum_cents
+      FROM orders o
+      WHERE o.packed_at IS NOT NULL
+        AND o.packed_by_user_id IS NOT NULL
+        AND (${adminId}::uuid IS NULL OR o.packed_by_user_id = ${adminId}::uuid)
+        AND (${country}::text IS NULL OR o.ship_country = ${country})
+        AND (${from}::timestamp IS NULL OR o.packed_at >= ${from})
+        AND (${to}::timestamp IS NULL OR o.packed_at < ${to})
+    `);
+    const totals = {
+      count: Number(totalRows[0]?.cnt ?? 0),
+      fulfillmentFeeCents: Number(totalRows[0]?.sum_cents ?? 0),
+    };
+
+    return {
+      items: rows.map((r) => ({
+        orderId: r.id,
+        orderNumber: r.order_number,
+        vendorName: r.vendor_name,
+        country: r.ship_country,
+        fulfillmentFeeCents: r.fulfillment_fee_cents,
+        processedByUserId: r.packed_by_user_id,
+        processedByEmail: r.packer_email,
+        packedAt: r.packed_at.toISOString(),
+        status: r.status,
+      })),
+      nextBefore,
+      totals,
+    };
+  }
 }
