@@ -26,6 +26,8 @@ import { IntegrationController } from "./integration.controller";
 import { IntegrationOrderService } from "./integration-order.service";
 import { VendorApiKeyService } from "./vendor-api-key.service";
 import { VendorIntegrationController } from "./vendor-integration.controller";
+import { WooCommerceWebhookController } from "./woocommerce-webhook.controller";
+import { WooCommerceWebhookService } from "./woocommerce-webhook.service";
 
 @Module({
   imports: [
@@ -36,8 +38,14 @@ import { VendorIntegrationController } from "./vendor-integration.controller";
     IdempotencyModule,
     NotificationModule,
   ],
-  controllers: [IntegrationController, VendorIntegrationController],
-  providers: [IntegrationOrderService, VendorApiKeyService, ApiKeyGuard, ConfigFlagService],
+  controllers: [IntegrationController, VendorIntegrationController, WooCommerceWebhookController],
+  providers: [
+    IntegrationOrderService,
+    VendorApiKeyService,
+    WooCommerceWebhookService,
+    ApiKeyGuard,
+    ConfigFlagService,
+  ],
   exports: [IntegrationOrderService],
 })
 export class IntegrationModule {}

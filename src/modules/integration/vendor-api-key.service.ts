@@ -14,6 +14,7 @@
  */
 
 import { Injectable, NotFoundException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 
 import { apiKeyDisplayPrefix, formatApiKey } from "../../common/api-key";
 import { CryptoService } from "../../common/crypto.service";
@@ -35,6 +36,12 @@ export interface IntegrationSettings {
   defaultCarrierService: string | null;
   defaultInsurance: boolean;
   keys: PublicApiKey[];
+  /**
+   * Direct-WooCommerce webhook token (the secret embedded in the Delivery URL
+   * the vendor pastes into WooCommerce). Null until they connect. The frontend
+   * builds the full URL from this + the API base.
+   */
+  woocommerceWebhookToken: string | null;
 }
 
 @Injectable()
@@ -106,11 +113,37 @@ export class VendorApiKeyService {
         integrationDefaultInsurance: true,
       },
     });
+    // woocommerce_webhook_token read via raw SQL — the sandbox Prisma client may
+    // not include the migration-0086 column yet.
+    const tokRows = await this.prisma.$queryRaw<Array<{ woocommerce_webhook_token: string | null }>>(
+      Prisma.sql`SELECT woocommerce_webhook_token FROM vendors WHERE id = ${vendorId}::uuid`,
+    );
     return {
       defaultCarrierService: vendor.integrationDefaultCarrierService,
       defaultInsurance: vendor.integrationDefaultInsurance,
       keys: await this.listKeys(vendorId),
+      woocommerceWebhookToken: tokRows[0]?.woocommerce_webhook_token ?? null,
     };
+  }
+
+  /**
+   * Generate (or rotate) the vendor's direct-WooCommerce webhook token and
+   * return it. Rotating invalidates any URL the vendor had pasted before, so
+   * the UI warns them to update WooCommerce with the new URL.
+   */
+  async connectWooCommerce(vendorId: string, actorId: string): Promise<{ token: string }> {
+    // 32 bytes → 64 hex chars: unguessable, URL-safe.
+    const token = this.crypto.randomToken(32);
+    await this.prisma.$executeRaw(
+      Prisma.sql`UPDATE vendors SET woocommerce_webhook_token = ${token} WHERE id = ${vendorId}::uuid`,
+    );
+    await this.audit.log({
+      actorId,
+      action: "integration.woocommerce.connected",
+      resourceType: "vendor",
+      resourceId: vendorId,
+    });
+    return { token };
   }
 
   async updateSettings(

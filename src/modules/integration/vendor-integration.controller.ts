@@ -77,4 +77,15 @@ export class VendorIntegrationController {
   ) {
     await this.keys.revokeKey(user.vendorId!, user.sub, id);
   }
+
+  /**
+   * Generate (or rotate) the direct-WooCommerce webhook token. Returns the
+   * token; the portal composes the full Delivery URL the vendor pastes into
+   * WooCommerce. Rotating invalidates the previous URL.
+   */
+  @Post("woocommerce/connect")
+  @HttpCode(HttpStatus.OK)
+  connectWooCommerce(@CurrentUser() user: AuthenticatedUser) {
+    return this.keys.connectWooCommerce(user.vendorId!, user.sub);
+  }
 }

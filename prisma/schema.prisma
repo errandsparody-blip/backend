@@ -398,6 +398,13 @@ model Vendor {
   integrationDefaultCarrierService String?  @map("integration_default_carrier_service")
   integrationDefaultInsurance      Boolean  @default(false) @map("integration_default_insurance")
 
+  // Migration 0086 — direct WooCommerce webhook. A per-vendor unguessable token
+  // embedded in the webhook Delivery URL the vendor pastes into WooCommerce
+  // (Settings → Advanced → Webhooks). Lets a WooCommerce store POST orders
+  // straight to USA Errands with no middleman. Rotatable. NULL until the vendor
+  // connects WooCommerce.
+  woocommerceWebhookToken String? @unique @map("woocommerce_webhook_token")
+
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime      @updatedAt @map("updated_at")
 
