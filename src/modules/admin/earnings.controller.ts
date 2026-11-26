@@ -82,6 +82,17 @@ export class EarningsController {
       : this.earnings.storageEarnings(q.adminUserId, q.from, q.to);
   }
 
+  /**
+   * Line-item reconciliation behind a preview/settlement number — which orders
+   * or PSNs were counted and which were excluded (cancelled / rejected /
+   * refunded), with the reason. Same params as preview.
+   */
+  @Get("breakdown")
+  @Roles(Role.SUPER_ADMIN)
+  breakdown(@Query(new ZodValidationPipe(previewSchema)) q: CreateInput) {
+    return this.earnings.breakdown(q.adminUserId, q.kind, q.from, q.to);
+  }
+
   @Post("settlements")
   @Roles(Role.SUPER_ADMIN)
   @HttpCode(HttpStatus.OK)

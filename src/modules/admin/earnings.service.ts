@@ -99,6 +99,10 @@ export class EarningsService {
       JOIN orders o ON o.id::text = le.reference_id
       WHERE le.type = 'FULFILLMENT' AND le.reference_type = 'order'
         AND o.processing_user_id = ${adminUserId}::uuid
+        -- An order that was cancelled or returned had its fulfillment fee
+        -- refunded, so it earns the admin nothing — exclude it. (Previously
+        -- these still counted, inflating the pay.)
+        AND o.status NOT IN ('CANCELLED', 'RETURNED')
         AND le.created_at >= ${from} AND le.created_at < ${to}
     `);
     const gross = Number(rows[0]?.gross ?? 0);
@@ -122,12 +126,19 @@ export class EarningsService {
     const rows = await this.prisma.$queryRaw<Array<{ gross: bigint }>>(Prisma.sql`
       SELECT COALESCE(SUM(-le.amount_cents), 0)::bigint AS gross
       FROM ledger_entries le
+      -- Join the PSN for PSN-referenced fees (onboarding / receiving-hold) so we
+      -- can drop the ones whose PSN was rejected or cancelled — those fees were
+      -- refunded and must not count toward the admin's pay. Recurring STORAGE
+      -- rows don't reference a PSN (p.id IS NULL) and are kept: once a box has
+      -- been billed for a period, that income is real even if it's later removed.
+      LEFT JOIN psns p ON le.reference_type = 'psn' AND p.id::text = le.reference_id
       WHERE le.type::text IN ('STORAGE', 'ONBOARDING', 'RECEIVING_HOLD_FEE')
         AND (le.country = ${country} OR le.country IS NULL)
         AND le.vendor_id IN (
           SELECT vendor_id FROM vendor_admin_assignments
           WHERE admin_user_id = ${adminUserId}::uuid AND country = ${country}
         )
+        AND (p.id IS NULL OR p.status NOT IN ('REJECTED', 'CANCELLED'))
         AND le.created_at >= ${from} AND le.created_at < ${to}
     `);
     const gross = Number(rows[0]?.gross ?? 0);
@@ -145,6 +156,116 @@ export class EarningsService {
       platformBps: 0,
       processingBps,
     };
+  }
+
+  /**
+   * Line-item reconciliation for an admin's earnings over [from, to). Returns
+   * every charge that falls in the window with whether it was counted toward
+   * pay and, if not, why (e.g. "Order cancelled — fee refunded"). This is the
+   * transparency view behind a settlement number: it shows exactly which orders
+   * / PSNs make up the total and which were excluded.
+   */
+  async breakdown(
+    adminUserId: string,
+    kind: "FULFILLMENT" | "STORAGE",
+    from: Date,
+    to: Date,
+  ): Promise<{
+    items: Array<{
+      label: string;
+      kind: string;
+      amountCents: number;
+      status: string | null;
+      counted: boolean;
+      reason: string | null;
+    }>;
+    includedCents: number;
+    excludedCents: number;
+  }> {
+    const items: Array<{
+      label: string;
+      kind: string;
+      amountCents: number;
+      status: string | null;
+      counted: boolean;
+      reason: string | null;
+    }> = [];
+
+    if (kind === "FULFILLMENT") {
+      const rows = await this.prisma.$queryRaw<
+        Array<{ order_number: number; status: string; amount_cents: bigint }>
+      >(Prisma.sql`
+        SELECT o.order_number, o.status::text AS status, (-le.amount_cents)::bigint AS amount_cents
+        FROM ledger_entries le
+        JOIN orders o ON o.id::text = le.reference_id
+        WHERE le.type = 'FULFILLMENT' AND le.reference_type = 'order'
+          AND o.processing_user_id = ${adminUserId}::uuid
+          AND le.created_at >= ${from} AND le.created_at < ${to}
+        ORDER BY le.created_at DESC
+      `);
+      for (const r of rows) {
+        const counted = r.status !== "CANCELLED" && r.status !== "RETURNED";
+        items.push({
+          label: `#${r.order_number}`,
+          kind: "Fulfillment",
+          amountCents: Number(r.amount_cents),
+          status: r.status,
+          counted,
+          reason: counted ? null : `Order ${r.status.toLowerCase()} — fee refunded`,
+        });
+      }
+    } else {
+      const cRows = await this.prisma.$queryRaw<Array<{ admin_country: string | null }>>(
+        Prisma.sql`SELECT admin_country FROM users WHERE id = ${adminUserId}::uuid`,
+      );
+      const country = cRows[0]?.admin_country
+        ? toFulfillmentCountry(cRows[0].admin_country)
+        : "US";
+      const rows = await this.prisma.$queryRaw<
+        Array<{
+          kind: string;
+          amount_cents: bigint;
+          psn_status: string | null;
+          psn_id: string | null;
+        }>
+      >(Prisma.sql`
+        SELECT le.type::text AS kind, (-le.amount_cents)::bigint AS amount_cents,
+               p.status::text AS psn_status, p.id AS psn_id
+        FROM ledger_entries le
+        LEFT JOIN psns p ON le.reference_type = 'psn' AND p.id::text = le.reference_id
+        WHERE le.type::text IN ('STORAGE', 'ONBOARDING', 'RECEIVING_HOLD_FEE')
+          AND (le.country = ${country} OR le.country IS NULL)
+          AND le.vendor_id IN (
+            SELECT vendor_id FROM vendor_admin_assignments
+            WHERE admin_user_id = ${adminUserId}::uuid AND country = ${country}
+          )
+          AND le.created_at >= ${from} AND le.created_at < ${to}
+        ORDER BY le.created_at DESC
+      `);
+      const kindLabel: Record<string, string> = {
+        STORAGE: "Storage",
+        ONBOARDING: "Receiving / onboarding",
+        RECEIVING_HOLD_FEE: "Receiving hold",
+      };
+      for (const r of rows) {
+        const rejected = r.psn_status === "REJECTED" || r.psn_status === "CANCELLED";
+        const counted = !rejected;
+        items.push({
+          label: r.psn_id ? `PSN ${r.psn_id.slice(0, 8)}` : kindLabel[r.kind] ?? r.kind,
+          kind: kindLabel[r.kind] ?? r.kind,
+          amountCents: Number(r.amount_cents),
+          status: r.psn_status,
+          counted,
+          reason: counted
+            ? null
+            : `PSN ${(r.psn_status ?? "").toLowerCase()} — fee refunded`,
+        });
+      }
+    }
+
+    const includedCents = items.filter((i) => i.counted).reduce((s, i) => s + i.amountCents, 0);
+    const excludedCents = items.filter((i) => !i.counted).reduce((s, i) => s + i.amountCents, 0);
+    return { items, includedCents, excludedCents };
   }
 
   // --- settlements ---------------------------------------------------------

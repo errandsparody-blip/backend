@@ -500,6 +500,9 @@ export class SuperAdminDashboardService {
       LEFT JOIN users u ON u.id = o.packed_by_user_id
       WHERE o.packed_at IS NOT NULL
         AND o.packed_by_user_id IS NOT NULL
+        -- Cancelled / returned orders had their fulfillment fee refunded, so
+        -- they're not real fulfillment income — exclude them from the report.
+        AND o.status NOT IN ('CANCELLED', 'RETURNED')
         AND (${adminId}::uuid IS NULL OR o.packed_by_user_id = ${adminId}::uuid)
         AND (${country}::text IS NULL OR o.ship_country = ${country})
         AND (${from}::timestamp IS NULL OR o.packed_at >= ${from})
@@ -525,6 +528,7 @@ export class SuperAdminDashboardService {
       FROM orders o
       WHERE o.packed_at IS NOT NULL
         AND o.packed_by_user_id IS NOT NULL
+        AND o.status NOT IN ('CANCELLED', 'RETURNED')
         AND (${adminId}::uuid IS NULL OR o.packed_by_user_id = ${adminId}::uuid)
         AND (${country}::text IS NULL OR o.ship_country = ${country})
         AND (${from}::timestamp IS NULL OR o.packed_at >= ${from})
