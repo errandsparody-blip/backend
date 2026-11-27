@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 
+import { AdminPaymentsController } from "./admin-payments.controller";
 import { FlutterwaveProcessor } from "./flutterwave.processor";
 import { PaymentProcessorRegistry } from "./payment-processor.registry";
 import { PayoutAccountController } from "./payout-account.controller";
@@ -10,7 +11,7 @@ import { StripeConnectProcessor } from "./stripe-connect.processor";
 // own credentials from the environment). The registry + payout service are
 // exported so the checkout and webhook modules can use them.
 @Module({
-  controllers: [PayoutAccountController],
+  controllers: [PayoutAccountController, AdminPaymentsController],
   providers: [
     StripeConnectProcessor,
     FlutterwaveProcessor,

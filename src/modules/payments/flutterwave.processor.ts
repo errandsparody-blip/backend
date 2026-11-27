@@ -146,6 +146,43 @@ export class FlutterwaveProcessor extends PaymentProcessor {
     return (data ?? []).map((b) => ({ name: b.name, code: b.code }));
   }
 
+  /**
+   * Read-only connection check used by the admin diagnostics button. Confirms
+   * the secret key is present, whether it's a LIVE or TEST key, whether it
+   * actually authenticates against Flutterwave (a cheap GET /banks call), and
+   * whether the webhook secret hash is set (without it, our webhook handler
+   * rejects every delivery, so live payments would never confirm). Never moves
+   * money.
+   */
+  async healthCheck(): Promise<{
+    keyPresent: boolean;
+    keyMode: "LIVE" | "TEST" | "UNKNOWN";
+    keyAuthenticates: boolean;
+    webhookHashSet: boolean;
+    detail: string | null;
+  }> {
+    const keyPresent = this.secretKey.length > 0;
+    const keyMode: "LIVE" | "TEST" | "UNKNOWN" = !keyPresent
+      ? "UNKNOWN"
+      : /test/i.test(this.secretKey)
+        ? "TEST"
+        : "LIVE";
+    const webhookHashSet = this.secretHash.length > 0;
+    let keyAuthenticates = false;
+    let detail: string | null = null;
+    if (!keyPresent) {
+      detail = "No Flutterwave secret key is configured.";
+    } else {
+      try {
+        await this.listBanks("NG");
+        keyAuthenticates = true;
+      } catch (err) {
+        detail = err instanceof Error ? err.message : "Key did not authenticate.";
+      }
+    }
+    return { keyPresent, keyMode, keyAuthenticates, webhookHashSet, detail };
+  }
+
   // eslint-disable-next-line @typescript-eslint/require-await
   async getAccountStatus(externalAccountId: string): Promise<PayoutAccountSnapshot> {
     // Flutterwave subaccounts have no Stripe-style KYC gate: once created with a
